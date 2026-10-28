@@ -1,5 +1,5 @@
 // Secondary views: accounts, approvals, analytics, settings (general, API keys, webhooks, audit log, platform apps).
-import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, fmtNum, refreshCommon, modal, icon, relTime } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, fmtNum, refreshCommon, modal, icon, relTime } from './core.js';
 import { openComposer } from './composer.js';
 import { formatLocal } from '/assets/shared/time.js';
 import { renderPlatformApps } from './apps.js';
@@ -16,12 +16,7 @@ export async function renderAccounts(root, params = {}) {
   await refreshCommon();
   if (params.select) return renderSelect(root, params.select);
   const refresh = () => renderAccounts(root);
-  const connect = state.providers.map((p) => h('div', { class: 'connect-card', style: { '--pc': PROVIDER_META[p.provider].color } },
-    h('div', { class: 'cc-title' }, avatar({ provider: p.provider, name: PROVIDER_META[p.provider].label }, 30), h('div', {}, h('strong', {}, p.label), h('div', { class: 'muted small' }, p.configured ? 'Ready to connect' : 'Developer app not configured'))),
-    p.configured
-      ? h('a', { class: 'btn primary small', href: `/oauth/${p.provider}/start` }, icon('plus', 14), 'Connect')
-      : h('a', { class: 'btn small', href: `#/settings/apps/${p.app}` }, 'Set up app', icon('chevron-right', 14)),
-    h('details', { class: 'small cc-details' }, h('summary', {}, 'Redirect URI & scopes'), h('code', { class: 'block' }, p.redirect_uri), h('div', { class: 'muted' }, p.scopes.join(', ')))));
+  const connect = connectList(state.providers);
 
   const menuFor = (a) => (e) => dropdown(e.currentTarget, [
     { label: 'Check token', icon: 'refresh', onClick: async () => { const r = await api('POST', `/accounts/${a.id}/check`, {}); toast(r.ok ? 'Token OK' : `Problem: ${r.error}`, r.ok ? 'success' : 'error'); refresh(); } },
@@ -48,8 +43,36 @@ export async function renderAccounts(root, params = {}) {
     pageHeader({ title: 'Accounts', sub: 'Channels, Pages and profiles postlite can publish to.', actions: h('a', { class: 'btn', href: '#/settings/apps' }, icon('apps', 15), 'Platform apps') }),
     h('h2', { class: 'h-section' }, 'Connected', h('span', { class: 'count' }, state.accounts.length)),
     table,
-    h('h2', { class: 'h-section' }, 'Connect a new account'),
-    h('div', { class: 'connect-grid' }, connect));
+    h('h2', { class: 'h-section' }, 'Add an account'),
+    connect);
+}
+
+
+function mark(kind) { const el = h('span', { class: `pmark pm-${kind}` }); el.innerHTML = MARKS[kind]; return el; }
+
+function connectList(providers) {
+  const by = Object.fromEntries(providers.map((p) => [p.provider, p]));
+  const rows = [
+    { kind: 'youtube', name: 'YouTube', desc: 'Videos and Shorts on your channel', opts: [by.youtube] },
+    { kind: 'facebook', name: 'Facebook', desc: 'Posts, Reels and Stories on a Page you manage', opts: [by.facebook] },
+    { kind: 'instagram', name: 'Instagram', desc: 'Posts, carousels, Reels and Stories on a Business or Creator account', opts: [by.instagram, by['instagram-standalone']] },
+  ];
+  const optLabel = (p) => (p.provider === 'instagram' ? 'Through a Facebook Page' : 'With Instagram login');
+  const action = (r) => {
+    const opts = r.opts.filter(Boolean);
+    const ready = opts.filter((p) => p.configured);
+    if (!ready.length) return h('a', { class: 'btn small', href: `#/settings/apps/${opts[0]?.app || ''}` }, 'Set up');
+    if (ready.length === 1) return h('a', { class: 'btn small primary', href: `/oauth/${ready[0].provider}/start` }, 'Connect');
+    return h('button', { class: 'btn small primary', 'aria-haspopup': 'menu', onclick: (e) => dropdown(e.currentTarget, ready.map((p) => ({ label: optLabel(p), href: `/oauth/${p.provider}/start` })), { align: 'right', width: 230 }) }, 'Connect', icon('chevron-down', 14));
+  };
+  const note = (r) => {
+    const opts = r.opts.filter(Boolean);
+    return opts.some((p) => p.configured) ? null : h('span', { class: 'pl-note' }, 'Needs a developer app');
+  };
+  return h('div', { class: 'plist' }, rows.map((r) => h('div', { class: 'plist-row' },
+    mark(r.kind),
+    h('div', { class: 'plist-text' }, h('div', { class: 'plist-name' }, r.name, note(r)), h('div', { class: 'plist-desc' }, r.desc)),
+    action(r))));
 }
 
 async function renderSelect(root, stateId) {

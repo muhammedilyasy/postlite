@@ -133,6 +133,13 @@ export function confirmDialog(message, { ok = 'Confirm', danger = false, input =
 }
 
 // ---- formatting ----
+// Brand marks (simple monochrome glyphs, used only to identify the platform).
+export const MARKS = {
+  youtube: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M23 7.2a3 3 0 0 0-2.1-2.1C19 4.6 12 4.6 12 4.6s-7 0-8.9.5A3 3 0 0 0 1 7.2 31 31 0 0 0 .5 12a31 31 0 0 0 .5 4.8 3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1 31 31 0 0 0 .5-4.8 31 31 0 0 0-.5-4.8ZM9.7 15.1V8.9L15.5 12l-5.8 3.1Z"/></svg>',
+  facebook: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13.5 21v-7.6h2.6l.4-3h-3V8.5c0-.9.3-1.5 1.5-1.5h1.6V4.3c-.3 0-1.2-.1-2.3-.1-2.3 0-3.9 1.4-3.9 4v2.2H7.8v3h2.6V21h3.1Z"/></svg>',
+  instagram: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" d="M7.5 3h9A4.5 4.5 0 0 1 21 7.5v9a4.5 4.5 0 0 1-4.5 4.5h-9A4.5 4.5 0 0 1 3 16.5v-9A4.5 4.5 0 0 1 7.5 3Z"/><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="17.3" cy="6.7" r="1.1" fill="currentColor"/></svg>',
+};
+
 export const PROVIDER_META = {
   youtube: { label: 'YouTube', short: 'YT', color: '#ff3b3b' },
   facebook: { label: 'Facebook', short: 'FB', color: '#3b82f6' },
@@ -147,7 +154,7 @@ export function avatar(account, size = 28) {
   return h('span', { class: 'avatar', style: { width: `${size}px`, height: `${size}px`, fontSize: `${Math.round(size * 0.42)}px`, '--pc': m.color }, title: `${account.name || account.account_name} · ${m.label}` },
     pic ? h('img', { src: pic, alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : null,
     h('span', { class: 'initial' }, initials),
-    size >= 20 ? h('span', { class: 'badge-p' }, m.short) : null);
+    size >= 20 ? (() => { const b = h('span', { class: 'badge-p' }); b.innerHTML = MARKS[account.provider === 'instagram-standalone' ? 'instagram' : account.provider] || ''; return b; })() : null);
 }
 
 export const STATUS_LABEL = { published: 'Published', scheduled: 'Scheduled', failed: 'Failed', pending_approval: 'Pending approval', draft: 'Draft', publishing: 'Publishing', partially_failed: 'Partially failed', missed: 'Missed' };

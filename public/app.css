@@ -377,7 +377,8 @@ a.kpi-tile:hover { background: var(--surface-2); }
 code.url { word-break: break-all; }
 .avatar { position: relative; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: color-mix(in srgb, var(--pc, #666) 22%, var(--surface-3)); color: var(--text); flex: none; font-weight: 600; }
 .avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
-.avatar .badge-p { position: absolute; right: -3px; bottom: -3px; font: 700 7px/1 var(--font); padding: 2px 2px; border-radius: 3px; background: var(--pc, #666); color: #fff; letter-spacing: .02em; box-shadow: 0 0 0 1.5px var(--surface); }
+.avatar .badge-p { position: absolute; right: -4px; bottom: -4px; width: 15px; height: 15px; display: grid; place-items: center; border-radius: 50%; background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+.avatar .badge-p svg { width: 9px; height: 9px; }
 
 /* ---------- post detail ---------- */
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start; }
@@ -672,3 +673,15 @@ code.url { word-break: break-all; }
   .kt-value { font-size: 22px; }
   .kpi-tile { padding: 12px 14px; }
 }
+
+/* Accounts: add-an-account list */
+.plist { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; }
+.plist-row { display: flex; align-items: center; gap: 14px; padding: 14px 16px; }
+.plist-row + .plist-row { border-top: 1px solid var(--border); }
+.plist-text { flex: 1; min-width: 0; }
+.plist-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.plist-desc { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+.pl-note { font-weight: 400; font-size: 12px; color: var(--text-3, var(--text-2)); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.pmark { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 8px; border: 1px solid var(--border); background: var(--bg, transparent); color: var(--text); }
+.pmark svg { width: 18px; height: 18px; }
+@media (max-width: 560px) { .plist-desc { display: none; } }

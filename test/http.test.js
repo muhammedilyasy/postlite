@@ -157,3 +157,20 @@ test('token health check marks revoked accounts', async () => {
   assert.equal(r.ok, false);
   assert.equal((await app.core.integrations.get(id)).status, 'needs_reconnect');
 });
+
+test('app shell: content-hashed asset URLs, import map allowed by CSP hash, modulepreload, immutable ?v= assets', async () => {
+  const s = await app.login();
+  const r = await fetch(`${app.base}/`, { headers: { cookie: s.cookie } });
+  const html = await r.text();
+  const v = /app\.js\?v=([0-9a-f]{12})/.exec(html)[1];
+  const map = /<script type="importmap">([^<]+)<\/script>/.exec(html)[1];
+  assert.equal(JSON.parse(map).imports['/assets/js/core.js'], `/assets/js/core.js?v=${v}`);
+  assert.equal(JSON.parse(map).imports['/assets/shared/time.js'], `/assets/shared/time.js?v=${v}`);
+  const { createHash } = await import('node:crypto');
+  assert.ok(r.headers.get('content-security-policy').includes(`'sha256-${createHash('sha256').update(map).digest('base64')}'`));
+  assert.match(html, /<link rel="modulepreload" href="\/assets\/js\/apps\.js\?v=/);
+  assert.match(html, /app\.css\?v=/);
+  const a = await fetch(`${app.base}/assets/js/core.js?v=${v}`);
+  assert.match(a.headers.get('cache-control'), /immutable/);
+  assert.equal((await fetch(`${app.base}/assets/js/core.js`)).headers.get('cache-control'), 'no-cache');
+});

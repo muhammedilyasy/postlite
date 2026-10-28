@@ -2,6 +2,7 @@
 // and filesystem-backed static files / docs.
 import http from 'node:http';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { ROOT } from '../node/config.js';
@@ -14,6 +15,7 @@ const BASE = { 'x-content-type-options': 'nosniff', 'referrer-policy': 'same-ori
 
 /** Files under the repo root (public/, docs/, src/shared/), with ETag revalidation. */
 export function nodeFiles(root = ROOT) {
+  let shellInfo = null;
   const resolve = (rel) => {
     const f = path.join(root, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
     return f.startsWith(root) ? f : null;
@@ -25,7 +27,8 @@ export function nodeFiles(root = ROOT) {
       try { st = file && fs.statSync(file); } catch {}
       if (!st || !st.isFile()) return new Response('Not found', { status: 404, headers: { ...BASE, 'content-type': 'text/plain' } });
       const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
-      const headers = { ...BASE, etag, 'cache-control': file.endsWith('.woff2') ? 'public, max-age=31536000, immutable' : 'no-cache', ...(csp ? { 'content-security-policy': csp } : {}) };
+      const versioned = /[?&]v=[0-9a-f]{8,}/.test(new URL(req.url).search);
+      const headers = { ...BASE, etag, 'cache-control': file.endsWith('.woff2') || versioned ? 'public, max-age=31536000, immutable' : 'no-cache', ...(csp ? { 'content-security-policy': csp } : {}) };
       if (!csp && req.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
       return new Response(req.method === 'HEAD' ? null : Readable.toWeb(fs.createReadStream(file)), { status: 200, headers: { ...headers, 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'content-length': String(st.size) } });
     },
@@ -37,6 +40,21 @@ export function nodeFiles(root = ROOT) {
       const d = resolve(dir);
       try { return d ? fs.readdirSync(d) : []; } catch { return []; }
     },
+    /** Content hash of the UI code + module URLs for the app shell (import map / modulepreload). */
+    async shellInfo() {
+      if (shellInfo) return shellInfo;
+      const jsDir = path.join(root, 'public', 'js');
+      const sharedDir = path.join(root, 'src', 'shared');
+      const mods = fs.readdirSync(jsDir).filter((f) => f.endsWith('.js') && f !== 'theme.js').map((f) => [`/assets/js/${f}`, path.join(jsDir, f)]);
+      const shared = fs.readdirSync(sharedDir).filter((f) => f.endsWith('.js')).map((f) => [`/assets/shared/${f}`, path.join(sharedDir, f)]);
+      const all = [...mods, ...shared, ['/assets/app.css', path.join(root, 'public', 'app.css')], ['/assets/js/theme.js', path.join(jsDir, 'theme.js')]];
+      const hash = crypto.createHash('sha256');
+      for (const [, f] of all) hash.update(fs.readFileSync(f));
+      shellInfo = { v: hash.digest('hex').slice(0, 12), modules: mods.map(([u]) => u), shared: shared.map(([u]) => u) };
+      return shellInfo;
+    },
+    /** Node: same path + ?v=<hash>, served with immutable caching. */
+    versioned: (url, v) => `${url}?v=${v}`,
   };
 }
 

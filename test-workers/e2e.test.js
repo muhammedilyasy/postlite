@@ -66,7 +66,20 @@ test('health, static assets from the assets binding, password login (PBKDF2) on 
   assert.equal(session.info.runtime, 'workers');
   const page = await fetch(`${w.base}/`, { headers: { cookie: session.cookie } });
   assert.equal(page.status, 200);
-  assert.match(page.headers.get('content-security-policy'), /r2\.cloudflarestorage\.com/);
+  const csp = page.headers.get('content-security-policy');
+  assert.match(csp, /r2\.cloudflarestorage\.com/);
+  // app shell: build-time content hash, import map (CSP-hashed), modulepreload, immutable /assets/v/<hash>/
+  const html = await page.text();
+  const v = /\/assets\/v\/([0-9a-f]{12})\/js\/app\.js/.exec(html)[1];
+  const map = /<script type="importmap">([^<]+)<\/script>/.exec(html)[1];
+  assert.equal(JSON.parse(map).imports['/assets/shared/time.js'], `/assets/v/${v}/shared/time.js`);
+  const { createHash } = await import('node:crypto');
+  assert.ok(csp.includes(`'sha256-${createHash('sha256').update(map).digest('base64')}'`));
+  assert.match(html, /rel="modulepreload" href="\/assets\/v\//);
+  const hashed = await fetch(`${w.base}/assets/v/${v}/js/core.js`);
+  assert.equal(hashed.status, 200);
+  assert.match(hashed.headers.get('cache-control'), /immutable/);
+  assert.match(await hashed.text(), /MARKS/);
   const guide = await fetch(`${w.base}/docs/setup/cloudflare-workers`);
   assert.equal(guide.status, 200);
   assert.match(await guide.text(), /Cloudflare Workers/);

@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, '.cf-assets');
@@ -33,7 +34,25 @@ for (const f of INTERNAL_HTML) fs.copyFileSync(path.join(pub, f), path.join(OUT,
 for (const f of ['llms.txt', 'agent-guide.md']) fs.copyFileSync(path.join(ROOT, 'docs', f), path.join(OUT, '_internal', 'docs', f));
 const guides = fs.readdirSync(path.join(ROOT, 'docs', 'setup')).filter((f) => f.endsWith('.md')).sort();
 for (const f of guides) fs.copyFileSync(path.join(ROOT, 'docs', 'setup', f), path.join(OUT, '_internal', 'docs', 'setup', f));
-fs.writeFileSync(path.join(OUT, '_internal', 'manifest.json'), JSON.stringify({ 'docs/setup': guides }));
+// App-shell version: same content hash as the Node server (public/js modules, src/shared, app.css, theme.js).
+const jsDir = path.join(pub, 'js');
+const sharedDir = path.join(ROOT, 'src', 'shared');
+const mods = fs.readdirSync(jsDir).filter((f) => f.endsWith('.js') && f !== 'theme.js');
+const shared = fs.readdirSync(sharedDir).filter((f) => f.endsWith('.js'));
+const hash = crypto.createHash('sha256');
+for (const f of mods) hash.update(fs.readFileSync(path.join(jsDir, f)));
+for (const f of shared) hash.update(fs.readFileSync(path.join(sharedDir, f)));
+hash.update(fs.readFileSync(path.join(pub, 'app.css')));
+hash.update(fs.readFileSync(path.join(jsDir, 'theme.js')));
+const v = hash.digest('hex').slice(0, 12);
+// Immutable, content-addressed copies: /assets/v/<hash>/{js,shared,fonts,...}. Relative imports resolve inside it.
+const vdir = path.join(OUT, 'assets', 'v', v);
+copyDir(pub, vdir, (f) => !(path.dirname(f) === pub && INTERNAL_HTML.has(path.basename(f))));
+copyDir(sharedDir, path.join(vdir, 'shared'), (f) => f.endsWith('.js'));
+fs.writeFileSync(path.join(OUT, '_internal', 'manifest.json'), JSON.stringify({
+  'docs/setup': guides,
+  shell: { v, modules: mods.map((f) => `/assets/js/${f}`), shared: shared.map((f) => `/assets/shared/${f}`) },
+}));
 // Same security headers the Node server sends for /assets/* (Workers static assets `_headers` file).
 fs.writeFileSync(path.join(OUT, '_headers'), [
   '/assets/*',
@@ -41,6 +60,8 @@ fs.writeFileSync(path.join(OUT, '_headers'), [
   '  Referrer-Policy: same-origin',
   '  X-Frame-Options: DENY',
   '/assets/fonts/*',
+  '  Cache-Control: public, max-age=31536000, immutable',
+  '/assets/v/*',
   '  Cache-Control: public, max-age=31536000, immutable',
   '',
 ].join('\n'));

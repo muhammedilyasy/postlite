@@ -11,7 +11,7 @@ import { createMcp } from '../mcp.js';
 import { SESSION_PRINCIPAL } from '../apikeys.js';
 import { renderMarkdown } from '../markdown.js';
 import { createAccessVerifier, validateAuthConfig, AccessError } from '../access.js';
-import { fromUtf8 } from '../bytes.js';
+import { fromUtf8, toBase64 } from '../bytes.js';
 
 const SESSION_DAYS = 14;
 
@@ -58,6 +58,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
  * @param {object} core
  * @param {{files:{serve:Function, text:Function, list:Function}, version:string}} opts
  *   files.serve(request, relPath, {csp}) → Response   files.text(relPath) → string|null   files.list(dir) → names
+ *   files.shellInfo() → {v, modules, shared}   files.versioned(url, v) → content-hashed asset URL
  */
 export function createApp(core, { files, version }) {
   const { cfg, db, log } = core;
@@ -257,6 +258,31 @@ export function createApp(core, { files, version }) {
     }
     const page = `${pageHead(title || 'Setup guide')}<body class="doc-page"><header class="doc-top"><a class="brand" href="/">${LOGO}<span>postlite</span></a><nav class="crumbs" aria-label="Breadcrumb"><a href="/docs/setup/">Docs</a><span class="sep">/</span><span>${esc(title || base)}</span></nav><a class="btn small" href="/#/settings/apps">Platform apps</a><a class="btn small primary" href="/">Dashboard</a></header><div class="doc-layout"><aside class="doc-side"><div class="side-label">Setup guides</div>${navItems.join('')}<div class="side-label">For agents</div><a href="/api/v1/openapi.json">OpenAPI spec</a><a href="/llms.txt">llms.txt</a><a href="/AGENTS.md">Agent guide</a></aside><article class="doc">${html}</article></div></body></html>`;
     return send(200, page, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP, 'cache-control': 'no-cache', ...extraHeaders });
+  }
+
+  // ---- App shell: content-hashed asset URLs + import map + modulepreload, so a refresh needs no
+  // revalidation round trips and the module graph loads in one parallel batch (matters behind a tunnel /
+  // high-RTT links). Node: /assets/x.js?v=<hash>; Workers: /assets/v/<hash>/x.js (hash from the build).
+  let shellCache = null;
+  async function appShell() {
+    if (shellCache) return shellCache;
+    const info = await files.shellInfo();
+    const ver = (u) => files.versioned(u, info.v);
+    const imports = Object.fromEntries([...info.modules, ...info.shared].map((u) => [u, ver(u)]));
+    const importmap = JSON.stringify({ imports });
+    const ihash = toBase64(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(importmap))));
+    const preload = info.modules.map((u) => `<link rel="modulepreload" href="${ver(u)}">`).join('');
+    const html = String((await files.text('public/index.html')) || '')
+      .replace('href="/assets/app.css"', `href="${ver('/assets/app.css')}"`)
+      .replace('src="/assets/js/theme.js"', `src="${ver('/assets/js/theme.js')}"`)
+      .replace('<script type="module" src="/assets/js/app.js"></script>', `<script type="importmap">${importmap}</script>${preload}<script type="module" src="${ver('/assets/js/app.js')}"></script>`);
+    const csp = CSP.replace("script-src 'self'", `script-src 'self' 'sha256-${ihash}'`);
+    shellCache = { html, csp, v: info.v };
+    return shellCache;
+  }
+  async function sendShell(extra = {}) {
+    const sh = await appShell();
+    return send(200, sh.html, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': sh.csp, 'cache-control': 'no-store', ...extra });
   }
 
   const agentGuide = async (req) => {
@@ -482,9 +508,9 @@ export function createApp(core, { files, version }) {
       if (ui instanceof Response) return ui;
       if (ui.setCookie) {
         // first request after Access sign-in: set the session cookie, then serve the shell
-        return send(200, (await files.text('public/index.html')) || '', htmlHeaders({ 'set-cookie': ui.setCookie }));
+        return sendShell({ 'set-cookie': ui.setCookie });
       }
-      return files.serve(req, 'public/index.html', { csp: CSP });
+      return sendShell();
     }
     if (accessMode && pageGet) {
       // unknown paths: don't reveal anything to callers without a valid Access identity

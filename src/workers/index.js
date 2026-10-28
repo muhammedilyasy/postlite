@@ -34,6 +34,13 @@ function assetFiles(env) {
     const r = await env.ASSETS.fetch(new Request(`${INTERNAL}${p}`, { headers }));
     return r.status === 404 ? null : r;
   };
+  const loadManifest = async () => {
+    if (!manifest) {
+      const r = env.ASSETS ? await env.ASSETS.fetch(new Request(`${INTERNAL}/_internal/manifest.json`)) : null;
+      manifest = r && r.ok ? await r.json() : {};
+    }
+    return manifest;
+  };
   return {
     async serve(req, rel, { csp = null } = {}) {
       const inm = req.headers.get('if-none-match');
@@ -52,12 +59,12 @@ function assetFiles(env) {
       return t;
     },
     async list(dir) {
-      if (!manifest) {
-        const r = env.ASSETS ? await env.ASSETS.fetch(new Request(`${INTERNAL}/_internal/manifest.json`)) : null;
-        manifest = r && r.ok ? await r.json() : {};
-      }
-      return manifest[dir] || [];
+      return (await loadManifest())[dir] || [];
     },
+    /** Hash + module list computed at build time by scripts/cf-assets.mjs. */
+    async shellInfo() { return (await loadManifest()).shell; },
+    /** Workers: hashed copies under /assets/v/<hash>/ (immutable via _headers, served without the Worker). */
+    versioned: (url, v) => `/assets/v/${v}/${url.slice('/assets/'.length)}`,
   };
 }
 

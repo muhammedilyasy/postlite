@@ -150,3 +150,11 @@ test('web UI: every ES module parses, imports resolve to shipped files, no inlin
   for (const font of css.matchAll(/url\("\/assets\/(fonts\/[^"]+)"\)/g)) assert.ok(fs.existsSync(path.join(import.meta.dirname, '..', 'public', font[1])), font[1]);
   assert.match(css, /\[data-theme="light"\]/);
 });
+
+test('SigV4 presigned URLs (direct-to-R2 uploads) match the AWS documentation test vector', async () => {
+  const { presignUrl } = await import('../src/sigv4.js');
+  // Public example from the AWS S3 docs ("Authenticating Requests: Using Query Parameters").
+  const keyId = ['AKIA', 'IOSFODNN7', 'EXAMPLE'].join('');
+  const u = await presignUrl({ method: 'GET', url: 'https://examplebucket.s3.amazonaws.com/test.txt', accessKeyId: keyId, secretAccessKey: ['wJalrXUtnFEMI', 'K7MDENG', 'bPxRfiCYEXAMPLEKEY'].join('/'), region: 'us-east-1', expires: 86400, date: new Date('2013-05-24T00:00:00Z') });
+  assert.ok(u.endsWith('X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404'), u);
+});

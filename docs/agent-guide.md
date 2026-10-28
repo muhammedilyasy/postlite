@@ -34,7 +34,7 @@ Each key has a rate limit (default 120 req/min → HTTP 429 + `Retry-After`). Ev
 1. `whoami` — learn your scopes, approval mode, timezone.
 2. `list_accounts` — ids + status. If `needs_reconnect`, call `get_connect_url` (admin) and ask the human to open the link.
 3. `list_platforms` — rules, limits, and the JSON schema of `targets[].settings` per platform.
-4. Media: `upload_media_from_url` (public URL), `upload_media_base64` (≤ 25 MB), `upload_media_from_path` (stdio only), or `POST /api/v1/media` raw body. Check the returned `width`, `height`, `duration`.
+4. Media: `upload_media_from_url` (public URL), `upload_media_base64` (≤ 25 MB on Node, ≤ 8 MB on Cloudflare Workers), `upload_media_from_path` (stdio only), `POST /api/v1/media` raw body (≤ 100 MB on Workers), or for big files the resumable `create_upload` → PUT each part to its URL (keep the ETag) → `complete_upload`. Check the returned `width`, `height`, `duration`. `whoami` tells you the `runtime` (`node` or `workers`).
 5. `validate_post` — dry run; returns per-account `errors`, `warnings`, and `will_publish` (e.g. "Reel", "Carousel (3)").
 6. `create_post` with `mode`: `"draft"`, `"schedule"` + `publish_at`, `"next_slot"` (first free weekly posting slot), or `"now"`.
 7. `get_post` — poll status; targets show `published_url`, `error`, `warning` and an event log.
@@ -77,7 +77,10 @@ Events: `post.published`, `post.failed`, `post.pending_approval`, `account.needs
 See `examples/agents/` for Claude Desktop, Claude Code, Cursor and Hermes.
 
 ## For agents editing this repo
-- No build step, no runtime dependencies. Node ≥ 22.13 (`node:sqlite`).
-- `npm test` runs everything against fake providers (`test/fake/server.js`); never call real Meta/Google APIs in tests.
+- No UI build step, no runtime dependencies. Two deployment targets from one core: Node ≥ 22.13 (`node:sqlite`, disk) and Cloudflare Workers (D1, R2, Cron; `wrangler.jsonc`).
+- `src/` is runtime-agnostic. Only `src/node/` may import `node:*`, and only `src/workers/` touches Workers bindings. Use WebCrypto, `Uint8Array`, `fetch`, `Request`/`Response` and the async `db` (`get/all/run/batch`, ≤ 100 bound params per query) and `storage` interfaces.
+- Schema: add `migrations/NNNN_name.sql`. The Node migrator and `wrangler d1 migrations apply` both use it.
+- Long work must be resumable on Workers (free plan: 10 ms CPU, 50 subrequests, 50 D1 queries per invocation). Check `budget.has(...)` between steps, persist progress and return; the next cron tick continues.
+- `npm test` runs the Node suite against fake providers (`test/fake/server.js`); never call real Meta/Google APIs in tests. `npm run test:workers` runs the real Worker in workerd (local D1/R2) against the same fakes; `CPU_BENCH=1` prints CPU per invocation.
 - New operations go in `src/api/operations.js` (they appear automatically in REST, OpenAPI, MCP and CLI).
 - New platforms implement the provider shape documented in `src/providers/index.js`.

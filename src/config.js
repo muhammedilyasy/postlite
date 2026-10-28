@@ -99,6 +99,7 @@ export function getConfig(env = {}, { platform = 'node' } = {}) {
     allowPrivateMediaUrls: E('ALLOW_PRIVATE_MEDIA_URLS') === '1',
     webhooks: { backoffMs: num(E('WEBHOOK_BACKOFF_MS'), 30000), maxAttempts: num(E('WEBHOOK_MAX_ATTEMPTS'), 6) },
     youtubeChunkBytes: num(E('YOUTUBE_CHUNK_BYTES'), (workers ? 64 : 8) * 1024 * 1024),
+    youtubeMaxBytesPerStep: num(E('YOUTUBE_MAX_BYTES_PER_STEP'), workers ? 512 * 1024 * 1024 : 0), // 0 = unlimited
     fetchTimeoutMs: num(E('FETCH_TIMEOUT_MS'), 120000),
   };
 }

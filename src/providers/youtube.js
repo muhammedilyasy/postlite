@@ -174,8 +174,11 @@ export const youtube = {
         let uploaded = p.uploaded;
         const chunk = Math.max(256 * 1024, Math.floor(cfg.youtubeChunkBytes / (256 * 1024)) * 256 * 1024);
         const started = Date.now();
+        const startedAt = uploaded;
         const video = ctx.post.media[0];
         while (uploaded < data.size) {
+          // Workers: cap the bytes pushed per invocation (YOUTUBE_MAX_BYTES_PER_STEP); the session URI is persisted.
+          if (cfg.youtubeMaxBytesPerStep && uploaded - startedAt >= cfg.youtubeMaxBytesPerStep) return { status: 'pending', delayMs: 0, data: { ...data, uploaded } };
           if (Date.now() - started > (cfg.scheduler?.stepBudgetMs ?? 4 * 60000)) return { status: 'pending', delayMs: 0, data: { ...data, uploaded } };
           // Workers: stop between chunks when the invocation's subrequest budget runs low; the next tick resumes.
           if (ctx.budgetLow?.()) return { status: 'pending', delayMs: 0, data: { ...data, uploaded } };

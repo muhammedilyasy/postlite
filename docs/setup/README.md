@@ -17,6 +17,9 @@ The credentials are encrypted in postlite's database. You don't need to edit `.e
 **Sign-in:** to protect the web UI with Cloudflare Zero Trust Access (email one-time PIN) instead of the admin
 password, follow [cloudflare-access.md](cloudflare-access.md).
 
+**Hosting on Cloudflare:** to run postlite entirely on Cloudflare's free plan (Workers + D1 + R2 + Cron) instead
+of a Node server, follow [cloudflare-workers.md](cloudflare-workers.md).
+
 You only need the platforms you actually use. For Instagram, choose **one** of the two options: link
 your Instagram professional account to a Facebook Page and use the Meta app, or use Instagram Login
 without a Page.

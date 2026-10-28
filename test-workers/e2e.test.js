@@ -6,19 +6,20 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { startWorker, hasWrangler, sleep, cpuSummary } from './harness.js';
+import { startWorker, startBench, hasWrangler, sleep, cpuSummary } from './harness.js';
 import { makeJpeg, makeMp4 } from '../test/helpers.js';
 import { hashPasswordPbkdf2 } from '../src/crypto.js';
 import { verifySignature } from '../src/webhooks.js';
 
 const PASSWORD = 'workers correct horse battery';
-const skip = !hasWrangler() && 'wrangler devDependency not installed (npm install)';
+const BENCH = !!process.env.CPU_BENCH; // CPU_BENCH=1: run the same tests in-process to measure Worker CPU
+const skip = !BENCH && !hasWrangler() && 'wrangler devDependency not installed (npm install)';
 let w, session, admin, agent;
 const acct = {};
 
 before(async () => {
   if (skip) return;
-  w = await startWorker({
+  w = await (BENCH ? startBench : startWorker)({
     vars: {
       ADMIN_PASSWORD_HASH: await hashPasswordPbkdf2(PASSWORD),
       UPLOAD_PART_MB: '5',
@@ -35,7 +36,7 @@ after(async () => {
   const summary = cpuSummary(w.cpu.samples);
   const out = path.join(process.env.CPU_REPORT_DIR || w.dir, '..', 'postlite-workers-cpu.json');
   fs.writeFileSync(out, JSON.stringify({ samples: w.cpu.samples, summary }, null, 2));
-  console.log(`\nCPU per invocation (ms, V8 inspector samples):\n${summary.map((s) => `  ${s.label.padEnd(28)} n=${String(s.n).padStart(3)} median=${s.median} p95=${s.p95} max=${s.max}`).join('\n')}\n  report: ${out}`);
+  console.log(`\nCPU per invocation (ms; ${BENCH ? 'Worker code in-process, D1/R2 time excluded' : 'workerd: V8 inspector samples + process CPU (upper bounds)'}):\n${summary.map((s) => `  ${s.label.padEnd(38)} n=${String(s.n).padStart(3)} median=${s.median} p95=${s.p95} max=${s.max}${s.js.max !== undefined ? ` | isolate js median=${s.js.median} max=${s.js.max}` : ''}${s.proc.max !== undefined ? ` | workerd proc median=${s.proc.median} max=${s.proc.max}` : ''}`).join('\n')}\n  report: ${out}`);
   await w.stop();
 });
 
@@ -263,7 +264,7 @@ test('MCP over Streamable HTTP with an approval-mode key; human approval; cron p
 
 test('REST parity: OpenAPI, platforms, calendar, base64 cap, audit log', { skip }, async () => {
   const spec = await (await fetch(`${w.base}/api/v1/openapi.json`)).json();
-  assert.ok(spec.paths['/media/uploads']);
+  assert.ok(spec.paths['/api/v1/media/uploads']);
   const plats = await w.api('GET', '/platforms', { key: admin, label: 'REST list_platforms' });
   assert.equal(plats.json.platforms.length, 4);
   const cal = await w.api('GET', '/calendar', { key: admin, label: 'REST get_calendar' });

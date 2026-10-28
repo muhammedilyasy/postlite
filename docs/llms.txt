@@ -3,7 +3,7 @@
 > Agents: read `/AGENTS.md` (workflows; docs/agent-guide.md in the repo) and `/api/v1/openapi.json` (full API). MCP endpoint: `/mcp` (Streamable HTTP, `Authorization: Bearer <API key>`), or stdio via `node bin/postlite.js mcp`.
 > If the instance sits behind Cloudflare Access, `/AGENTS.md` and `/llms.txt` need a browser login; use the public mirrors `/api/v1/agent-guide.md` and `/api/v1/llms.txt` instead.
 
-postlite is a lightweight, self-hosted social media scheduler for YouTube, Facebook Pages and Instagram (via Facebook Login or Instagram Login). It runs as one Node.js process with SQLite. Everything in the web UI is also available through the REST API, the MCP server and the CLI.
+postlite is a lightweight, self-hosted social media scheduler for YouTube, Facebook Pages and Instagram (via Facebook Login or Instagram Login). It runs as one Node.js process with SQLite, or on Cloudflare Workers (D1 + R2 + Cron); the API is identical (`whoami` returns `runtime`). Everything in the web UI is also available through the REST API, the MCP server and the CLI.
 
 ## Concepts
 - **account**: a connected YouTube channel, Facebook Page or Instagram professional account. Get ids from `list_accounts`. Status `needs_reconnect` means a human must re-authorize (`get_connect_url`).
@@ -17,6 +17,7 @@ postlite is a lightweight, self-hosted social media scheduler for YouTube, Faceb
 - list_accounts, get_account, check_account, get_connect_url, disconnect_account
 - list_platform_apps, set_platform_app, clear_platform_app, test_platform_app (admin; developer-app credentials, secrets are write-only; human setup guides at /docs/setup/)
 - list_media, get_media, upload_media_from_url, upload_media_base64, delete_media (stdio only: upload_media_from_path; REST: POST /api/v1/media raw body)
+- create_upload, get_upload, complete_upload, abort_upload: resumable multipart upload for big files (PUT each byte range to its part URL, keep the ETag, then complete). Use this on Cloudflare Workers for anything over ~90 MB
 - list_posts, get_post, get_calendar, validate_post, create_post, update_post, schedule_post, reschedule_post, publish_post_now, retry_post, duplicate_post, delete_post, delete_post_target
 - list_pending_approvals, approve_post, reject_post
 - get_analytics_overview, get_account_analytics, get_top_posts, get_post_metrics, sync_analytics (REST CSV: GET /api/v1/analytics/export.csv)

@@ -55,8 +55,73 @@ export async function refreshCommon() {
   state.providers = prov.providers;
 }
 
+/** XHR PUT of one part; resolves with its ETag (header for direct-to-R2, JSON for the proxy route). */
+function putPart(url, blob, onProgress, proxied) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    if (proxied) xhr.setRequestHeader('x-csrf-token', CSRF);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded);
+    xhr.onload = () => {
+      let j = {};
+      try { j = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(j.etag || xhr.getResponseHeader('etag'));
+      else reject(new ApiError(xhr.status, j.error?.message || `Upload failed (${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new ApiError(0, 'Network error during upload'));
+    xhr.send(blob);
+  });
+}
+
+/**
+ * Large files: resumable multipart session (POST /media/uploads → PUT parts, 3 in parallel → complete).
+ * On Cloudflare Workers this keeps every request under the 100 MB body limit, and with R2 API
+ * credentials configured the parts go straight to R2 via presigned URLs.
+ */
+async function uploadMultipart(file, onProgress) {
+  const { upload } = await api('POST', '/media/uploads', { filename: file.name, size: file.size });
+  const loaded = new Map();
+  const report = () => onProgress?.([...loaded.values()].reduce((a, b) => a + b, 0) / file.size);
+  const parts = [];
+  let next = 0;
+  const all = [...upload.parts];
+  while (all.length < upload.part_count) { // part URLs come in pages of 100
+    const more = await api('GET', `/media/uploads/${upload.upload_id}?from=${all.length + 1}`);
+    if (!more.upload.parts.length) break;
+    all.push(...more.upload.parts);
+  }
+  const worker = async () => {
+    while (next < all.length) {
+      const p = all[next++];
+      const start = (p.part_number - 1) * upload.part_size;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const etag = await putPart(p.url, file.slice(start, start + p.size), (n) => { loaded.set(p.part_number, n); report(); }, upload.mode !== 'presigned');
+          parts.push({ part_number: p.part_number, etag });
+          break;
+        } catch (e) {
+          if (attempt >= 3 || (e.status >= 400 && e.status < 500)) throw e;
+          await new Promise((r) => setTimeout(r, 1000 * attempt));
+        }
+      }
+    }
+  };
+  try {
+    await Promise.all([worker(), worker(), worker()]);
+  } catch (e) {
+    api('DELETE', `/media/uploads/${upload.upload_id}`).catch(() => {});
+    throw e;
+  }
+  parts.sort((a, b) => a.part_number - b.part_number);
+  const done = await api('POST', `/media/uploads/${upload.upload_id}/complete`, { parts });
+  return done.media;
+}
+
+const MULTIPART_OVER = 90 * 1024 * 1024;
+
 /** Upload with progress via XHR (fetch has no upload progress). */
 export function uploadFile(file, onProgress) {
+  if (file.size > MULTIPART_OVER) return uploadMultipart(file, onProgress);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/v1/media?filename=${encodeURIComponent(file.name)}`);

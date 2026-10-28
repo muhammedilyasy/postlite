@@ -9,7 +9,7 @@ import { createD1 } from './d1.js';
 import { createR2Storage } from './r2.js';
 import { createMeter, useMeter } from '../meter.js';
 import { hashPasswordPbkdf2, verifyPasswordPbkdf2 } from '../crypto.js';
-import pkg from '../../package.json';
+import pkg from '../../package.json' with { type: 'json' };
 
 const VERSION = pkg.version;
 const INTERNAL = 'https://assets.invalid';

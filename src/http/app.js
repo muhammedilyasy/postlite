@@ -73,6 +73,8 @@ export function createApp(core, { files, version }) {
   const mcp = createMcp(core, { via: 'mcp-http', version: VERSION });
   const loginFails = new Map(); // per process (Node) / per isolate (Workers)
   const cookieFlags = `Path=/; HttpOnly; SameSite=Lax${cfg.secureCookies ? '; Secure' : ''}`;
+  // JSON bodies carrying base64 media: reject oversize bodies before parsing (parsing is CPU-heavy on Workers)
+  const b64Limit = Math.max(2 * 1024 * 1024, Math.ceil((cfg.base64MaxMb * 1024 * 1024 * 4) / 3) + 1024 * 1024);
   const publicOrigin = () => (cfg.publicUrl ? new URL(cfg.publicUrl).origin : '');
   const logoutTarget = () => (accessMode ? `${publicOrigin()}/cdn-cgi/access/logout` : '/login');
   // Session ids are stored only as (keyed) hashes; SESSION_SECRET adds a server-side pepper.
@@ -357,7 +359,7 @@ export function createApp(core, { files, version }) {
         let input = {};
         if (req.method === 'GET' || req.method === 'DELETE') input = coerceQuery(r.op.input, Object.fromEntries(url.searchParams));
         else {
-          const raw = await readText(req, r.op.name === 'upload_media_base64' ? 40 * 1024 * 1024 : 2 * 1024 * 1024);
+          const raw = await readText(req, r.op.name === 'upload_media_base64' ? b64Limit : 2 * 1024 * 1024);
           if (raw.length) {
             try { input = JSON.parse(raw); } catch { throw new HttpError(400, 'Body must be valid JSON.'); }
             if (!input || typeof input !== 'object' || Array.isArray(input)) throw new HttpError(400, 'Body must be a JSON object.');
@@ -386,7 +388,7 @@ export function createApp(core, { files, version }) {
     if (!rl.ok) return send(429, { jsonrpc: '2.0', id: null, error: { code: -32029, message: `Rate limit exceeded; retry after ${rl.retryAfter}s` } }, { 'retry-after': String(rl.retryAfter) });
     let body;
     try {
-      body = JSON.parse(await readText(req, 40 * 1024 * 1024));
+      body = JSON.parse(await readText(req, b64Limit));
     } catch {
       return send(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
     }

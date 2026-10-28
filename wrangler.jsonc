@@ -20,7 +20,7 @@
     { "binding": "DB", "database_name": "postlite", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [
-    { "binding": "MEDIA" }
+    { "binding": "MEDIA", "bucket_name": "postlite-media" }
   ],
   // Every minute: claim due posts and advance them in small resumable steps, deliver webhooks,
   // continue analytics syncs. One trigger of the 5 allowed on the Free plan.

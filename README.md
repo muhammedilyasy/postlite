@@ -1,7 +1,7 @@
 # postlite
 
 **A lightweight, self-hosted social media scheduler for YouTube, Instagram and Facebook Pages.**
-One Node.js process, one SQLite file, zero runtime dependencies, no Docker. Agent-first: everything the web UI does is available through a REST API, an MCP server and a CLI, so you can run your socials from Claude, ChatGPT, Cursor, Hermes or a shell script.
+Runs as **one Node.js process** (one SQLite file, zero runtime dependencies, no Docker) **or entirely on Cloudflare's free plan** (Workers + D1 + R2 + Cron). Agent-first: everything the web UI does is available through a REST API, an MCP server and a CLI, so you can run your socials from Claude, ChatGPT, Cursor, Hermes or a shell script.
 
 | Dashboard (week) | Posts | Post events |
 |---|---|---|
@@ -10,6 +10,10 @@ One Node.js process, one SQLite file, zero runtime dependencies, no Docker. Agen
 | ![Composer with previews](docs/screenshots/desktop-composer.png) | ![Account analytics](docs/screenshots/desktop-analytics-account.png) | ![Mobile dashboard](docs/screenshots/mobile-dashboard.png) |
 
 More in [`docs/screenshots/`](docs/screenshots/) (dark and light theme, desktop and 390 px mobile).
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/YOUR-GITHUB-USER/postlite)
+
+<!-- Replace YOUR-GITHUB-USER after publishing the repository: Deploy buttons need a public GitHub/GitLab repo. -->
 
 ## Features
 
@@ -35,6 +39,24 @@ Measured on a Linux server with Node 26 (RSS from `ps`), publishing to the bundl
 | After uploads, publishing and an analytics sync | ~104 MB |
 
 No Redis, no Postgres, no Temporal, no Elasticsearch, no Docker.
+
+## Two ways to run it
+
+| | **Node** (VPS, home server) | **Cloudflare Workers** (Free plan) |
+| --- | --- | --- |
+| Setup | `node bin/postlite.js start` behind HTTPS | `npm run cf:deploy` or the Deploy button. [Guide](docs/setup/cloudflare-workers.md) |
+| Database | `node:sqlite` file | D1 (same SQL migrations) |
+| Media | `data/uploads/`, served at `/m/<token>` | R2, streamed by the Worker at `/m/<token>` |
+| Big uploads | Raw streaming POST, or resumable multipart | Resumable multipart (≤ 100 MB per part through the Worker, or presigned direct-to-R2) |
+| Scheduler | In-process, 15 s tick | Cron Trigger every minute, resumable steps within the free CPU and subrequest limits |
+| Publish latency | 0–15 s | 0–60 s |
+| UI, REST, OpenAPI, MCP over HTTP, webhooks, analytics, approval mode, audit log | ✓ | ✓ (identical) |
+| Sign-in | Password (scrypt) or Cloudflare Access | Cloudflare Access (recommended) or password (PBKDF2) |
+| MCP stdio, local CLI | ✓ | Through a local `postlite` pointed at the Worker (`--url/--key`) |
+| Video posters (ffmpeg) | Optional | — (`<video>` preview fallback) |
+| Cost | Your server | $0 on Workers Free + D1 Free + R2 free tier (10 GB) |
+
+Both are built from the same runtime-agnostic core (`src/`) with thin adapters (`src/node/`, `src/workers/`).
 
 ## Quick start (no Docker)
 
@@ -80,6 +102,18 @@ ALLOWED_EMAILS=you@example.com,partner@example.com
 
 The click-by-click dashboard guide is in [docs/setup/cloudflare-access.md](docs/setup/cloudflare-access.md).
 
+### Run on Cloudflare instead
+
+```sh
+npm install && npx wrangler login
+npx wrangler r2 bucket create postlite-media
+npm run cf:deploy                                           # deploy + D1 migrations
+openssl rand -base64 32 | npx wrangler secret put TOKEN_ENC_KEY
+openssl rand -base64 32 | npx wrangler secret put SESSION_SECRET
+```
+
+Then add a custom domain, the Access app and its Bypass paths, and your platform apps. The step-by-step guide covers all of it, with the free-plan limits cited: [docs/setup/cloudflare-workers.md](docs/setup/cloudflare-workers.md).
+
 ### Backups
 
 Everything lives in `data/`: `data/postlite.sqlite` + `data/uploads/`. Run `deploy/backup.sh /path/to/backups` (consistent snapshot via `VACUUM INTO`, safe while running) or stop the service and copy `data/`. Keep `TOKEN_ENC_KEY` with your backups — stored OAuth tokens are encrypted with it.
@@ -99,6 +133,7 @@ If a platform isn't configured, its **Connect** button on the Accounts page link
 - [Instagram without a Facebook Page (Instagram Login)](docs/setup/instagram-standalone.md)
 - [YouTube (Google Cloud project + OAuth client)](docs/setup/youtube.md)
 - [Sign-in with Cloudflare Zero Trust Access (email one-time PIN)](docs/setup/cloudflare-access.md)
+- [Run on Cloudflare Workers (Free plan): D1, R2, Cron, Access](docs/setup/cloudflare-workers.md)
 
 Redirect URIs are always `PUBLIC_URL/oauth/<provider>/callback`:
 
@@ -129,19 +164,22 @@ Key gotchas (details in the guides):
 
 - REST: `https://social.example.com/api/v1/...` — `GET /api/v1/openapi.json` (no auth) for the full spec.
 - MCP: `https://social.example.com/mcp` with `Authorization: Bearer <key>` (Streamable HTTP), or `node bin/postlite.js mcp` (stdio; with `POSTLITE_URL` set it bridges to a remote server and lets the agent upload local files).
-- CLI: `POSTLITE_URL=… POSTLITE_API_KEY=… node bin/postlite.js posts create --content "Hi" --accounts <id> --next-slot`.
+- CLI: `POSTLITE_URL=… POSTLITE_API_KEY=… node bin/postlite.js posts create --content "Hi" --accounts <id> --next-slot` (or `--url … --key …`). This works against Node and Workers instances. `media upload` uses resumable multipart sessions.
 - Docs for agents: [`docs/agent-guide.md`](docs/agent-guide.md) (served at `/AGENTS.md` and `/api/v1/agent-guide.md`) and `/llms.txt` (also `/api/v1/llms.txt`, which stays public behind Cloudflare Access). Client configs: [`examples/agents/`](examples/agents/).
 
 Create keys in **Settings → API keys** or `node bin/postlite.js keys create --name "Claude"`. New keys default to **approval mode**.
 
 ## How publishing works
 
-Each post target becomes a job. The scheduler (default tick 15 s) claims due jobs with an atomic conditional `UPDATE` inside `BEGIN IMMEDIATE`, then walks a provider state machine — `start → check (poll) → finalize` — persisting each phase result before the next platform call. Irreversible calls (Facebook feed/reel/story publish, Instagram `media_publish`) are marked *in flight* first; if the process dies mid-call, recovery asks the platform (Instagram container status, YouTube upload-session probe) and only fails with "check before retrying" when the platform cannot tell (Facebook). Transient errors (429/5xx/rate limits) retry with exponential backoff (3 attempts by default); permanent errors fail immediately with a readable message; expired/revoked tokens trigger a refresh (YouTube, Instagram Login) or mark the account *needs reconnect*. On boot, overdue posts within `MISSED_GRACE_MINUTES` (default 6 h) publish; older ones are marked *missed* so nothing surprises you days later.
+Each post target becomes a job. The scheduler (Node: in-process tick every 15 s; Workers: a Cron Trigger every minute) claims due jobs with an atomic conditional `UPDATE … RETURNING`, then walks a provider state machine — `start → check (poll) → finalize` — persisting each phase result before the next platform call. Irreversible calls (Facebook feed/reel/story publish, Instagram `media_publish`) are marked *in flight* first; if the process dies mid-call, recovery asks the platform (Instagram container status, YouTube upload-session probe) and only fails with "check before retrying" when the platform cannot tell (Facebook). Transient errors (429/5xx/rate limits) retry with exponential backoff (3 attempts by default); permanent errors fail immediately with a readable message; expired/revoked tokens trigger a refresh (YouTube, Instagram Login) or mark the account *needs reconnect*. On boot, overdue posts within `MISSED_GRACE_MINUTES` (default 6 h) publish; older ones are marked *missed* so nothing surprises you days later.
 
 ## Development
 
 ```sh
-npm test       # node:test — unit + integration against local fake Meta/Google servers (~10 s)
+npm test                 # Node: node:test unit + integration against local fake Meta/Google servers
+npm install              # dev dependency for the Workers path only (wrangler)
+npm run test:workers     # Workers: the real Worker in workerd (wrangler dev) with local D1 + R2, cron-driven, same fakes
+CPU_BENCH=1 npm run test:workers   # same scenario, prints the Worker's CPU time per invocation
 node test/fake/server.js --port 4199    # run the fake providers for manual testing (prints env overrides)
 ```
 
@@ -152,7 +190,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Real Meta/Google APIs are **not** exercised by the test suite (fake servers only). Verify with your own app credentials before relying on it.
 - Facebook *Login for Business* configurations (`config_id`) are not used; postlite uses the classic `scope` dialog like Postiz.
 - Instagram accepts only JPEG images via the API; postlite validates instead of converting.
-- Video posters in the UI need `FFMPEG_PATH`; without it a `<video>` preview is shown.
+- Video posters in the UI need `FFMPEG_PATH`; without it, and always on Workers, a `<video>` preview is shown.
+- On Workers, posts publish up to ~60 s after their time (1-minute cron), and API-key rate limits are best-effort (per isolate). See the [Workers caveats](docs/setup/cloudflare-workers.md#caveats).
 - Single admin role; with Cloudflare Access several allowed emails share it (no per-user permissions, no multi-tenant).
 - MCP over HTTP returns JSON responses (no server-initiated SSE stream).
 

@@ -174,3 +174,35 @@ test('app shell: content-hashed asset URLs, import map allowed by CSP hash, modu
   assert.match(a.headers.get('cache-control'), /immutable/);
   assert.equal((await fetch(`${app.base}/assets/js/core.js`)).headers.get('cache-control'), 'no-cache');
 });
+
+test('resumable multipart upload sessions on Node (REST parts + CLI remote upload helper)', async () => {
+  const { makeMp4 } = await import('./helpers.js');
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const key = (await app.api('POST', '/api-keys', { session: await app.login(), body: { name: 'mp', scopes: ['read', 'write'], approval_mode: false } })).json.api_key.key;
+  const mp4 = makeMp4({ width: 720, height: 1280, seconds: 9, mdatBytes: 6 * 1024 * 1024 });
+  const s = await app.api('POST', '/media/uploads', { key, body: { filename: 'clip.mp4', size: mp4.length } });
+  assert.equal(s.status, 200, s.text);
+  const up = s.json.upload;
+  assert.equal(up.mode, 'proxy');
+  assert.equal(up.part_count, 1); // 50 MB default parts
+  const res = await fetch(up.parts[0].url, { method: 'PUT', body: mp4 });
+  const { etag } = await res.json();
+  assert.equal(res.status, 200);
+  const status = await app.api('GET', `/media/uploads/${up.upload_id}`, { key });
+  assert.equal(status.json.upload.state, 'open');
+  const done = await app.api('POST', `/media/uploads/${up.upload_id}/complete`, { key, body: { parts: [{ part_number: 1, etag }] } });
+  assert.equal(done.status, 200, done.text);
+  assert.equal(done.json.media.size, mp4.length);
+  assert.equal(done.json.media.duration, 9);
+  assert.equal((await app.api('POST', `/media/uploads/${up.upload_id}/complete`, { key, body: { parts: [{ part_number: 1, etag }] } })).status, 409);
+  // CLI helper used by `postlite media upload` (local or remote instance, Node or Workers)
+  const { uploadFileRemote } = await import('../src/node/remote.js');
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pl-')), 'v.mp4');
+  fs.writeFileSync(f, mp4);
+  const j = await uploadFileRemote({ url: app.base, key, file: f, filename: 'v.mp4' });
+  assert.equal(j.media.size, mp4.length);
+  const served = await fetch(`${app.base}${j.media.url}`, { headers: { range: 'bytes=0-15' } });
+  assert.equal(served.status, 206);
+});

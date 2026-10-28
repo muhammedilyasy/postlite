@@ -63,11 +63,11 @@ If you upgrade, raise `CF_SUBREQUEST_BUDGET` and `CF_D1_QUERY_BUDGET`. Nothing e
 
 ### Measured CPU time
 
-`npm run test:workers` runs the real Worker bundle in workerd (`wrangler dev`). `CPU_BENCH=1 npm run test:workers` runs the same end-to-end scenario with the same Worker entry in a Node worker thread and measures the Worker's own CPU per invocation. That number excludes time inside D1/R2 shims and network I/O, as Cloudflare's CPU-time definition does. Results on a Linux server, with cold JIT (upper bounds):
+`npm run test:workers` runs the real Worker bundle in workerd (`wrangler dev`). `CPU_BENCH=1 npm run test:workers` runs the same end-to-end scenario with the same Worker entry in a Node worker thread and measures the Worker's own CPU per invocation. That number excludes time inside D1/R2 shims and network I/O, as Cloudflare's CPU-time definition does. Results on a Linux server, with cold JIT (upper bounds). In the last run, 44 of 45 measured invocations used ≤ 7.7 ms:
 
 | Invocation | median | max |
 | --- | --- | --- |
-| Cron tick (publish / webhook / analytics step) | ~3 ms | ~11 ms, plus one ~120 ms outlier (see below) |
+| Cron tick (publish / webhook / analytics step) | ~3.5 ms | ~7.5 ms, plus one 105–120 ms outlier (see below) |
 | `GET /m/<token>` (Meta/Google fetching media) | ~1 ms | ~1 ms |
 | REST/MCP calls (create post, list 50 posts, calendar, tools/list, tools/call) | 1–3 ms | ~5 ms |
 | OAuth callback (token exchange plus account upsert) | ~6 ms | ~8 ms |

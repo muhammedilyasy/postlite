@@ -1,84 +1,103 @@
-// Settings → Platform apps: paste each platform's developer-app credentials (stored encrypted).
-import { h, mount, api, toast, confirmDialog, PROVIDER_META, MARKS, icon, relTime } from './core.js';
-import { copyButton } from './ui.js';
+// Settings → Platform apps. A quiet list (like Accounts) that opens one app at a time.
+import { h, mount, api, toast, confirmDialog, MARKS, icon, relTime } from './core.js';
+import { copyButton, section } from './ui.js';
 
-const BADGE = {
+const STATUS = {
   configured: ['Configured', 's-published'],
-  configured_env: ['Configured via .env', 's-scheduled'],
-  not_configured: ['Not configured', 's-failed'],
+  configured_env: ['Configured in .env', 's-published'],
+  not_configured: ['Not set up', 's-draft'],
 };
-const COLORS = { meta: PROVIDER_META.facebook.color, instagram: PROVIDER_META['instagram-standalone'].color, google: PROVIDER_META.youtube.color };
 const LOGOS = { meta: ['facebook', 'instagram'], instagram: ['instagram'], google: ['youtube'] };
-const logo = (kind) => { const el = h('span', { class: `app-logo al-${kind}` }); el.innerHTML = MARKS[kind]; return el; };
+const BLURB = {
+  meta: 'Facebook Pages and Instagram accounts linked to a Page',
+  instagram: 'Instagram accounts that log in directly, no Page needed',
+  google: 'YouTube channels, uploads and analytics',
+};
+const NAME = { meta: 'Meta', instagram: 'Instagram Login', google: 'Google' };
+const CONSOLE = { meta: 'https://developers.facebook.com/apps', instagram: 'https://developers.facebook.com/apps', google: 'https://console.cloud.google.com/apis/credentials' };
+
+const mark = (kind) => { const el = h('span', { class: 'pmark' }); el.innerHTML = MARKS[kind]; return el; };
+const marks = (app) => h('span', { class: 'pmarks' }, LOGOS[app].map(mark));
+const pill = (status) => { const [t, c] = STATUS[status] || STATUS.not_configured; return h('span', { class: `status ${c}` }, h('i', { class: 'sd' }), t); };
+
+function list(apps) {
+  return h('div', {},
+    h('p', { class: 'muted small apps-intro' }, 'Each platform needs a developer app of your own. Paste its keys here. Secrets are encrypted and never shown again. ',
+      h('a', { href: '/docs/setup/', target: '_blank', rel: 'noopener' }, 'Setup guides')),
+    h('div', { class: 'plist' }, apps.map((a) => h('a', { class: 'plist-row plist-link', href: `#/settings/apps/${a.app}` },
+      marks(a.app),
+      h('div', { class: 'plist-text' }, h('div', { class: 'plist-name' }, NAME[a.app] || a.label), h('div', { class: 'plist-desc' }, BLURB[a.app] || '')),
+      pill(a.status),
+      icon('chevron-right', 16, 'muted')))));
+}
 
 function testLine(t) {
   if (!t) return null;
   const cls = t.ok ? (t.verified ? 'ok' : 'warn') : 'err';
-  return h('div', { class: `small ${cls} app-test` }, icon(t.ok ? (t.verified ? 'check-circle' : 'info') : 'x-circle', 14), h('span', {}, t.message), t.at ? h('span', { class: 'muted' }, ` · tested ${relTime(t.at)}`) : null);
+  return h('div', { class: `small ${cls} app-test` }, icon(t.ok ? (t.verified ? 'check-circle' : 'info') : 'x-circle', 14), h('span', {}, t.message), t.at ? h('span', { class: 'muted' }, ` · ${relTime(t.at)}`) : null);
 }
 
-function appCard(a, refresh) {
-  const [badgeText, badgeCls] = BADGE[a.status];
+function detail(a, refresh) {
+  const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } catch (e) { toast(e.message, 'error', 7000); } finally { btn.disabled = false; } };
   const idIn = h('input', { class: 'input mono-input', autocomplete: 'off', spellcheck: 'false', placeholder: a.id_hint });
   idIn.value = a.saved_in_app ? a.client_id : '';
   const secretIn = h('input', { class: 'input mono-input', type: 'password', autocomplete: 'new-password', spellcheck: 'false',
-    placeholder: a.saved_in_app ? `saved • ${a.secret_hint} (leave empty to keep)` : a.status === 'configured_env' ? `from .env • ${a.secret_hint}` : 'paste secret' });
-  const busy = async (btn, fn) => { btn.disabled = true; try { await fn(); } catch (e) { toast(e.message, 'error', 7000); } finally { btn.disabled = false; } };
+    placeholder: a.secret_saved ? `•••• ${a.secret_hint}  (leave empty to keep)` : 'Paste secret' });
 
-  return h('section', { class: 'card app-card', id: `app-${a.app}`, style: { '--pc': COLORS[a.app] } },
-    h('div', { class: 'app-head' },
-      h('span', { class: 'app-logos' }, LOGOS[a.app].map(logo)),
-      h('div', { class: 'min0' }, h('h2', { class: 'section-title' }, a.label), h('div', { class: 'muted small' }, a.redirect_uris.length > 1 ? `${a.redirect_uris.length} redirect URIs` : 'OAuth app')),
-      h('span', { class: `status ${badgeCls}` }, h('i', { class: 'sd' }), badgeText)),
-    a.status === 'configured_env' ? h('p', { class: 'muted small' }, `Using ${a.env_vars.join(' / ')} from .env (${a.client_id}). Saving here overrides .env; Clear returns to it.`) : null,
-    a.saved_in_app && a.env_fallback ? h('p', { class: 'muted small' }, 'Overrides the .env values. Clear to fall back to .env.') : null,
-    h('div', { class: 'app-form' },
+  const save = h('button', { class: 'btn primary', onclick: (e) => busy(e.currentTarget, async () => {
+    const body = { client_id: idIn.value.trim() };
+    if (secretIn.value.trim()) body.client_secret = secretIn.value.trim();
+    await api('POST', `/platform-apps/${a.app}`, body);
+    secretIn.value = '';
+    toast('Saved', 'success');
+    refresh(a.app);
+  }) }, 'Save');
+  const test = h('button', { class: 'btn', disabled: !a.configured, onclick: (e) => busy(e.currentTarget, async () => {
+    const r = await api('POST', `/platform-apps/${a.app}/test`, {});
+    toast(r.result.message, r.result.ok ? 'success' : 'error', 7000);
+    refresh(a.app);
+  }) }, 'Test');
+
+  const head = h('div', { class: 'app-detail-head' },
+    h('a', { class: 'back-link small', href: '#/settings/apps' }, icon('chevron-left', 14), 'Platform apps'),
+    h('div', { class: 'app-title' }, marks(a.app),
+      h('div', { class: 'min0' }, h('h2', { class: 'app-name' }, NAME[a.app] || a.label), h('div', { class: 'muted small' }, BLURB[a.app] || '')),
+      pill(a.status)));
+
+  const creds = section('Credentials', { sub: a.status === 'configured_env' ? `Currently read from .env (${a.env_vars.join(', ')}). Saving here takes over.` : 'Takes effect immediately, no restart needed.' },
+    h('div', { class: 'form-narrow' },
       h('label', { class: 'field' }, h('span', {}, a.id_label), idIn),
-      h('label', { class: 'field' }, h('span', {}, a.secret_label), secretIn,
-        a.secret_saved ? h('span', { class: 'muted small mono' }, `${a.saved_in_app ? 'saved' : '.env'} • ${a.secret_hint}`) : null),
-      h('div', { class: 'row gap wrap' },
-        h('button', { class: 'btn primary', onclick: (e) => busy(e.currentTarget, async () => {
-          const body = { client_id: idIn.value.trim() };
-          if (secretIn.value.trim()) body.client_secret = secretIn.value.trim();
-          await api('POST', `/platform-apps/${a.app}`, body);
-          secretIn.value = '';
-          toast('Saved — active immediately', 'success');
-          refresh(a.app);
-        }) }, 'Save'),
-        h('button', { class: 'btn', disabled: !a.configured, onclick: (e) => busy(e.currentTarget, async () => {
-          const r = await api('POST', `/platform-apps/${a.app}/test`, {});
-          toast(r.result.message, r.result.ok ? 'success' : 'error', 7000);
-          refresh(a.app);
-        }) }, 'Test'),
-        a.saved_in_app ? h('button', { class: 'btn danger-outline', onclick: (e) => busy(e.currentTarget, async () => {
-          if (!(await confirmDialog(`Remove the ${a.label} credentials saved in postlite?${a.env_fallback ? ' The .env values will be used again.' : ' Connecting and token refresh will stop working until new credentials are saved.'}`, { ok: 'Clear', danger: true }))) return;
-          await api('DELETE', `/platform-apps/${a.app}`);
-          toast('Cleared');
-          refresh(a.app);
-        }) }, 'Clear') : null,
-        h('a', { class: 'btn ghost', href: a.guide, target: '_blank', rel: 'noopener' }, 'Guide', icon('external', 13))),
-      testLine(a.last_test)),
-    h('div', { class: 'label' }, a.redirect_uris.length > 1 ? 'Redirect URIs (register all)' : 'Redirect URI'),
-    a.redirect_uris.map((u) => h('div', { class: 'copy-row' }, h('code', { class: 'block select' }, u.uri), copyButton(u.uri), h('span', { class: 'muted small' }, u.label))),
-    h('details', { class: 'small app-details', open: a.status === 'not_configured' },
-      h('summary', {}, 'Setup checklist, products, APIs & scopes'),
-      h('ol', { class: 'steps' }, a.steps.map((s) => h('li', {}, s))),
-      h('div', { class: 'label' }, 'Products / configuration'), h('ul', {}, a.products.map((p) => h('li', {}, p))),
-      h('div', { class: 'label' }, 'APIs'), h('ul', {}, a.apis.map((p) => h('li', {}, p))),
-      h('div', { class: 'label' }, 'Scopes / permissions'), h('div', { class: 'scope-chips' }, a.scopes.map((s) => h('code', { class: 'scope-chip' }, s))),
-      h('div', { class: 'label' }, 'Links'), h('ul', {}, Object.entries(a.links).map(([t, u]) => h('li', {}, h('a', { href: u, target: '_blank', rel: 'noopener' }, t, ' ↗'))),
-        h('li', {}, h('a', { href: a.guide, target: '_blank', rel: 'noopener' }, 'Full step-by-step guide ↗')))));
+      h('label', { class: 'field' }, h('span', {}, a.secret_label), secretIn),
+      h('div', { class: 'row gap' }, save, test),
+      testLine(a.last_test)));
+
+  const redirects = section(a.redirect_uris.length > 1 ? 'Redirect URIs' : 'Redirect URI', { sub: 'Add exactly this in your developer app.' },
+    h('div', { class: 'uri-list' }, a.redirect_uris.map((u) => h('div', { class: 'uri-row' },
+      h('div', { class: 'min0' }, a.redirect_uris.length > 1 ? h('div', { class: 'muted small' }, u.label) : null, h('code', { class: 'uri select' }, u.uri)),
+      copyButton(u.uri)))));
+
+  const setup = section('Setup', { sub: 'Create the app once, then paste its keys above.' },
+    h('div', { class: 'row gap wrap' },
+      h('a', { class: 'btn', href: a.guide, target: '_blank', rel: 'noopener' }, 'Step-by-step guide', icon('external', 13)),
+      h('a', { class: 'btn ghost', href: CONSOLE[a.app], target: '_blank', rel: 'noopener' }, 'Developer console', icon('external', 13))),
+    h('details', { class: 'app-perms' }, h('summary', {}, `Permissions requested (${a.scopes.length})`),
+      h('div', { class: 'scope-chips' }, a.scopes.map((s) => h('code', { class: 'scope-chip' }, s))),
+      a.apis.length ? h('p', { class: 'muted small' }, 'APIs to enable: ', a.apis.join(', ')) : null));
+
+  const danger = a.saved_in_app ? section('Remove credentials', { sub: a.env_fallback ? 'postlite falls back to the .env values.' : 'Connecting and token refresh stop until new keys are saved.' },
+    h('button', { class: 'btn danger-outline', onclick: (e) => busy(e.currentTarget, async () => {
+      if (!(await confirmDialog(`Remove the saved ${a.label} credentials?`, { ok: 'Remove', danger: true }))) return;
+      await api('DELETE', `/platform-apps/${a.app}`);
+      toast('Removed');
+      refresh(a.app);
+    }) }, 'Remove')) : null;
+
+  return h('div', { class: 'stack app-detail' }, head, creds, redirects, setup, danger);
 }
 
 export async function renderPlatformApps(root, focus = null) {
   const { platform_apps: apps } = await api('GET', '/platform-apps');
   const refresh = (f) => renderPlatformApps(root, f);
-  mount(root,
-    h('div', { class: 'notice info' }, icon('shield', 15), h('span', {}, 'Paste the credentials of your own developer apps. Secrets are encrypted with TOKEN_ENC_KEY, never shown again, and take effect immediately — no restart. Values saved here override .env. ',
-      h('a', { href: '/docs/setup/', target: '_blank', rel: 'noopener' }, 'Setup guides ↗'))),
-    h('div', { class: 'apps-grid' }, apps.map((a) => appCard(a, refresh))));
-  if (focus) {
-    const el = root.querySelector(`#app-${CSS.escape(focus)}`);
-    if (el) { el.classList.add('focus'); requestAnimationFrame(() => el.scrollIntoView({ block: 'start' })); }
-  }
+  const a = focus && apps.find((x) => x.app === focus);
+  mount(root, a ? detail(a, refresh) : list(apps));
 }

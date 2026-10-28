@@ -11,7 +11,7 @@ Runs as **one Node.js process** (one SQLite file, zero runtime dependencies, no 
 
 More in [`docs/screenshots/`](docs/screenshots/) (dark and light theme, desktop and 390 px mobile).
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/YOUR-GITHUB-USER/postlite)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/muhammedilyasy/postlite)
 
 <!-- Replace YOUR-GITHUB-USER after publishing the repository: Deploy buttons need a public GitHub/GitLab repo. -->
 

@@ -71,19 +71,21 @@ export async function createTestApp({ env = {}, listen = true } = {}) {
     ...fake.env(),
     ...env,
   });
-  const core = createCore(cfg, { log: () => {} });
-  await core.db.setSetting('admin_password', hashPassword(PASSWORD));
+  const root = createCore(cfg, { log: () => {} });
+  // Tests talk to the password-mode owner workspace unless they create others (see isolation tests).
+  const core = root.scope('owner');
+  await root.db.setSetting('admin_password', hashPassword(PASSWORD));
   await core.prepare();
   let server = null;
   let base = null;
   if (listen) {
-    server = createServer(core);
+    server = createServer(root);
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${server.address().port}`;
     cfg.publicUrl = base; // media URLs must point at the live test server so the fake can fetch them
   }
   const app = {
-    fake, core, cfg, dir, server, base,
+    fake, core, root, cfg, dir, server, base,
     seed(provider, extra = {}) {
       const defaults = {
         facebook: { external_id: 'page1', name: 'Test Page', access_token: 'page1-token', refresh_token: 'user-long' },

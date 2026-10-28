@@ -1,5 +1,5 @@
-// Platform apps: the owner's developer-app credentials (Meta, Instagram Login, Google) managed in the
-// UI/API instead of .env. Stored in the settings table with the secret AES-GCM encrypted (TOKEN_ENC_KEY).
+// Platform apps: each workspace's developer-app credentials (Meta, Instagram Login, Google) managed in the
+// UI/API instead of .env. Stored in workspace_settings with the secret AES-GCM encrypted (TOKEN_ENC_KEY).
 // Resolution order per app: saved in DB (both id + secret) → .env → not configured.
 // createApps() replaces cfg.meta / cfg.instagram / cfg.google with live getters, so every OAuth start,
 // token exchange/refresh and publish reads the current value — no restart needed. Because the DB and
@@ -83,11 +83,18 @@ const KEY = (app) => `platform_app.${app}`;
 const TEST_KEY = (app) => `platform_app.${app}.test`;
 const TEST_CODE = 'postlite-credential-test';
 
-export function createApps({ db, cfg, cipher }) {
-  // .env values captured once; DB values (when saved) take precedence.
+/**
+ * Platform-app credentials of ONE workspace. `cfg` is that workspace's config object (an
+ * Object.create() child of the instance config): its meta / instagram / google properties become live
+ * getters (workspace DB value → instance .env fallback), so providers keep reading cfg.meta.appId etc.
+ * @param {{db:any, cfg:object, cipher:any, ws:string, envCfg?:object}} deps  envCfg = instance config holding the .env values
+ */
+export function createApps({ db, cfg, cipher, ws, envCfg = cfg }) {
+  if (!ws) throw new Error('createApps: workspace id required');
+  // .env values captured once (instance-wide fallback); DB values (when saved in this workspace) take precedence.
   const envVals = Object.fromEntries(APP_IDS.map((a) => {
     const d = APPS[a];
-    const v = cfg[d.cfgKey] || {};
+    const v = Object.getOwnPropertyDescriptor(envCfg, d.cfgKey)?.value || envCfg[d.cfgKey] || {};
     return [a, { id: String(v[d.idKey] || ''), secret: String(v[d.secretKey] || '') }];
   }));
 
@@ -100,13 +107,14 @@ export function createApps({ db, cfg, cipher }) {
     if (!raw) return null;
     try { const r = JSON.parse(raw); return r.id && r.secret_enc ? r : null; } catch { return null; }
   };
+  const putStmt = (key, value) => ['INSERT INTO workspace_settings(workspace_id, key, value) VALUES(?,?,?) ON CONFLICT(workspace_id, key) DO UPDATE SET value = excluded.value', ws, key, value];
 
-  /** Reload saved credentials from the settings table (decrypting the secrets). */
+  /** Reload this workspace's saved credentials (decrypting the secrets). */
   async function sync({ maxAgeMs = 1000 } = {}) {
     if (Date.now() - loadedAt < maxAgeMs) return;
     if (loading) return loading;
     loading = (async () => {
-      const rows = await db.all("SELECT key, value FROM settings WHERE key LIKE 'platform_app.%'");
+      const rows = await db.all("SELECT key, value FROM workspace_settings WHERE workspace_id = ? AND key LIKE 'platform_app.%'", ws);
       const by = new Map(rows.map((r) => [r.key, r.value]));
       const next = {};
       for (const app of APP_IDS) {
@@ -196,8 +204,8 @@ export function createApps({ db, cfg, cipher }) {
       else throw new HttpError(400, `${d.secretLabel} is required.`);
       const saved = { id, secret_enc, updated_at: Date.now() };
       await db.batch([
-        ['INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', KEY(app), JSON.stringify(saved)],
-        ['DELETE FROM settings WHERE key = ?', TEST_KEY(app)],
+        putStmt(KEY(app), JSON.stringify(saved)),
+        ['DELETE FROM workspace_settings WHERE workspace_id = ? AND key = ?', ws, TEST_KEY(app)],
       ]);
       cache[app] = { saved, secret: secretIn || cache[app].secret, test: null };
       return api.status(app);
@@ -205,7 +213,7 @@ export function createApps({ db, cfg, cipher }) {
 
     async clear(app) {
       check(app);
-      await db.run('DELETE FROM settings WHERE key IN (?, ?)', KEY(app), TEST_KEY(app));
+      await db.run('DELETE FROM workspace_settings WHERE workspace_id = ? AND key IN (?, ?)', ws, KEY(app), TEST_KEY(app));
       cache[app] = { saved: null, secret: null, test: null };
       return api.status(app);
     },
@@ -222,7 +230,7 @@ export function createApps({ db, cfg, cipher }) {
         out.message = scrub(out.message, r.secret);
       }
       const rec = { ...out, source: r.source, at: Date.now() };
-      await db.setSetting(TEST_KEY(app), JSON.stringify(rec));
+      await db.run(...putStmt(TEST_KEY(app), JSON.stringify(rec)));
       cache[app].test = rec;
       return rec;
     },

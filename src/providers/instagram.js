@@ -269,6 +269,12 @@ function makeInstagram(variant) {
       }));
     },
 
+    /** thumbnail_url for VIDEO / REELS, media_url for images. */
+    async thumbnailFor(ctx, item) {
+      const m = await request(`${base(ctx.cfg)}/${item.external_id}?` + qs({ fields: 'media_type,thumbnail_url,media_url', access_token: ctx.token }), opt(ctx.cfg));
+      return m.thumbnail_url || (m.media_type === 'VIDEO' ? '' : m.media_url) || '';
+    },
+
     async postAnalytics(ctx, item) {
       const metrics = {};
       const unavailable = {};

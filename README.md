@@ -102,6 +102,13 @@ ALLOWED_EMAILS=you@example.com,partner@example.com
 
 The click-by-click dashboard guide is in [docs/setup/cloudflare-access.md](docs/setup/cloudflare-access.md).
 
+**Every allowed email gets its own isolated workspace** (created on first sign-in): accounts, posts, media, analytics,
+approvals, API keys, webhooks, audit log, settings and platform-app credentials are all per workspace, and nobody can see
+anyone else's data. An API key belongs to the workspace it was created in and only ever sees that workspace (REST, MCP and
+CLI). Each workspace saves its own Meta/Google app keys; `.env` app credentials are the instance-wide fallback. Password
+mode keeps a single owner workspace. Upgrading an instance that ran as one shared workspace: see
+[Workspaces](docs/setup/cloudflare-access.md#workspaces-one-per-email).
+
 ### Run on Cloudflare instead
 
 ```sh
@@ -190,9 +197,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Real Meta/Google APIs are **not** exercised by the test suite (fake servers only). Verify with your own app credentials before relying on it.
 - Facebook *Login for Business* configurations (`config_id`) are not used; postlite uses the classic `scope` dialog like Postiz.
 - Instagram accepts only JPEG images via the API; postlite validates instead of converting.
-- Video posters in the UI need `FFMPEG_PATH`; without it, and always on Workers, a `<video>` preview is shown.
+- Video posters: made with ffmpeg on upload when `FFMPEG_PATH` is set; otherwise (always on Workers) the browser grabs a frame and stores it as the poster (`set_media_poster`).
 - On Workers, posts publish up to ~60 s after their time (1-minute cron), and API-key rate limits are best-effort (per isolate). See the [Workers caveats](docs/setup/cloudflare-workers.md#caveats).
-- Single admin role; with Cloudflare Access several allowed emails share it (no per-user permissions, no multi-tenant).
+- One person per workspace: no shared workspaces, roles or workspace switching. A page/channel can be connected in only one workspace at a time.
 - MCP over HTTP returns JSON responses (no server-initiated SSE stream).
 
 ## NOTICE

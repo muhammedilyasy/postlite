@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { createTestApp, makeJpeg, makeMp4 } from './helpers.js';
 import { createScheduler } from '../src/scheduler.js';
 import { openDb } from '../src/db.js';
-import { createPosts } from '../src/posts.js';
 
 let app;
 before(async () => { app = await createTestApp(); });
@@ -23,7 +22,7 @@ test('claim is atomic: a claimed job cannot be claimed again', async () => {
   assert.equal(j2, null);
   assert.equal((await target(gid)).status, 'publishing');
   // release for other tests
-  await app.core.db.run("UPDATE jobs SET state='queued', locked_by=NULL WHERE id=?", j1.id);
+  await app.core.db.run("UPDATE jobs SET state='queued', locked_by=NULL WHERE id=? /* ws:system */", j1.id);
 });
 
 test('two schedulers sharing the DB file never double-post', async () => {
@@ -33,8 +32,7 @@ test('two schedulers sharing the DB file never double-post', async () => {
   for (let i = 0; i < 6; i++) ids.push(await group(fb, `race-${i}`));
   // second process-like scheduler with its own DB connection
   const db2 = openDb(app.cfg.dbFile);
-  const posts2 = createPosts({ db: db2, media: app.core.media, integrations: app.core.integrations });
-  const s2 = createScheduler({ db: db2, cfg: app.cfg, media: app.core.media, integrations: app.core.integrations, posts: posts2 });
+  const s2 = createScheduler({ db: db2, cfg: app.cfg, scopeFor: (ws) => app.root.scope(ws) });
   await Promise.all([app.core.scheduler.drain(), s2.drain(), app.core.scheduler.tick(), s2.tick()]);
   await app.core.scheduler.drain();
   db2.close();
@@ -82,8 +80,8 @@ test('restart recovery: overdue posts within grace publish; older ones are marke
   const recent = await group(fb, 'overdue-recent', Date.now() + 60000);
   const old = await group(fb, 'overdue-old', Date.now() + 60000);
   // Simulate the server being down: push run times into the past.
-  await app.core.db.run('UPDATE jobs SET run_at = ? WHERE post_id = ?', Date.now() - 10 * 60000, (await target(recent)).id);
-  await app.core.db.run('UPDATE jobs SET run_at = ? WHERE post_id = ?', Date.now() - 7 * 3600000, (await target(old)).id);
+  await app.core.db.run('UPDATE jobs SET run_at = ? WHERE post_id = ? /* ws:system */', Date.now() - 10 * 60000, (await target(recent)).id);
+  await app.core.db.run('UPDATE jobs SET run_at = ? WHERE post_id = ? /* ws:system */', Date.now() - 7 * 3600000, (await target(old)).id);
   const missed = await app.core.scheduler.boot();
   assert.equal(missed, 1);
   await app.core.scheduler.drain();
@@ -101,7 +99,7 @@ test('crash mid-pipeline (no irreversible call in flight) resumes from persisted
   const ig1 = await app.core.integrations.secret(ig);
   const prov = (await import('../src/providers/index.js')).getProvider('instagram');
   const r = await prov.publishStart({ cfg: app.cfg, integration: ig1, token: ig1.access_token, post: { caption: 'resume', media: [img], settings: { post_type: 'post' } }, mediaUrl: (m) => app.core.media.publicUrl(m), irreversible: async () => {} });
-  await app.core.db.run("UPDATE jobs SET phase='check', pending_data=?, locked_until=? WHERE id=?", JSON.stringify(r.data), Date.now() - 1, job.id);
+  await app.core.db.run("UPDATE jobs SET phase='check', pending_data=?, locked_until=? WHERE id=? /* ws:system */", JSON.stringify(r.data), Date.now() - 1, job.id);
   const containersBefore = Object.keys(app.fake.state.containers).length;
   await app.core.scheduler.drain(); // recoverStale releases the expired lock
   assert.equal((await target(gid)).status, 'published');
@@ -135,7 +133,7 @@ test('IG recovery path: stale inflight job is checked via container status', asy
   await prov.publishCheck(ctx, r.data); await prov.publishCheck(ctx, r.data);
   const c = app.fake.state.containers[r.data.containers[0]];
   c.status = 'PUBLISHED';
-  await app.core.db.run("UPDATE jobs SET phase='finalize', pending_data=?, inflight=?, locked_until=? WHERE id=?", JSON.stringify(r.data), JSON.stringify({ label: 'publishing to Instagram' }), Date.now() - 1, job.id);
+  await app.core.db.run("UPDATE jobs SET phase='finalize', pending_data=?, inflight=?, locked_until=? WHERE id=? /* ws:system */", JSON.stringify(r.data), JSON.stringify({ label: 'publishing to Instagram' }), Date.now() - 1, job.id);
   const publishCalls = app.fake.state.calls.filter((x) => x.path.endsWith('media_publish')).length;
   await app.core.scheduler.drain();
   assert.equal((await target(gid)).status, 'published');
@@ -157,7 +155,7 @@ test('FB: stale inflight job without provider recovery fails safely', async () =
   const fb = await app.seed('facebook');
   const gid = await group(fb, 'stale-fb', Date.now() + 3600000);
   const t = await target(gid);
-  await app.core.db.run("UPDATE jobs SET state='running', inflight=?, locked_until=? WHERE post_id=?", JSON.stringify({ label: 'publishing feed post' }), Date.now() - 1, t.id);
+  await app.core.db.run("UPDATE jobs SET state='running', inflight=?, locked_until=? WHERE post_id=? /* ws:system */", JSON.stringify({ label: 'publishing feed post' }), Date.now() - 1, t.id);
   await app.core.scheduler.drain();
   assert.equal((await target(gid)).status, 'failed');
   assert.match((await target(gid)).error, /interrupted during "publishing feed post"/);
@@ -177,7 +175,7 @@ test('YouTube: crash mid-upload resumes from the session offset', async () => {
   const fs = await import('node:fs');
   const buf = fs.readFileSync(app.core.media.localPath(vid)).subarray(0, 256 * 1024);
   await fetch(r.data.uploadUri, { method: 'PUT', headers: { authorization: `Bearer ${integ.access_token}`, 'content-range': `bytes 0-${buf.length - 1}/${r.data.size}` }, body: buf });
-  await app.core.db.run("UPDATE jobs SET phase='check', pending_data=?, locked_until=? WHERE id=?", JSON.stringify(r.data), Date.now() - 1, job.id);
+  await app.core.db.run("UPDATE jobs SET phase='check', pending_data=?, locked_until=? WHERE id=? /* ws:system */", JSON.stringify(r.data), Date.now() - 1, job.id);
   await app.core.scheduler.drain();
   const t = await target(gid);
   assert.equal(t.status, 'published', t.error);
@@ -190,13 +188,13 @@ test('rescheduling and deleting update the job; running jobs are protected', asy
   const gid = await group(fb, 'move-me', Date.now() + 3600000);
   const newAt = Date.now() + 7200000;
   await app.core.posts.rescheduleGroup(gid, newAt);
-  const job = await app.core.db.get('SELECT * FROM jobs WHERE post_id = ?', (await target(gid)).id);
+  const job = await app.core.db.get('SELECT * FROM jobs WHERE post_id = ? /* ws:system */', (await target(gid)).id);
   assert.equal(job.run_at, newAt);
-  await app.core.db.run("UPDATE jobs SET state='running' WHERE id=?", job.id);
+  await app.core.db.run("UPDATE jobs SET state='running' WHERE id=? /* ws:system */", job.id);
   await assert.rejects(() => app.core.posts.deleteGroup(gid), /being published/);
-  await app.core.db.run("UPDATE jobs SET state='queued' WHERE id=?", job.id);
+  await app.core.db.run("UPDATE jobs SET state='queued' WHERE id=? /* ws:system */", job.id);
   await app.core.posts.deleteGroup(gid);
-  assert.equal((await app.core.db.get('SELECT COUNT(*) n FROM jobs WHERE id=?', job.id)).n, 0);
+  assert.equal((await app.core.db.get('SELECT COUNT(*) n FROM jobs WHERE id=? /* ws:system */', job.id)).n, 0);
 });
 
 test('pending media processing times out', async () => {

@@ -40,10 +40,14 @@ Server / admin (run on the server, uses .env):
   postlite set-password                  Set the admin password (prompt, or pipe via stdin)
   postlite gen-secrets                   Print fresh SESSION_SECRET and TOKEN_ENC_KEY values
   postlite hash-password                 Print a portable (PBKDF2) password hash for ADMIN_PASSWORD_HASH (Cloudflare Workers)
-  postlite keys create --name NAME [--scopes read,write,publish,analytics,admin] [--no-approval] [--rate 120]
-  postlite keys list | postlite keys revoke <id>
+  postlite keys create --name NAME [--scopes read,write,publish,analytics,admin] [--no-approval] [--rate 120] [--email E | --workspace ID]
+  postlite keys list | postlite keys revoke <id>        (keys/apps act on ONE workspace: --email or --workspace
+                                                         when there is more than one)
   postlite apps list | apps set <meta|instagram|google> --id ID   (secret: prompt or stdin)
   postlite apps clear <app> | apps test <app>   Platform developer-app credentials (Settings → Platform apps)
+  postlite workspaces list                      Workspaces and the emails that own them
+  postlite workspaces attribute --owner EMAIL [--apply] [--db FILE]
+                                                Dry-run report (or --apply) assigning existing rows to their owners
   postlite mcp                           MCP over stdio (needs POSTLITE_API_KEY; with POSTLITE_URL it bridges to a remote server)
 
 API client — local or remote instance, Node or Cloudflare Workers
@@ -65,6 +69,25 @@ async function core() {
   const c = createNodeCore(getConfig(), { log: makeLogger(process.env.LOG_LEVEL || 'warn') });
   await c.prepare();
   return c;
+}
+
+/** The workspace a CLI admin command acts on: --email, --workspace, or the only workspace there is. */
+async function cliScope(c, a) {
+  let ws = a.workspace ? String(a.workspace) : null;
+  if (a.email) {
+    const w = await c.workspaces.byEmail(String(a.email));
+    if (!w) throw new Error(`No workspace for ${a.email} yet (it is created on first sign-in).`);
+    ws = w.workspace_id;
+  }
+  if (!ws) {
+    const all = await c.workspaces.list();
+    if (all.length !== 1) throw new Error(`There are ${all.length} workspaces; pass --email EMAIL or --workspace ID (see "postlite workspaces list").`);
+    ws = all[0].id;
+  }
+  if (!(await c.workspaces.get(ws))) throw new Error(`Unknown workspace ${ws}`);
+  const sc = c.scope(ws);
+  await sc.prepare();
+  return sc;
 }
 
 async function readSecret(prompt) {
@@ -175,8 +198,22 @@ async function main() {
       console.log(`SESSION_SECRET=${crypto.randomBytes(32).toString('base64url')}`);
       console.log(`TOKEN_ENC_KEY=${crypto.randomBytes(32).toString('base64')}`);
       return;
-    case 'keys': {
+    case 'workspaces': {
+      const sub = a._[0] || 'list';
+      if (sub === 'attribute') {
+        const { runAttribution } = await import('../src/node/attribute.js');
+        const cfg = getConfig();
+        const out = await runAttribution({ dbFile: a.db ? String(a.db) : cfg.dbFile, owner: a.owner ? String(a.owner) : '', apply: !!a.apply, tokenEncKey: cfg.tokenEncKey });
+        process.stdout.write(out.text);
+        return;
+      }
       const c = await core();
+      print(await c.workspaces.list());
+      return c.stop();
+    }
+    case 'keys': {
+      const c0 = await core();
+      const c = await cliScope(c0, a);
       const sub = a._[0];
       if (sub === 'create') {
         const k = await c.apiKeys.create({ name: a.name || 'agent', scopes: a.scopes ? String(a.scopes).split(',') : undefined, approval_mode: !a['no-approval'], rate_limit_per_min: a.rate ? Number(a.rate) : undefined });
@@ -186,10 +223,11 @@ async function main() {
       } else if (sub === 'list') print(await c.apiKeys.list());
       else if (sub === 'revoke') { if (!(await c.apiKeys.revoke(a._[1]))) { console.error('Not found'); process.exitCode = 1; } else console.error('Revoked'); }
       else console.error(HELP);
-      return c.stop();
+      return c0.stop();
     }
     case 'apps': {
-      const c = await core();
+      const c0 = await core();
+      const c = await cliScope(c0, a);
       const [sub, app] = a._;
       const audit = (operation, detail) => c.audit.record({ principal: { type: 'cli', name: 'cli' }, via: 'cli', operation, target: app, detail });
       const view = (s) => ({ app: s.app, status: s.status, client_id: s.client_id, secret: s.secret_hint ? `saved • ${s.secret_hint}` : null, redirect_uris: s.redirect_uris.map((u) => u.uri), last_test: s.last_test });

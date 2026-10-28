@@ -237,6 +237,38 @@ the app and 24 hours globally.
 
 Source: [Session management](https://developers.cloudflare.com/cloudflare-one/access-controls/access-settings/session-management/)
 
+## Workspaces (one per email)
+
+Every email on the allow-list gets its own workspace the first time it signs in. A workspace holds its own
+connected accounts, posts, media, analytics, approvals, API keys, webhooks, audit log, timezone/posting slots
+and platform-app credentials (Settings → Platform apps; `.env` app keys are the fallback for every workspace).
+Nobody can see or change another person's data, and an API key only reaches the workspace it was created in.
+The account menu shows the signed-in email and the workspace name.
+
+A page or channel can be connected in one workspace at a time; connecting it again from another workspace is
+refused until it is disconnected there.
+
+### Upgrading from the single shared workspace
+
+Instances that ran before workspaces existed keep all their data in one legacy workspace. Assign it to the
+right people before (or right after) the upgrade:
+
+```sh
+# 1. back up
+sqlite3 data/postlite.sqlite "VACUUM INTO 'data/postlite.pre-workspaces.sqlite'"
+# 2. dry run: read-only report of who owns what, and what cannot be attributed
+node bin/postlite.js workspaces attribute --owner you@example.com
+# 3. apply (stop the service first; one transaction; safe to re-run)
+systemctl --user stop postlite
+node bin/postlite.js workspaces attribute --owner you@example.com --apply
+systemctl --user start postlite
+```
+
+The report uses the audit log (who connected which account, who created which API key, which key created
+which post or upload), `created_by` on posts and uploads, and which account each post targets. Rows without
+evidence go to `--owner` and are listed as UNATTRIBUTABLE. Platform-app credentials and scheduling settings
+are copied to every workspace, so tokens obtained with those apps keep refreshing.
+
 ## Roll back
 
 Set `AUTH_MODE=password` in `.env` and run `systemctl --user restart postlite`. Password login works

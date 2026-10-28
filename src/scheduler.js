@@ -15,11 +15,18 @@
 import { randomToken } from './crypto.js';
 import { isProviderError } from './providers/http.js';
 import { getProvider } from './providers/index.js';
+import { eventStmt } from './posts.js';
 
 // Worst-case cost of one job step, used to stop before a Workers invocation runs out of budget.
 const STEP_COST = { fetches: 14, queries: 14 };
 
-export function createScheduler({ db, cfg, media, integrations, posts, log = () => {}, onPublished = () => {}, onFailed = () => {}, workerTag = 'w' }) {
+/**
+ * Instance-wide scheduler. Jobs of every workspace share one queue (system work, marked ws:system);
+ * each job runs with ITS workspace's services, tokens and platform-app credentials via scopeFor(ws).
+ */
+export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished = () => {}, onFailed = () => {}, workerTag = 'w' }) {
+  const posts = { event: (postId, level, message) => db.run(...eventStmt(postId, level, message)), eventStmt };
+  const wsOf = async (postId) => (await db.get('SELECT workspace_id FROM posts WHERE id = ? /* ws:system */', postId))?.workspace_id || null;
   const S = cfg.scheduler;
   const workerId = `${workerTag}-${randomToken(6)}`;
   const active = new Set();
@@ -34,8 +41,8 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
     const lock = `${workerId}:${randomToken(4)}`;
     const [jobs] = await db.batch([
       [`UPDATE jobs SET state='running', locked_by=?, locked_until=?, updated_at=?
-        WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND run_at <= ? ORDER BY run_at, id LIMIT 1) AND state='queued' RETURNING *`, lock, t + S.lockTtlMs, t, t],
-      ["UPDATE posts SET status='publishing', updated_at=? WHERE id IN (SELECT post_id FROM jobs WHERE locked_by = ? AND state='running')", t, lock],
+        WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND run_at <= ? ORDER BY run_at, id LIMIT 1) AND state='queued' RETURNING * /* ws:system */`, lock, t + S.lockTtlMs, t, t],
+      ["UPDATE posts SET status='publishing', updated_at=? WHERE id IN (SELECT post_id FROM jobs WHERE locked_by = ? AND state='running') /* ws:system */", t, lock],
     ]);
     const row = jobs.rows[0];
     return row ? { ...row } : null;
@@ -45,12 +52,12 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
   async function recoverStale({ boot = false } = {}) {
     const t = now();
     const rows = boot
-      ? await db.all("SELECT * FROM jobs WHERE state = 'running'")
-      : await db.all("SELECT * FROM jobs WHERE state = 'running' AND locked_until < ?", t);
+      ? await db.all("SELECT * FROM jobs WHERE state = 'running' /* ws:system */")
+      : await db.all("SELECT * FROM jobs WHERE state = 'running' AND locked_until < ? /* ws:system */", t);
     for (const j of rows) {
       if (active.has(j.id)) continue;
       const phase = j.inflight ? 'recover' : j.phase;
-      const r = await db.run("UPDATE jobs SET state='queued', phase=?, run_at=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=? AND state='running' AND locked_by IS ?", phase, t, t, j.id, j.locked_by);
+      const r = await db.run("UPDATE jobs SET state='queued', phase=?, run_at=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=? AND state='running' AND locked_by IS ? /* ws:system */", phase, t, t, j.id, j.locked_by);
       if (!r.changes) continue;
       await posts.event(j.post_id, 'warn', j.inflight ? `Publishing was interrupted during "${JSON.parse(j.inflight).label}"; checking whether it went live` : 'Publishing was interrupted; resuming');
       log('warn', `recovered stale job ${j.id} (phase ${phase})`);
@@ -60,7 +67,7 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
   /** Fail scheduled posts that are older than the grace window (server down / cron not running). */
   async function failMissed() {
     const cutoff = now() - S.graceMinutes * 60000;
-    const rows = await db.all("SELECT * FROM jobs WHERE state = 'queued' AND phase = 'start' AND attempts = 0 AND run_at < ?", cutoff);
+    const rows = await db.all("SELECT * FROM jobs WHERE state = 'queued' AND phase = 'start' AND attempts = 0 AND run_at < ? /* ws:system */", cutoff);
     for (const j of rows) {
       await fail(j, `Missed: the server was not running at the scheduled time (more than ${S.graceMinutes} minutes ago). Use Retry to publish now.`, { onlyIfQueued: true });
     }
@@ -69,7 +76,7 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
 
   async function persist(job, fields) {
     const keys = Object.keys(fields);
-    await db.run(`UPDATE jobs SET ${keys.map((k) => `${k}=?`).join(', ')}, updated_at=? WHERE id=?`, ...Object.values(fields), now(), job.id);
+    await db.run(`UPDATE jobs SET ${keys.map((k) => `${k}=?`).join(', ')}, updated_at=? WHERE id=? /* ws:system */`, ...Object.values(fields), now(), job.id);
     Object.assign(job, fields);
   }
 
@@ -77,21 +84,21 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
     const msg = String(message).slice(0, 2000);
     const t = now();
     const res = await db.batch([
-      [`UPDATE jobs SET state='dead', inflight=NULL, last_error=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?${onlyIfQueued ? " AND state='queued'" : ''}`, msg, t, job.id],
-      [`UPDATE posts SET status='failed', error=?, updated_at=? WHERE id=?${onlyIfQueued ? " AND EXISTS (SELECT 1 FROM jobs WHERE id=? AND state='dead')" : ''}`, msg, t, job.post_id, ...(onlyIfQueued ? [job.id] : [])],
+      [`UPDATE jobs SET state='dead', inflight=NULL, last_error=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?${onlyIfQueued ? " AND state='queued'" : ''} /* ws:system */`, msg, t, job.id],
+      [`UPDATE posts SET status='failed', error=?, updated_at=? WHERE id=?${onlyIfQueued ? " AND EXISTS (SELECT 1 FROM jobs WHERE id=? AND state='dead')" : ''} /* ws:system */`, msg, t, job.post_id, ...(onlyIfQueued ? [job.id] : [])],
       posts.eventStmt(job.post_id, 'error', message),
     ]);
     if (onlyIfQueued && !res[0].changes) return;
     log('warn', `post ${job.post_id} failed: ${message}`);
-    try { await onFailed(job.post_id, message); } catch {}
+    try { await onFailed(job.post_id, job.workspace_id || (await wsOf(job.post_id)), message); } catch {}
   }
 
   async function complete(job, ctx, provider, r) {
     const t = now();
     await db.batch([
-      ["UPDATE posts SET status='published', external_id=?, published_url=?, published_at=?, error=NULL, warning=?, attempts=?, updated_at=? WHERE id=?",
+      ["UPDATE posts SET status='published', external_id=?, published_url=?, published_at=?, error=NULL, warning=?, attempts=?, updated_at=? WHERE id=? /* ws:system */",
         r.externalId || null, r.url || null, t, r.warning || null, job.attempts, t, job.post_id],
-      ["UPDATE jobs SET state='done', inflight=NULL, pending_data=NULL, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?", t, job.id],
+      ["UPDATE jobs SET state='done', inflight=NULL, pending_data=NULL, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=? /* ws:system */", t, job.id],
       posts.eventStmt(job.post_id, 'info', `Published${r.url ? `: ${r.url}` : ''}`),
       r.warning ? posts.eventStmt(job.post_id, 'warn', r.warning) : null,
     ]);
@@ -104,13 +111,13 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
         await posts.event(job.post_id, 'info', 'First comment added');
       } catch (e) {
         const w = [r.warning, `Post is live, but the first comment failed: ${e.message}`].filter(Boolean).join(' · ');
-        await db.batch([['UPDATE posts SET warning=? WHERE id=?', w, job.post_id], posts.eventStmt(job.post_id, 'warn', w)]);
+        await db.batch([['UPDATE posts SET warning=? WHERE id=? /* ws:system */', w, job.post_id], posts.eventStmt(job.post_id, 'warn', w)]);
       }
     }
-    try { await onPublished(job.post_id); } catch {}
+    try { await onPublished(job.post_id, job.workspace_id || (await wsOf(job.post_id))); } catch {}
   }
 
-  function buildCtx(job, post, integ, c, budget) {
+  function buildCtx(job, post, integ, c, budget, { media, cfg }) {
     return {
       cfg,
       integration: integ,
@@ -133,11 +140,17 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
    * @param {{budget?: object}} [opts] Workers: stop between phases when the invocation budget runs low.
    */
   async function run(job, { budget = null } = {}) {
-    const post = await db.get('SELECT p.*, i.provider FROM posts p JOIN integrations i ON i.id = p.integration_id WHERE p.id = ?', job.post_id);
+    // System lookup; the post's own workspace_id then selects whose tokens/credentials are used. The join
+    // requires the account to be in the same workspace as the post.
+    const post = await db.get('SELECT p.*, i.provider FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.id = ? /* ws:system */', job.post_id);
     if (!post) {
-      await db.run('DELETE FROM jobs WHERE id = ?', job.id);
+      await db.run('DELETE FROM jobs WHERE id = ? /* ws:system */', job.id);
       return;
     }
+    job.workspace_id = post.workspace_id;
+    const sc = await scopeFor(post.workspace_id);
+    await sc.apps.sync();
+    const { integrations } = sc;
     const provider = getProvider(post.provider);
     let refreshed = false;
     let recovering = false;
@@ -149,8 +162,8 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
         if (!ctx) {
           const integ = await integrations.fresh(post.integration_id);
           if (integ.status !== 'active') return fail(job, `${integ.name}: account needs to be reconnected (${integ.status_message || 'token invalid'}).`);
-          c ||= await posts.composed(post);
-          ctx = buildCtx(job, post, integ, c, budget);
+          c ||= await sc.posts.composed(post);
+          ctx = buildCtx(job, post, integ, c, budget, sc);
         }
         const data = job.pending_data ? JSON.parse(job.pending_data) : null;
         let r;
@@ -193,7 +206,8 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
           refreshed = true;
           try {
             const integ = await integrations.refresh(post.integration_id);
-            ctx = buildCtx(job, post, integ, c, budget);
+            c ||= await sc.posts.composed(post);
+            ctx = buildCtx(job, post, integ, c, budget, sc);
             await persist(job, { inflight: null });
             continue;
           } catch (e2) {
@@ -226,8 +240,8 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
     const delay = Math.round(S.backoffBaseMs * 2 ** (attempts - 1) * (1 + Math.random() * 0.1));
     const runAt = now() + delay;
     await db.batch([
-      ["UPDATE jobs SET state='queued', attempts=?, run_at=?, inflight=NULL, last_error=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?", attempts, runAt, e.message, now(), job.id],
-      ['UPDATE posts SET attempts=?, error=?, updated_at=? WHERE id=?', attempts, `Attempt ${attempts}/${S.maxAttempts} failed: ${e.message} — retrying at ${new Date(runAt).toISOString()}`, now(), job.post_id],
+      ["UPDATE jobs SET state='queued', attempts=?, run_at=?, inflight=NULL, last_error=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=? /* ws:system */", attempts, runAt, e.message, now(), job.id],
+      ['UPDATE posts SET attempts=?, error=?, updated_at=? WHERE id=? /* ws:system */', attempts, `Attempt ${attempts}/${S.maxAttempts} failed: ${e.message} — retrying at ${new Date(runAt).toISOString()}`, now(), job.post_id],
       posts.eventStmt(job.post_id, 'warn', `Attempt ${attempts} failed (${e.message}); retrying in ${Math.round(delay / 1000)}s`),
     ]);
   }
@@ -276,7 +290,7 @@ export function createScheduler({ db, cfg, media, integrations, posts, log = () 
     const end = now() + maxMs;
     while (now() < end) {
       await tick();
-      const open = (await db.get("SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running')")).n;
+      const open = (await db.get("SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running') /* ws:system */")).n;
       if (!active.size && !open) return;
       await new Promise((r) => setTimeout(r, 20));
     }

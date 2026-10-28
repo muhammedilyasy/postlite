@@ -2,10 +2,13 @@
 import { uid } from './crypto.js';
 import { getProvider } from './providers/index.js';
 import { ProviderError } from './providers/http.js';
+import { HttpError } from './errors.js';
 
 const REFRESH_MARGIN_MS = 5 * 60000;
 
-export function createIntegrations({ db, cfg, cipher, log = () => {}, onNeedsReconnect = () => {} }) {
+/** Connected accounts of ONE workspace (ws). Every statement filters by workspace_id. */
+export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeedsReconnect = () => {} }) {
+  if (!ws) throw new Error('createIntegrations: workspace id required');
   const safeMeta = (m) => ({ page_id: m.page_id, page_name: m.page_name, user_token_expires_at: m.user_token_expires_at });
   const publicRow = (r) => r && {
     id: r.id, provider: r.provider, external_id: r.external_id, name: r.name, username: r.username, picture: r.picture,
@@ -14,13 +17,13 @@ export function createIntegrations({ db, cfg, cipher, log = () => {}, onNeedsRec
   };
 
   const api = {
-    list: async () => (await db.all('SELECT * FROM integrations ORDER BY provider, name')).map(publicRow),
-    get: async (id) => publicRow(await db.get('SELECT * FROM integrations WHERE id = ?', id)),
-    rawGet: (id) => db.get('SELECT * FROM integrations WHERE id = ?', id),
+    list: async () => (await db.all('SELECT * FROM integrations WHERE workspace_id = ? ORDER BY provider, name', ws)).map(publicRow),
+    get: async (id) => publicRow(await db.get('SELECT * FROM integrations WHERE id = ? AND workspace_id = ?', String(id ?? ''), ws)),
+    rawGet: (id) => db.get('SELECT * FROM integrations WHERE id = ? AND workspace_id = ?', String(id ?? ''), ws),
 
     /** Decrypted view for provider calls. */
     async secret(id) {
-      const r = await db.get('SELECT * FROM integrations WHERE id = ?', id);
+      const r = await db.get('SELECT * FROM integrations WHERE id = ? AND workspace_id = ?', String(id ?? ''), ws);
       if (!r) return null;
       const [access_token, refresh_token] = await Promise.all([cipher.decrypt(r.access_token_enc), cipher.decrypt(r.refresh_token_enc)]);
       return { ...r, meta: JSON.parse(r.meta || '{}'), access_token, refresh_token };
@@ -29,46 +32,50 @@ export function createIntegrations({ db, cfg, cipher, log = () => {}, onNeedsRec
     /** Insert or update (reconnect) an account returned by provider.exchange(). */
     async upsert(provider, a) {
       const now = Date.now();
-      const existing = await db.get('SELECT id FROM integrations WHERE provider = ? AND external_id = ?', provider, a.external_id);
+      // (provider, external_id) is unique instance-wide (schema since v1). An account connected in another
+      // workspace is never taken over: its tokens stay where they are and this connect is refused.
+      const existing = await db.get('SELECT id, workspace_id FROM integrations WHERE provider = ? AND external_id = ? /* ws:system */', provider, a.external_id);
+      if (existing && existing.workspace_id !== ws) throw new HttpError(409, `${a.name || 'This account'} is already connected in another postlite workspace. Disconnect it there first.`);
       const enc = await Promise.all([cipher.encrypt(a.access_token), cipher.encrypt(a.refresh_token)]);
       if (existing) {
-        await db.run(`UPDATE integrations SET name=?, username=?, picture=?, access_token_enc=?, refresh_token_enc=?, token_expires_at=?, status='active', status_message=NULL, meta=?, updated_at=? WHERE id=?`,
-          a.name || '', a.username || '', a.picture || '', enc[0], enc[1], a.token_expires_at ?? null, JSON.stringify(a.meta || {}), now, existing.id);
+        await db.run(`UPDATE integrations SET name=?, username=?, picture=?, access_token_enc=?, refresh_token_enc=?, token_expires_at=?, status='active', status_message=NULL, meta=?, updated_at=? WHERE id=? AND workspace_id=?`,
+          a.name || '', a.username || '', a.picture || '', enc[0], enc[1], a.token_expires_at ?? null, JSON.stringify(a.meta || {}), now, existing.id, ws);
         return existing.id;
       }
       const id = uid();
-      await db.run(`INSERT INTO integrations(id, provider, external_id, name, username, picture, access_token_enc, refresh_token_enc, token_expires_at, status, meta, created_at, updated_at)
-              VALUES(?,?,?,?,?,?,?,?,?,'active',?,?,?)`,
-        id, provider, a.external_id, a.name || '', a.username || '', a.picture || '', enc[0], enc[1], a.token_expires_at ?? null, JSON.stringify(a.meta || {}), now, now);
+      await db.run(`INSERT INTO integrations(id, workspace_id, provider, external_id, name, username, picture, access_token_enc, refresh_token_enc, token_expires_at, status, meta, created_at, updated_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?,?)`,
+        id, ws, provider, a.external_id, a.name || '', a.username || '', a.picture || '', enc[0], enc[1], a.token_expires_at ?? null, JSON.stringify(a.meta || {}), now, now);
       return id;
     },
 
     async remove(id) {
       // Unpublished posts for this account are removed with it (FK cascade); published history goes too.
-      await db.run('DELETE FROM integrations WHERE id = ?', id);
+      await db.run('DELETE FROM integrations WHERE id = ? AND workspace_id = ?', id, ws);
     },
 
     async markNeedsReconnect(id, message) {
-      const before = await db.get('SELECT status, name, provider FROM integrations WHERE id = ?', id);
+      const before = await db.get('SELECT status, name, provider FROM integrations WHERE id = ? AND workspace_id = ?', id, ws);
       if (before && before.status !== 'needs_reconnect') {
         try { await onNeedsReconnect({ account_id: id, name: before.name, provider: before.provider, message: String(message || '') }); } catch {}
       }
-      await db.run(`UPDATE integrations SET status='needs_reconnect', status_message=?, updated_at=? WHERE id=?`, String(message || 'Reconnect required').slice(0, 500), Date.now(), id);
+      await db.run(`UPDATE integrations SET status='needs_reconnect', status_message=?, updated_at=? WHERE id=? AND workspace_id=?`, String(message || 'Reconnect required').slice(0, 500), Date.now(), id, ws);
       log('warn', `integration ${id} needs reconnect: ${message}`);
     },
     async markActive(id) {
-      await db.run(`UPDATE integrations SET status='active', status_message=NULL, last_checked_at=?, updated_at=? WHERE id=?`, Date.now(), Date.now(), id);
+      await db.run(`UPDATE integrations SET status='active', status_message=NULL, last_checked_at=?, updated_at=? WHERE id=? AND workspace_id=?`, Date.now(), Date.now(), id, ws);
     },
 
     async saveTokens(id, t) {
       const [a, r] = await Promise.all([cipher.encrypt(t.access_token), t.refresh_token ? cipher.encrypt(t.refresh_token) : null]);
-      await db.run('UPDATE integrations SET access_token_enc=?, refresh_token_enc=COALESCE(?, refresh_token_enc), token_expires_at=?, updated_at=? WHERE id=?',
-        a, r, t.token_expires_at ?? null, Date.now(), id);
+      await db.run('UPDATE integrations SET access_token_enc=?, refresh_token_enc=COALESCE(?, refresh_token_enc), token_expires_at=?, updated_at=? WHERE id=? AND workspace_id=?',
+        a, r, t.token_expires_at ?? null, Date.now(), id, ws);
     },
 
     /** Refresh tokens when the provider supports it. Marks needs_reconnect on unrecoverable failure. */
     async refresh(id) {
       const integ = await api.secret(id);
+      if (!integ) throw new ProviderError('permanent', 'The connected account was removed.');
       const p = getProvider(integ.provider);
       if (!p.canRefresh || !p.refresh) throw new ProviderError('auth', 'Token expired and this platform does not support refresh; reconnect the account.');
       try {
@@ -117,14 +124,14 @@ export function createIntegrations({ db, cfg, cipher, log = () => {}, onNeedsRec
           await api.markNeedsReconnect(id, e.message);
           return { ok: false, error: e.message };
         }
-        await db.run('UPDATE integrations SET last_checked_at=? WHERE id=?', Date.now(), id);
+        await db.run('UPDATE integrations SET last_checked_at=? WHERE id=? AND workspace_id=?', Date.now(), id, ws);
         return { ok: false, error: e.message, transient: e.kind === 'transient' };
       }
     },
 
     /** Periodic maintenance: refresh soon-to-expire tokens and flag expiring Meta user tokens. */
     async maintain({ budget = null } = {}) {
-      for (const r of await db.all("SELECT id, provider, token_expires_at, meta FROM integrations WHERE status = 'active'")) {
+      for (const r of await db.all("SELECT id, provider, token_expires_at, meta FROM integrations WHERE workspace_id = ? AND status = 'active'", ws)) {
         if (budget && !budget.has({ fetches: 4, queries: 6 })) break;
         try {
           const p = getProvider(r.provider);

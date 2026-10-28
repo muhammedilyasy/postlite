@@ -5,6 +5,8 @@
 // end in one go (no windows/batches), which keeps the old behaviour.
 import { getProvider } from './providers/index.js';
 import { isBudgetError } from './scheduler.js';
+import { HttpError } from './errors.js';
+import { ytThumb } from './providers/youtube.js';
 
 const DAY = 86400000;
 export const SNAPSHOT_METRICS = new Set(['followers', 'following', 'media_count', 'total_views', 'page_likes']);
@@ -23,10 +25,16 @@ function multiRow(head, cols, rows, tail = '') {
   return out;
 }
 
-export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynced = () => {} }) {
+/**
+ * Analytics of ONE workspace (ws): sync of its accounts and every read. Child tables (account_metrics,
+ * post_metrics, analytics_status/runs) are read through `integration_id IN (this workspace's accounts)`;
+ * sync writes are keyed by an account id verified in this workspace first (ws:checked).
+ */
+export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onSynced = () => {} }) {
+  if (!ws) throw new Error('createAnalytics: workspace id required');
   let running = null;
-  let timer = null;
   const A = cfg.analytics;
+  const OWN = 'integration_id IN (SELECT id FROM integrations WHERE workspace_id = ?)';
 
   async function withAuthRetry(id, fn) {
     let integ = await integrations.fresh(id);
@@ -42,21 +50,21 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     }
   }
 
-  const saveRun = (r) => db.run('UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=?', r.phase, r.cursor, JSON.stringify(r.data), Date.now(), r.integration_id);
+  const saveRun = (r) => db.run('UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=? /* ws:checked */', r.phase, r.cursor, JSON.stringify(r.data), Date.now(), r.integration_id);
 
   async function startRun(id) {
-    const status = await db.get('SELECT * FROM analytics_status WHERE integration_id = ?', id);
+    const status = await db.get('SELECT * FROM analytics_status WHERE integration_id = ? /* ws:checked */', id);
     const t = Date.now();
     const since = Math.max(status?.last_sync_at ? status.last_sync_at - 2 * DAY : 0, t - A.backfillDays * DAY);
     const data = { unavailable: { account: {}, posts: {} }, daily: 0, postMetrics: 0, items: [], prevSync: status?.last_sync_at || null };
     await db.run(`INSERT INTO analytics_runs(integration_id, phase, cursor, until_ms, since_ms, data, started_at, updated_at) VALUES(?,?,?,?,?,?,?,?)
-      ON CONFLICT(integration_id) DO UPDATE SET phase=excluded.phase, cursor=excluded.cursor, until_ms=excluded.until_ms, since_ms=excluded.since_ms, data=excluded.data, started_at=excluded.started_at, updated_at=excluded.updated_at`,
+      ON CONFLICT(integration_id) DO UPDATE SET phase=excluded.phase, cursor=excluded.cursor, until_ms=excluded.until_ms, since_ms=excluded.since_ms, data=excluded.data, started_at=excluded.started_at, updated_at=excluded.updated_at /* ws:checked */`,
     id, 'account', since, t, since, JSON.stringify(data), t, t);
     return { integration_id: id, phase: 'account', cursor: since, until_ms: t, since_ms: since, data, started_at: t };
   }
 
   /** Run one step of a sync. Returns the final result when the run finished, else null. */
-  async function step(run, row, provider) {
+  async function step(run, row, provider, budget = null) {
     const id = run.integration_id;
     const t = run.until_ms;
     const un = run.data.unavailable;
@@ -70,8 +78,8 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
       run.cursor = end;
       if (end >= t) { run.phase = 'list'; run.cursor = 0; }
       await db.batch([
-        ...multiRow('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at)', 5, rows, 'ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at'),
-        ['UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=?', run.phase, run.cursor, JSON.stringify(run.data), Date.now(), id],
+        ...multiRow('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at)', 5, rows, 'ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at /* ws:checked */'),
+        ['UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=? /* ws:checked */', run.phase, run.cursor, JSON.stringify(run.data), Date.now(), id],
       ]);
       return null;
     }
@@ -84,7 +92,7 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
         un.account.recent_posts = e.message;
       }
       // Posts we published that are not in the "recent" window still get tracked.
-      const ours = await db.all("SELECT p.id, p.external_id, p.published_at, p.published_url, p.settings, COALESCE(p.content_override, g.content) AS caption FROM posts p JOIN groups g ON g.id = p.group_id WHERE p.integration_id = ? AND p.status = 'published' AND p.external_id IS NOT NULL AND p.published_at > ? ORDER BY p.published_at DESC LIMIT 100", id, t - 90 * DAY);
+      const ours = await db.all("SELECT p.id, p.external_id, p.published_at, p.published_url, p.settings, COALESCE(p.content_override, g.content) AS caption FROM posts p JOIN groups g ON g.id = p.group_id AND g.workspace_id = p.workspace_id WHERE p.workspace_id = ? AND p.integration_id = ? AND p.status = 'published' AND p.external_id IS NOT NULL AND p.published_at > ? ORDER BY p.published_at DESC LIMIT 100", ws, id, t - 90 * DAY);
       const items = new Map(recent.map((r) => [r.external_id, r]));
       for (const o of ours) {
         if (!items.has(o.external_id)) {
@@ -118,28 +126,39 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
           }
         });
       }
-      const links = slice.length ? await db.all(`SELECT id, external_id FROM posts WHERE integration_id = ? AND external_id IN (${slice.map(() => '?').join(',')})`, id, ...slice.map((i) => i.external_id)) : [];
+      // Thumbnails for items the list did not give one (our own posts outside the recent window, videos
+      // without full_picture): asked once; afterwards the stored thumbnail is kept.
+      if (provider.thumbnailFor && slice.some((it) => !it.thumbnail)) {
+        const have = new Map((await db.all(`SELECT external_id, thumbnail FROM remote_posts WHERE workspace_id = ? AND integration_id = ? AND external_id IN (${slice.map(() => '?').join(',')})`, ws, id, ...slice.map((i) => i.external_id))).map((r) => [r.external_id, r.thumbnail]));
+        const integ = await integrations.fresh(id);
+        for (const it of slice) {
+          if (it.thumbnail || have.get(it.external_id)) continue;
+          if (budget && !budget.has({ fetches: 3, queries: 3 })) break;
+          try { it.thumbnail = (await provider.thumbnailFor({ cfg, integration: integ, token: integ.access_token }, it)) || ''; } catch (e) { if (e.kind === 'auth' || isBudgetError(e)) throw e; }
+        }
+      }
+      const links = slice.length ? await db.all(`SELECT id, external_id FROM posts WHERE workspace_id = ? AND integration_id = ? AND external_id IN (${slice.map(() => '?').join(',')})`, ws, id, ...slice.map((i) => i.external_id)) : [];
       const linkBy = new Map(links.map((l) => [l.external_id, l.id]));
-      const remote = slice.map((it) => [id, it.external_id, linkBy.get(it.external_id) || null, it.kind || null, it.caption || '', it.permalink || null, it.thumbnail || '', it.published_at || null, t]);
+      const remote = slice.map((it) => [ws, id, it.external_id, linkBy.get(it.external_id) || null, it.kind || null, it.caption || '', it.permalink || null, it.thumbnail || '', it.published_at || null, t]);
       run.data.postMetrics += metricRows.length;
       run.cursor += slice.length;
       if (run.cursor >= items.length) run.phase = 'finish';
       await db.batch([
-        ...multiRow('INSERT INTO remote_posts(integration_id, external_id, post_id, kind, caption, permalink, thumbnail, published_at, updated_at)', 9, remote,
+        ...multiRow('INSERT INTO remote_posts(workspace_id, integration_id, external_id, post_id, kind, caption, permalink, thumbnail, published_at, updated_at)', 10, remote,
           `ON CONFLICT(integration_id, external_id) DO UPDATE SET post_id=COALESCE(excluded.post_id, remote_posts.post_id), kind=COALESCE(excluded.kind, remote_posts.kind),
            caption=CASE WHEN excluded.caption <> '' THEN excluded.caption ELSE remote_posts.caption END, permalink=COALESCE(excluded.permalink, remote_posts.permalink),
            thumbnail=CASE WHEN excluded.thumbnail <> '' THEN excluded.thumbnail ELSE remote_posts.thumbnail END, published_at=COALESCE(excluded.published_at, remote_posts.published_at), updated_at=excluded.updated_at`),
-        ...multiRow('INSERT OR REPLACE INTO post_metrics(integration_id, external_id, metric, captured_at, value)', 5, metricRows),
-        ['UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=?', run.phase, run.cursor, JSON.stringify(run.data), Date.now(), id],
+        ...multiRow('INSERT OR REPLACE INTO post_metrics(integration_id, external_id, metric, captured_at, value)', 5, metricRows, '/* ws:checked */'),
+        ['UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=? /* ws:checked */', run.phase, run.cursor, JSON.stringify(run.data), Date.now(), id],
       ]);
       return null;
     }
     // finish
     await db.batch([
-      ['DELETE FROM post_metrics WHERE integration_id = ? AND captured_at < ?', id, t - 365 * DAY],
+      ['DELETE FROM post_metrics WHERE integration_id = ? AND captured_at < ? /* ws:checked */', id, t - 365 * DAY],
       [`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,NULL,?)
-        ON CONFLICT(integration_id) DO UPDATE SET last_sync_at=excluded.last_sync_at, last_error=NULL, unavailable=excluded.unavailable`, id, t, JSON.stringify(un)],
-      ['DELETE FROM analytics_runs WHERE integration_id = ?', id],
+        ON CONFLICT(integration_id) DO UPDATE SET last_sync_at=excluded.last_sync_at, last_error=NULL, unavailable=excluded.unavailable /* ws:checked */`, id, t, JSON.stringify(un)],
+      ['DELETE FROM analytics_runs WHERE integration_id = ? /* ws:checked */', id],
     ]);
     return { ok: true, daily: run.data.daily, posts: run.data.items.length, postMetrics: run.data.postMetrics, unavailable: un };
   }
@@ -153,13 +172,13 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     if (!row) throw new Error('Unknown integration');
     const provider = getProvider(row.provider);
     if (!provider.accountAnalytics) return { skipped: true };
-    let run = restart ? null : await db.get('SELECT * FROM analytics_runs WHERE integration_id = ?', id);
+    let run = restart ? null : await db.get('SELECT * FROM analytics_runs WHERE integration_id = ? /* ws:checked */', id);
     if (run) run = { ...run, data: JSON.parse(run.data || '{}') };
     else run = await startRun(id);
     try {
       for (;;) {
         if (budget && !budget.has(STEP_COST)) return { ok: true, pending: true, phase: run.phase };
-        const done = await step(run, row, provider);
+        const done = await step(run, row, provider, budget);
         if (done) return done;
       }
     } catch (e) {
@@ -169,8 +188,8 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
       }
       await db.batch([
         [`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,?, '{}')
-          ON CONFLICT(integration_id) DO UPDATE SET last_error=excluded.last_error`, id, run.data.prevSync || null, e.message],
-        ['DELETE FROM analytics_runs WHERE integration_id = ?', id],
+          ON CONFLICT(integration_id) DO UPDATE SET last_error=excluded.last_error /* ws:checked */`, id, run.data.prevSync || null, e.message],
+        ['DELETE FROM analytics_runs WHERE integration_id = ? /* ws:checked */', id],
       ]);
       if (e.kind === 'auth' || e.kind === 'disconnect') await integrations.markNeedsReconnect(id, e.message);
       log('warn', `analytics sync ${id}: ${e.message}`);
@@ -182,7 +201,7 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     if (running) return running;
     running = (async () => {
       const out = {};
-      for (const r of await db.all("SELECT id FROM integrations WHERE status = 'active'")) out[r.id] = await syncIntegration(r.id, { restart: true });
+      for (const r of await db.all("SELECT id FROM integrations WHERE workspace_id = ? AND status = 'active'", ws)) out[r.id] = await syncIntegration(r.id, { restart: true });
       try { await onSynced(out); } catch {}
       return out;
     })().finally(() => { running = null; });
@@ -198,8 +217,8 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     if (!ms && !force) return {};
     const due = await db.all(`SELECT i.id, r.integration_id AS running FROM integrations i
       LEFT JOIN analytics_status s ON s.integration_id = i.id LEFT JOIN analytics_runs r ON r.integration_id = i.id
-      WHERE i.status = 'active' AND (r.integration_id IS NOT NULL OR s.last_sync_at IS NULL OR s.last_sync_at < ?)
-      ORDER BY (r.integration_id IS NULL), COALESCE(s.last_sync_at, 0) LIMIT 10`, Date.now() - (force ? 0 : ms));
+      WHERE i.workspace_id = ? AND i.status = 'active' AND (r.integration_id IS NOT NULL OR s.last_sync_at IS NULL OR s.last_sync_at < ?)
+      ORDER BY (r.integration_id IS NULL), COALESCE(s.last_sync_at, 0) LIMIT 10`, ws, Date.now() - (force ? 0 : ms));
     const out = {};
     for (const d of due) {
       if (budget && !budget.has(STEP_COST)) break;
@@ -214,7 +233,7 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
   const dayStr = (ms) => new Date(ms).toISOString().slice(0, 10);
 
   async function series(integrationId, from, to) {
-    const rows = await db.all('SELECT metric, day, value FROM account_metrics WHERE integration_id = ? AND day >= ? AND day <= ? ORDER BY day', integrationId, dayStr(from), dayStr(to));
+    const rows = await db.all(`SELECT metric, day, value FROM account_metrics WHERE integration_id = ? AND ${OWN} AND day >= ? AND day <= ? ORDER BY day`, integrationId, ws, dayStr(from), dayStr(to));
     const out = {};
     for (const r of rows) (out[r.metric] ||= []).push({ day: r.day, value: r.value });
     return out;
@@ -239,21 +258,26 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
   async function latestPostMetrics(integrationId) {
     const rows = await db.all(`SELECT pm.external_id, pm.metric, pm.value FROM post_metrics pm
       JOIN (SELECT external_id, metric, MAX(captured_at) AS mc FROM post_metrics WHERE integration_id = ? GROUP BY external_id, metric) l
-      ON l.external_id = pm.external_id AND l.metric = pm.metric AND l.mc = pm.captured_at WHERE pm.integration_id = ?`, integrationId, integrationId);
+      ON l.external_id = pm.external_id AND l.metric = pm.metric AND l.mc = pm.captured_at WHERE pm.integration_id = ? AND pm.${OWN}`, integrationId, integrationId, ws);
     const map = {};
     for (const r of rows) (map[r.external_id] ||= {})[r.metric] = r.value;
     return map;
   }
 
   async function topPosts({ integrationId = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
-    const integs = integrationId ? [await integrations.rawGet(integrationId)].filter(Boolean) : await db.all('SELECT * FROM integrations');
+    let integs;
+    if (integrationId) {
+      const one = await integrations.rawGet(integrationId);
+      if (!one) throw new HttpError(404, 'Account not found.');
+      integs = [one];
+    } else integs = await db.all('SELECT * FROM integrations WHERE workspace_id = ?', ws);
     const out = [];
     for (const integ of integs) {
       const id = integ.id;
       const metrics = await latestPostMetrics(id);
-      const rows = await db.all('SELECT * FROM remote_posts WHERE integration_id = ? AND (published_at IS NULL OR (published_at >= ? AND published_at <= ?))', id, from, to);
+      const rows = await db.all('SELECT * FROM remote_posts WHERE workspace_id = ? AND integration_id = ? AND (published_at IS NULL OR (published_at >= ? AND published_at <= ?))', ws, id, from, to);
       for (const r of rows) {
-        out.push({ integration_id: id, provider: integ.provider, account: integ.name, external_id: r.external_id, post_id: r.post_id, kind: r.kind, caption: r.caption, permalink: r.permalink, thumbnail: r.thumbnail, published_at: r.published_at, via_postlite: !!r.post_id, metrics: metrics[r.external_id] || {} });
+        out.push({ integration_id: id, provider: integ.provider, account: integ.name, external_id: r.external_id, post_id: r.post_id, kind: r.kind, caption: r.caption, permalink: r.permalink, thumbnail: r.thumbnail || (integ.provider === 'youtube' ? ytThumb(null, r.external_id) : ''), published_at: r.published_at, via_postlite: !!r.post_id, metrics: metrics[r.external_id] || {} });
       }
     }
     out.sort((a, b) => (b.metrics[sort] ?? -1) - (a.metrics[sort] ?? -1));
@@ -261,7 +285,7 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
   }
 
   async function postSeries(integrationId, externalId) {
-    const rows = await db.all('SELECT metric, captured_at, value FROM post_metrics WHERE integration_id = ? AND external_id = ? ORDER BY captured_at', integrationId, externalId);
+    const rows = await db.all(`SELECT metric, captured_at, value FROM post_metrics WHERE integration_id = ? AND ${OWN} AND external_id = ? ORDER BY captured_at`, integrationId, ws, externalId);
     const out = {};
     for (const r of rows) (out[r.metric] ||= []).push({ t: r.captured_at, value: r.value });
     return out;
@@ -275,7 +299,8 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
 
   async function csvAccount(integrationId, from, to) {
     const integ = await integrations.rawGet(integrationId);
-    const rows = await db.all('SELECT day, metric, value FROM account_metrics WHERE integration_id = ? AND day >= ? AND day <= ? ORDER BY day, metric', integrationId, dayStr(from), dayStr(to));
+    if (!integ) throw new HttpError(404, 'Account not found.');
+    const rows = await db.all(`SELECT day, metric, value FROM account_metrics WHERE integration_id = ? AND ${OWN} AND day >= ? AND day <= ? ORDER BY day, metric`, integrationId, ws, dayStr(from), dayStr(to));
     return ['account,provider,day,metric,value', ...rows.map((r) => [integ?.name, integ?.provider, r.day, r.metric, r.value].map(csvCell).join(','))].join('\n') + '\n';
   }
 
@@ -299,13 +324,63 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     postSeries,
     csvAccount,
     csvPosts,
-    status: async (id) => statusView(await db.get('SELECT * FROM analytics_status WHERE integration_id = ?', id)),
+    status: async (id) => statusView(await db.get(`SELECT * FROM analytics_status WHERE integration_id = ? AND ${OWN}`, id, ws)),
     /** status for many accounts in one query: Map id → status */
     async statusMany(ids) {
       if (!ids.length) return new Map();
-      const rows = await db.all(`SELECT * FROM analytics_status WHERE integration_id IN (${ids.map(() => '?').join(',')})`, ...ids);
+      const rows = await db.all(`SELECT * FROM analytics_status WHERE ${OWN} AND integration_id IN (${ids.map(() => '?').join(',')})`, ws, ...ids);
       return new Map(rows.map((r) => [r.integration_id, statusView(r)]));
     },
+    isRunning: () => !!running,
+  };
+}
+
+/**
+ * Instance-wide analytics loop: every active account of every workspace, each synced with its own
+ * workspace's tokens and app credentials (scopeFor(ws).analytics).
+ */
+export function createAnalyticsLoop({ db, cfg, scopeFor, log = () => {} }) {
+  let timer = null;
+  let running = null;
+  const A = cfg.analytics;
+  const byWs = (rows) => {
+    const m = new Map();
+    for (const r of rows) (m.get(r.workspace_id) || m.set(r.workspace_id, []).get(r.workspace_id)).push(r.id);
+    return m;
+  };
+  async function syncAll() {
+    if (running) return running;
+    running = (async () => {
+      const out = {};
+      const rows = await db.all("SELECT id, workspace_id FROM integrations WHERE status = 'active' AND workspace_id IS NOT NULL /* ws:system */");
+      for (const [ws] of byWs(rows)) Object.assign(out, await scopeFor(ws).analytics.syncAll());
+      return out;
+    })().finally(() => { running = null; });
+    return running;
+  }
+  /** Workers cron: resume unfinished runs, then start due ones, while the budget lasts. */
+  async function syncDue({ budget = null } = {}) {
+    const ms = A.intervalHours * 3600000;
+    if (!ms) return {};
+    const due = await db.all(`SELECT i.id, i.workspace_id FROM integrations i
+      LEFT JOIN analytics_status s ON s.integration_id = i.id LEFT JOIN analytics_runs r ON r.integration_id = i.id
+      WHERE i.status = 'active' AND i.workspace_id IS NOT NULL AND (r.integration_id IS NOT NULL OR s.last_sync_at IS NULL OR s.last_sync_at < ?)
+      ORDER BY (r.integration_id IS NULL), COALESCE(s.last_sync_at, 0) LIMIT 10`, Date.now() - ms);
+    const out = {};
+    for (const d of due) {
+      if (budget && !budget.has(STEP_COST)) break;
+      const sc = scopeFor(d.workspace_id);
+      await sc.apps.sync();
+      const r = await sc.analytics.syncIntegration(d.id, { budget });
+      out[d.id] = r;
+      if (!r.pending) { try { await sc.webhooks.emit('analytics.synced', { accounts: { [d.id]: r } }); } catch {} }
+      if (r.pending) break;
+    }
+    return out;
+  }
+  return {
+    syncAll,
+    syncDue,
     isRunning: () => !!running,
     start() {
       const ms = A.intervalHours * 3600000;
@@ -313,7 +388,7 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
       timer = setInterval(() => syncAll().catch((e) => log('error', `analytics: ${e.message}`)), ms);
       timer.unref?.();
       // first sync shortly after boot if never synced or stale
-      db.get('SELECT MIN(COALESCE(last_sync_at, 0)) AS t FROM analytics_status').then((r) => {
+      db.get('SELECT MIN(COALESCE(last_sync_at, 0)) AS t FROM analytics_status /* ws:system */').then((r) => {
         if (Date.now() - (r?.t || 0) > ms) setTimeout(() => syncAll().catch(() => {}), 60000).unref?.();
       }).catch(() => {});
     },

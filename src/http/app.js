@@ -4,7 +4,7 @@
 // src/http/server.js bridges node:http to it.
 import { randomToken, sha256, hmacHex, safeEqual } from '../crypto.js';
 import { HttpError } from '../errors.js';
-import { operations, execute } from '../api/operations.js';
+import { operations, execute, scopeFor } from '../api/operations.js';
 import { coerceQuery } from '../api/schema.js';
 import { openapi } from '../api/openapi.js';
 import { createMcp } from '../mcp.js';
@@ -12,6 +12,8 @@ import { SESSION_PRINCIPAL } from '../apikeys.js';
 import { renderMarkdown } from '../markdown.js';
 import { createAccessVerifier, validateAuthConfig, AccessError } from '../access.js';
 import { fromUtf8, toBase64 } from '../bytes.js';
+import { oauthStateWorkspace } from '../oauth.js';
+import { LEGACY_WORKSPACE } from '../tenant.js';
 
 const SESSION_DAYS = 14;
 
@@ -119,8 +121,20 @@ export function createApp(core, { files, version }) {
     ]);
     return { cookie: `pl_sid=${sid}; ${cookieFlags}; Max-Age=${SESSION_DAYS * 86400}`, session: { id_hash: h, csrf, created_at: now, expires_at: now + SESSION_DAYS * 86400000, email, access_exp: accessExp } };
   }
-  /** The principal for a web-UI session; in Access mode it carries the verified email (audit log). */
-  const sessionPrincipal = (s) => (s?.email ? { ...SESSION_PRINCIPAL, id: s.email, name: s.email, email: s.email } : SESSION_PRINCIPAL);
+  /**
+   * The principal for a web-UI session, bound to ONE workspace: in Access mode the signed-in email's own
+   * workspace (created on first sign-in), in password mode the single owner workspace.
+   */
+  async function sessionPrincipal(s) {
+    if (accessMode) {
+      if (!s?.email) throw new HttpError(401, 'Not signed in with Cloudflare Access. Reload the page.');
+      const w = await core.workspaces.forEmail(s.email);
+      return { ...SESSION_PRINCIPAL, id: s.email, name: s.email, email: s.email, workspace_id: w.workspace_id, workspace_name: w.name };
+    }
+    const w = await core.workspaces.get(LEGACY_WORKSPACE);
+    return { ...SESSION_PRINCIPAL, ...(s?.email ? { id: s.email, name: s.email, email: s.email } : {}), workspace_id: LEGACY_WORKSPACE, workspace_name: w?.name || 'Owner' };
+  }
+  const auditAs = async (s, rec) => { const pr = await sessionPrincipal(s); return core.scope(pr.workspace_id).audit.record({ principal: pr, ...rec }); };
 
   // ---- Cloudflare Access ----
   const accessToken = (req) => String(req.headers.get('cf-access-jwt-assertion') || '').trim() || parseCookies(req.headers.get('cookie')).CF_Authorization || '';
@@ -146,7 +160,7 @@ export function createApp(core, { files, version }) {
       return { session: { ...s, access_exp: Math.max(s.access_exp || 0, accessExp) }, setCookie: null };
     }
     const created = await createSession(req, ctx, id.email, accessExp);
-    await core.audit.record({ principal: sessionPrincipal(created.session), via: 'ui', operation: 'login', target: 'cloudflare-access', status: 200 });
+    await auditAs(created.session, { via: 'ui', operation: 'login', target: 'cloudflare-access', status: 200 });
     return { session: created.session, setCookie: created.cookie };
   }
 
@@ -201,7 +215,7 @@ export function createApp(core, { files, version }) {
     if (!['GET', 'HEAD'].includes(req.method)) {
       if (!safeEqual(String(req.headers.get('x-csrf-token') || ''), s.csrf) || !originOk(req)) throw new HttpError(403, 'CSRF check failed. Reload the page.');
     }
-    return { ...sessionPrincipal(s), csrf: s.csrf };
+    return { ...(await sessionPrincipal(s)), csrf: s.csrf };
   }
 
   const LOGO = '<svg class="logo-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 16.5V7.5h4.6a3 3 0 0 1 0 6H8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -307,6 +321,8 @@ export function createApp(core, { files, version }) {
     let principal;
     try { principal = await authenticate(req); } catch (e) { return sendError(e, e.retryAfter ? { 'retry-after': String(e.retryAfter) } : e.status === 401 ? { 'www-authenticate': 'Bearer realm="postlite"' } : {}); }
     const via = principal.type === 'session' ? 'ui' : 'rest';
+    let sc;
+    try { sc = await scopeFor(core, principal); } catch (e) { return sendError(e); }
 
     // raw media upload (single request; on Workers limited by the 100 MB request body cap — use /media/uploads)
     if (p === '/api/v1/media' && req.method === 'POST' && !/json/i.test(req.headers.get('content-type') || '')) {
@@ -314,9 +330,9 @@ export function createApp(core, { files, version }) {
         if (!principal.scopes.includes('write') && !principal.scopes.includes('admin')) throw new HttpError(403, 'This API key lacks the "write" scope.');
         const name = String(req.headers.get('x-filename') || url.searchParams.get('filename') || 'upload');
         const len = req.headers.get('content-length');
-        const md = await core.media.save(req.body, decodeURIComponent(name), { size: len === null ? undefined : Number(len) });
-        await core.audit.record({ principal, via, operation: 'upload_media', target: md.id, status: 200, detail: { name, size: md.size } });
-        return send(200, { media: { ...core.media.view(md), public_url: core.media.publicUrl(md) } });
+        const md = await sc.media.save(req.body, decodeURIComponent(name), { size: len === null ? undefined : Number(len) });
+        await sc.audit.record({ principal, via, operation: 'upload_media', target: md.id, status: 200, detail: { name, size: md.size } });
+        return send(200, { media: { ...sc.media.view(md), public_url: sc.media.publicUrl(md) } });
       } catch (e) { return sendError(e); }
     }
     if (p === '/api/v1/analytics/export.csv' && req.method === 'GET') {
@@ -328,8 +344,8 @@ export function createApp(core, { files, version }) {
         let csv;
         if (q.kind === 'account') {
           if (!q.account_id) throw new HttpError(400, 'account_id is required for kind=account');
-          csv = await core.analytics.csvAccount(q.account_id, from, to);
-        } else csv = await core.analytics.csvPosts({ integrationId: q.account_id || null, from, to, sort: q.sort || 'views' });
+          csv = await sc.analytics.csvAccount(q.account_id, from, to);
+        } else csv = await sc.analytics.csvPosts({ integrationId: q.account_id || null, from, to, sort: q.sort || 'views' });
         return send(200, csv, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="postlite-${q.kind === 'account' ? 'account' : 'posts'}-${new Date().toISOString().slice(0, 10)}.csv"`, 'cache-control': 'no-store' });
       } catch (e) { return sendError(e); }
     }
@@ -337,18 +353,18 @@ export function createApp(core, { files, version }) {
     if ((m = /^\/api\/v1\/oauth\/pending\/([\w-]+)$/.exec(p))) {
       try {
         if (principal.type !== 'session' && !principal.scopes.includes('admin')) throw new HttpError(403, 'admin scope required');
-        if (req.method === 'GET') return send(200, await core.oauth.pending(m[1]));
+        if (req.method === 'GET') return send(200, await sc.oauth.pending(m[1]));
         if (req.method === 'POST') {
           const body = JSON.parse((await readText(req, 65536)) || '{}');
-          const connected = await core.oauth.select(m[1], body.external_ids || []);
-          await core.audit.record({ principal, via, operation: 'select_accounts', status: 200, detail: { connected } });
+          const connected = await sc.oauth.select(m[1], body.external_ids || []);
+          await sc.audit.record({ principal, via, operation: 'select_accounts', status: 200, detail: { connected } });
           return send(200, { connected });
         }
       } catch (e) { return sendError(e); }
     }
-    if (p === '/api/v1/oauth/providers' && req.method === 'GET') return send(200, { providers: core.oauth.available() });
+    if (p === '/api/v1/oauth/providers' && req.method === 'GET') return send(200, { providers: sc.oauth.available() });
     if (p === '/api/v1/session' && req.method === 'GET') {
-      return send(200, { csrf: principal.csrf || null, principal: { type: principal.type, name: principal.name, email: principal.email || null, scopes: principal.scopes }, auth_mode: cfg.auth.mode, logout_url: logoutTarget(), version: VERSION, runtime: cfg.platform, upload: { multipart: true, prefer_multipart_over_mb: workers ? 0 : 1024 } });
+      return send(200, { csrf: principal.csrf || null, principal: { type: principal.type, name: principal.name, email: principal.email || null, scopes: principal.scopes }, workspace: { id: principal.workspace_id, name: principal.workspace_name || null }, auth_mode: cfg.auth.mode, logout_url: logoutTarget(), version: VERSION, runtime: cfg.platform, upload: { multipart: true, prefer_multipart_over_mb: workers ? 0 : 1024 } });
     }
 
     for (const r of routes) {
@@ -414,7 +430,6 @@ export function createApp(core, { files, version }) {
     // Agent docs are mirrored under /api/v1 so API-key clients can read them through the bypass.
     if (p === '/api/v1/llms.txt' && req.method === 'GET') return files.serve(req, 'docs/llms.txt');
     if (p === '/api/v1/agent-guide.md' && req.method === 'GET') return agentGuide(req);
-    await core.prepare();
     if (p.startsWith('/api/')) return handleApi(req, url); // Bearer key, or session (+Access JWT)
     if (p === '/mcp' || p === '/mcp/') return handleMcp(req); // Bearer key only
     // Static assets are the open-source UI code (no data) and style the sign-in / denied pages.
@@ -462,7 +477,7 @@ export function createApp(core, { files, version }) {
       const form = new URLSearchParams(await readText(req, 8192));
       if (s && (safeEqual(form.get('csrf') || '', s.csrf) || safeEqual(String(req.headers.get('x-csrf-token') || ''), s.csrf))) {
         await db.run('DELETE FROM sessions WHERE id_hash = ?', s.id_hash);
-        if (s.email) await core.audit.record({ principal: sessionPrincipal(s), via: 'ui', operation: 'logout', status: 200 });
+        if (s.email) await auditAs(s, { via: 'ui', operation: 'logout', status: 200 }).catch(() => {});
       }
       return send(303, '', { location: logoutTarget(), 'set-cookie': `pl_sid=; ${cookieFlags}; Max-Age=0` });
     }
@@ -475,8 +490,10 @@ export function createApp(core, { files, version }) {
       const ui = await requireUi(req, ctx);
       if (ui instanceof Response) return ui;
       try {
-        const r = await core.oauth.start(m[1], { reconnectId: url.searchParams.get('reconnect') || null });
-        await core.audit.record({ principal: sessionPrincipal(ui.session), via: 'ui', operation: 'oauth_start', target: m[1], status: 200 });
+        const pr = await sessionPrincipal(ui.session);
+        const sc = await scopeFor(core, pr);
+        const r = await sc.oauth.start(m[1], { reconnectId: url.searchParams.get('reconnect') || null });
+        await sc.audit.record({ principal: pr, via: 'ui', operation: 'oauth_start', target: m[1], status: 200 });
         return send(302, '', withCookie(ui, { location: r.url }));
       } catch (e) {
         if (e.status === 409 && e.extra?.app) return send(302, '', withCookie(ui, { location: `/#/settings/apps/${e.extra.app}` }));
@@ -489,9 +506,20 @@ export function createApp(core, { files, version }) {
       let ui = { session: null, setCookie: null };
       if (accessMode) { ui = await requireUi(req, ctx); if (ui instanceof Response) return ui; }
       try {
-        const r = await core.oauth.callback(m[1], Object.fromEntries(url.searchParams));
+        // The flow belongs to the workspace that started it. In Access mode the signed-in person must be in
+        // that same workspace; another person's state is answered as if it did not exist.
+        const stateWs = await oauthStateWorkspace(db, url.searchParams.get('state'));
+        let pr = null;
+        if (accessMode) {
+          pr = await sessionPrincipal(ui.session);
+          if (stateWs && stateWs !== pr.workspace_id) throw new HttpError(404, 'This connect link is invalid or expired. Start the connection again.');
+        }
+        const ws = pr?.workspace_id || stateWs || LEGACY_WORKSPACE;
+        const sc = core.scope(ws);
+        await sc.prepare();
+        const r = await sc.oauth.callback(m[1], Object.fromEntries(url.searchParams));
         if (r.select) return send(302, '', withCookie(ui, { location: `/#/accounts/select/${r.select}` }));
-        await core.audit.record({ principal: ui.session?.email ? sessionPrincipal(ui.session) : { type: 'oauth', name: m[1] }, via: 'ui', operation: 'oauth_connected', status: 200, detail: r.connected });
+        await sc.audit.record({ principal: pr || { type: 'oauth', name: m[1] }, via: 'ui', operation: 'oauth_connected', status: 200, detail: r.connected });
         return htmlMessage(200, 'Account connected', `Connected: ${r.connected.map((c) => esc(c.name)).join(', ')}. You can close this tab.`, '/#/accounts', withCookie(ui));
       } catch (e) { return htmlMessage(e.status || 500, 'Connection failed', esc(e.message), '/#/accounts', withCookie(ui)); }
     }

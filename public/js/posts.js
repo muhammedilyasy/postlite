@@ -5,6 +5,7 @@ import { openComposer } from './composer.js';
 import { pageHeader, segmented, emptyState, skeleton, dropdown, idChip, setCrumbs, tabs, section } from './ui.js';
 import { lineChart } from './charts.js';
 import { formatLocal } from '/assets/shared/time.js';
+import { mediaVisual, listThumb } from './media.js';
 
 const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
 const FILTERS = [['', 'All'], ['scheduled', 'Scheduled'], ['published', 'Published'], ['failed', 'Failed'], ['pending_approval', 'Pending'], ['draft', 'Drafts']];
@@ -38,11 +39,10 @@ export async function renderPosts(root, params = {}) {
 
 function postRow(g, t, refresh) {
   const open = () => { location.hash = `#/posts/${g.id}`; };
-  const thumb = g.media?.[0] ? (g.media[0].poster || (g.media[0].kind === 'image' ? g.media[0].url : '')) : '';
   const at = t.published_at || t.publish_at;
   return h('tr', { tabindex: '0', onclick: open, onkeydown: (e) => { if (e.key === 'Enter') open(); } },
     h('td', {}, h('div', { class: 'cell-post' },
-      thumb ? h('img', { class: 'lthumb', src: thumb, alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : h('span', { class: 'lthumb ph' }, icon(g.media?.[0]?.kind === 'video' ? 'play' : 'image', 14)),
+      listThumb(g.media?.[0]),
       h('div', { class: 'cp-text' },
         h('a', { class: 'cp-title ellipsis', href: `#/posts/${g.id}`, onclick: (e) => e.stopPropagation() }, t.settings?.title || t.caption || '(no caption)'),
         h('div', { class: 'cp-sub' }, idChip(g.id), h('span', { class: 'dot-sep' }), h('span', { class: 'show-sm' }, t.account_name), h('span', { class: 'hide-sm' }, at ? relTime(at) : 'no date')),
@@ -109,7 +109,7 @@ function overview(post, refresh) {
           t.published_url ? h('a', { class: 'btn small ghost', href: t.published_url, target: '_blank', rel: 'noopener' }, 'Open', icon('external', 13)) : null))))))));
   const content = section('Content', {},
     h('div', { class: 'caption-box' }, post.content || h('span', { class: 'muted' }, '(no caption)')),
-    post.media.length ? h('div', { class: 'media-strip' }, post.media.map((m) => h('a', { href: m.url, target: '_blank', rel: 'noopener', class: 'ms-item' }, m.kind === 'video' ? (m.poster ? h('img', { src: m.poster, alt: '' }) : h('video', { src: m.url, muted: true, preload: 'metadata' })) : h('img', { src: m.url, alt: '' }), h('span', { class: 'ms-meta mono' }, `${m.kind}${m.width ? ` · ${m.width}×${m.height}` : ''}`)))) : null);
+    post.media.length ? h('div', { class: 'media-strip' }, post.media.map((m) => h('a', { href: m.url, target: '_blank', rel: 'noopener', class: 'ms-item' }, mediaVisual(m), h('span', { class: 'ms-meta mono' }, `${m.kind}${m.width ? ` · ${m.width}×${m.height}` : ''}`)))) : null);
   const info = section('Details', {}, h('dl', { class: 'kv-list' },
     h('dt', {}, 'Status'), h('dd', {}, statusBadge(post.status)),
     h('dt', {}, 'Post ID'), h('dd', {}, idChip(post.id, { short: 40 })),

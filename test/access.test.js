@@ -77,12 +77,16 @@ test('valid token: page served, session mapped to the email, audit log records i
   assert.equal(noCsrf.status, 403);
   const ok = await app.api('PATCH', '/settings', { session: s, body: { timezone: 'UTC' } });
   assert.equal(ok.status, 200, ok.text);
-  const entries = await app.core.audit.list({ limit: 20 });
+  // the signed-in email got its own workspace; its audit log has the entries (the legacy one does not)
+  assert.ok(s.session.workspace.id && s.session.workspace.id !== 'owner');
+  const entries = await app.root.scope(s.session.workspace.id).audit.list({ limit: 20 });
+  assert.ok(!(await app.core.audit.list({ limit: 50 })).some((e) => e.actor_id === OWNER));
   assert.ok(entries.some((e) => e.operation === 'update_settings' && e.actor_name === OWNER && e.actor_id === OWNER));
   assert.ok(entries.some((e) => e.operation === 'login' && e.actor_name === OWNER));
   // the allow-list is case-insensitive
   const other = await accessLogin(sign({ email: 'TeamMate@Example.com' }));
   assert.equal(other.session.principal.email, OTHER);
+  assert.notEqual(other.session.workspace.id, s.session.workspace.id, 'each email has its own workspace');
 });
 
 test('/api/v1 with a session: bound to the Access identity and the Access token lifetime', async () => {

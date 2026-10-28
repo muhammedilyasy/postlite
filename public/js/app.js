@@ -43,7 +43,7 @@ function userMenu(btn) {
     { label: 'API keys', icon: 'key', href: '#/settings/api-keys' },
     { sep: true },
     { label: 'Sign out', icon: 'logout', onClick: () => logoutForm.submit() },
-  ], { align: 'right', width: 240, header: h('div', {}, h('div', { class: 'mh-name' }, email || 'Administrator'), h('div', { class: 'mh-sub' }, state.me?.auth_mode === 'cloudflare-access' ? 'Signed in with Cloudflare Access' : 'Password sign-in')) });
+  ], { align: 'right', width: 240, header: h('div', {}, h('div', { class: 'mh-name' }, email || 'Administrator'), h('div', { class: 'mh-sub' }, `${state.me?.workspace?.name ? `${state.me.workspace.name} workspace` : 'Workspace'} · ${state.me?.auth_mode === 'cloudflare-access' ? 'Cloudflare Access' : 'password sign-in'}`)) });
 }
 
 function newMenu(btn) {

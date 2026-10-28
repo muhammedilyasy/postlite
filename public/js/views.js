@@ -5,6 +5,7 @@ import { formatLocal } from '/assets/shared/time.js';
 import { renderPlatformApps } from './apps.js';
 import { pageHeader, tabs, segmented, emptyState, skeleton, dropdown, idChip, copyButton, section, setCrumbs } from './ui.js';
 import { lineChart } from './charts.js';
+import { mediaVisual } from './media.js';
 
 const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
@@ -100,7 +101,7 @@ export async function renderApprovals(root) {
         h('div', { class: 'row gap wrap' }, pill('s-pending_approval', 'Pending approval'), h('span', { class: 'muted small' }, 'by ', h('strong', {}, g.created_by || 'agent')), h('span', { class: 'dot-sep' }), h('span', { class: 'muted small mono' }, g.publish_at ? `${fmtTime(g.publish_at)} (${relTime(g.publish_at)})` : 'no time'), idChip(g.id)),
         h('div', { class: 'row gap' }, g.targets.map((t) => avatar({ provider: t.provider, name: t.account_name, picture: t.account_picture }, 24)))),
       h('p', { class: 'caption-prev' }, g.content || h('span', { class: 'muted' }, '(no caption)')),
-      g.media.length ? h('div', { class: 'media-strip' }, g.media.map((m) => h('div', { class: 'ms-item' }, m.kind === 'video' ? h('video', { src: m.url, muted: true, preload: 'metadata' }) : h('img', { src: m.url, alt: '' })))) : null,
+      g.media.length ? h('div', { class: 'media-strip' }, g.media.map((m) => h('div', { class: 'ms-item' }, mediaVisual(m)))) : null,
       h('div', { class: 'ap-foot' },
         h('a', { class: 'btn ghost', href: `#/posts/${g.id}` }, 'Details'),
         h('div', { class: 'row gap' },

@@ -239,8 +239,19 @@ export const facebook = {
   },
 
   async recentPosts(ctx, limit) {
-    const r = await request(g(ctx.cfg, `${ctx.integration.external_id}/published_posts`) + '?' + qs({ fields: 'id,message,permalink_url,created_time,full_picture', limit, access_token: ctx.token }), { classifier: classifyFacebook });
-    return (r.data || []).map((p) => ({ external_id: String(p.id), caption: p.message || '', permalink: p.permalink_url || '', thumbnail: p.full_picture || '', published_at: Date.parse(p.created_time) || null, kind: 'post' }));
+    const r = await request(g(ctx.cfg, `${ctx.integration.external_id}/published_posts`) + '?' + qs({ fields: 'id,message,permalink_url,created_time,full_picture,attachments{media,type}', limit, access_token: ctx.token }), { classifier: classifyFacebook });
+    // Video/reel posts sometimes come back without full_picture; their attachment carries the frame.
+    const pic = (p) => p.full_picture || (p.attachments?.data || []).map((a) => a.media?.image?.src).find(Boolean) || '';
+    return (r.data || []).map((p) => ({ external_id: String(p.id), caption: p.message || '', permalink: p.permalink_url || '', thumbnail: pic(p), published_at: Date.parse(p.created_time) || null, kind: 'post' }));
+  },
+
+  /** Thumbnail for a post/video known only by id: videos (no "_" in the id) expose picture/thumbnails. */
+  async thumbnailFor(ctx, item) {
+    const isVideo = !String(item.external_id).includes('_');
+    const r = await request(g(ctx.cfg, item.external_id) + '?' + qs({ fields: isVideo ? 'picture,thumbnails{uri,is_preferred}' : 'full_picture', access_token: ctx.token }), { classifier: classifyFacebook });
+    if (!isVideo) return r.full_picture || '';
+    const th = r.thumbnails?.data || [];
+    return (th.find((t) => t.is_preferred) || th[0])?.uri || r.picture || '';
   },
 
   async postAnalytics(ctx, item) {

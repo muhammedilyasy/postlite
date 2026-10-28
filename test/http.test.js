@@ -95,7 +95,7 @@ test('OAuth: Facebook with page picker (long-lived token exchange + permission c
   const sel = await app.api('POST', `/oauth/pending/${state}`, { session: s, body: { external_ids: ['page1'] } });
   assert.equal(sel.json.connected.length, 1);
   assert.ok(app.fake.state.calls.some((c) => c.query.grant_type === 'fb_exchange_token'));
-  const row = await app.core.db.get("SELECT * FROM integrations WHERE provider='facebook' AND external_id='page1'");
+  const row = await app.core.db.get("SELECT * FROM integrations WHERE provider='facebook' AND external_id='page1' /* ws:system */");
   assert.ok(row.access_token_enc.startsWith('v1:') && !row.access_token_enc.includes('page1-token'), 'token encrypted at rest');
 });
 

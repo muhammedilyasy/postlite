@@ -7,9 +7,11 @@ import { Readable } from 'node:stream';
 import { createMcp, PATH_TOOL, rpcError } from '../mcp.js';
 import { HttpError } from '../errors.js';
 import { uploadFileRemote } from './remote.js';
+import { scopeFor } from '../api/operations.js';
 
 /** upload_media_from_path for a local (stdio) server. */
-export async function uploadFromPath(core, args, principal, via) {
+export async function uploadFromPath(rootCore, args, principal, via) {
+  const core = await scopeFor(rootCore, principal);
   const p = String(args?.path || '');
   if (!path.isAbsolute(p) || !fs.existsSync(p) || !fs.statSync(p).isFile()) throw new HttpError(400, `File not found: "${p}". Pass an absolute path to an existing file.`);
   const m = await core.media.save(Readable.toWeb(fs.createReadStream(p)), args.filename || path.basename(p), { size: fs.statSync(p).size });

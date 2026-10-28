@@ -61,7 +61,10 @@ function rejoin({ chunks, reader, done }, max, tooBig) {
 /**
  * @param {{db:any, cfg:any, storage:any, hooks?:{ffprobe?:Function, makePoster?:Function}}} deps
  */
-export function createMedia({ db, cfg, storage, hooks = {} }) {
+export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
+  // ws = workspace id. Without it (root core) only the token-authorized paths work: serve(), putPart()
+  // and cleanupUploads(); every library method needs a workspace.
+  const W = () => { if (!ws) throw new Error('media: workspace scope required'); return ws; };
   const keyOf = (m) => m.storage_key || m.filename;
   const view = (m) => m && {
     id: m.id, name: m.original_name, mime: m.mime, kind: m.kind, size: m.size, width: m.width, height: m.height, duration: m.duration,
@@ -91,8 +94,8 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
       id, token: randomToken(32), filename, original_name: String(originalName || 'upload').slice(0, 200), mime, kind, size,
       width: info.width, height: info.height, duration: info.duration, poster, created_at: Date.now(), storage_key: key === filename ? null : key,
     };
-    await db.run('INSERT INTO media(id, token, filename, original_name, mime, kind, size, width, height, duration, poster, created_at, storage_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-      row.id, row.token, row.filename, row.original_name, row.mime, row.kind, row.size, row.width, row.height, row.duration, row.poster, row.created_at, row.storage_key);
+    await db.run('INSERT INTO media(id, workspace_id, token, filename, original_name, mime, kind, size, width, height, duration, poster, created_at, storage_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      row.id, W(), row.token, row.filename, row.original_name, row.mime, row.kind, row.size, row.width, row.height, row.duration, row.poster, row.created_at, row.storage_key);
     return row;
   }
 
@@ -125,7 +128,7 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
   });
 
   async function getOpenUpload(id) {
-    const u = await db.get('SELECT * FROM uploads WHERE id = ?', String(id || ''));
+    const u = await db.get('SELECT * FROM uploads WHERE id = ? AND workspace_id = ?', String(id || ''), W());
     if (!u) throw new HttpError(404, 'Upload session not found.');
     if (u.state !== 'open') throw new HttpError(409, `Upload session is ${u.state}.`);
     if (u.expires_at < Date.now()) throw new HttpError(410, 'Upload session expired; start a new upload.');
@@ -137,16 +140,17 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
     view,
     localPath: (m) => storage.localPath?.(keyOf(m)) || null,
     publicUrl: (m) => `${cfg.publicUrl}/m/${m.token}/${m.filename}`,
-    get: (id) => db.get('SELECT * FROM media WHERE id = ?', id),
+    get: (id) => db.get('SELECT * FROM media WHERE id = ? AND workspace_id = ?', String(id ?? ''), W()),
     /** Rows for ids in the given order (missing ids skipped). One query. */
     async getMany(ids) {
       const list = (ids || []).map(String);
       if (!list.length) return [];
-      const rows = await db.all(`SELECT * FROM media WHERE id IN (${list.map(() => '?').join(',')})`, ...list);
+      const rows = await db.all(`SELECT * FROM media WHERE workspace_id = ? AND id IN (${list.map(() => '?').join(',')})`, W(), ...list);
       const by = new Map(rows.map((r) => [r.id, r]));
       return list.map((i) => by.get(i)).filter(Boolean);
     },
-    list: async (limit = 100) => (await db.all('SELECT * FROM media ORDER BY created_at DESC LIMIT ?', limit)).map(view),
+    list: async (limit = 100) => (await db.all('SELECT * FROM media WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?', W(), limit)).map(view),
+    rows: (limit = 100) => db.all('SELECT * FROM media WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?', W(), limit),
     size: (m) => m.size,
     /** Web ReadableStream of bytes [start, end] (inclusive) — used for YouTube chunk uploads. */
     async open(m, start = 0, end = m.size - 1) {
@@ -160,6 +164,7 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
      * @param {{size?:number}} [opts] declared length (Content-Length) when known
      */
     async save(body, originalName = 'upload', { size: declared } = {}) {
+      W();
       if (typeof declared === 'number' && declared > maxBytes()) throw tooBig();
       const stream = body instanceof Uint8Array ? new ReadableStream({ start(c) { if (body.length) c.enqueue(body); c.close(); } }) : body;
       if (!stream) throw new HttpError(400, 'Empty file');
@@ -193,6 +198,7 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
       size = Number(size);
       if (!(size > 0)) throw new HttpError(400, 'size (bytes) is required and must be > 0.');
       if (size > maxBytes()) throw tooBig();
+      W();
       const partSize = Math.max(5 * MiB, Math.round(cfg.upload.partSizeMb * MiB));
       const partCount = Math.ceil(size / partSize);
       if (partCount > 10000) throw new HttpError(400, 'Too many parts; raise UPLOAD_PART_MB.');
@@ -201,21 +207,24 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
       const multipartId = await storage.mpCreate(key);
       const now = Date.now();
       const u = { id, storage_key: key, multipart_id: multipartId, original_name: String(filename).slice(0, 200), declared_size: size, part_size: partSize, part_count: partCount, mode: presignMode() ? 'presigned' : 'proxy', state: 'open', created_by: principal?.name || null, created_at: now, expires_at: now + cfg.upload.sessionHours * 3600000 };
-      await db.run('INSERT INTO uploads(id, storage_key, multipart_id, original_name, declared_size, part_size, part_count, mode, state, created_by, created_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-        u.id, u.storage_key, u.multipart_id, u.original_name, u.declared_size, u.part_size, u.part_count, u.mode, u.state, u.created_by, u.created_at, u.expires_at);
+      await db.run('INSERT INTO uploads(id, workspace_id, storage_key, multipart_id, original_name, declared_size, part_size, part_count, mode, state, created_by, created_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        u.id, ws, u.storage_key, u.multipart_id, u.original_name, u.declared_size, u.part_size, u.part_count, u.mode, u.state, u.created_by, u.created_at, u.expires_at);
       return uploadView(u);
     },
 
     async getUpload(id, { from = 1 } = {}) {
-      const u = await db.get('SELECT * FROM uploads WHERE id = ?', String(id || ''));
+      const u = await db.get('SELECT * FROM uploads WHERE id = ? AND workspace_id = ?', String(id || ''), W());
       if (!u) throw new HttpError(404, 'Upload session not found.');
       return uploadView(u, Number(from) || 1);
     },
 
     /** Proxy mode: store one part sent through the app. */
     async putPart(id, n, token, body, size) {
-      const u = await getOpenUpload(id);
-      if (!token || !safeEqual(String(token), await partToken(u.id))) throw new HttpError(403, 'Invalid upload part token.');
+      // Authorized by the per-session HMAC token in the URL (like a presigned URL), not by a workspace.
+      const u = await db.get('SELECT * FROM uploads WHERE id = ? /* ws:system */', String(id || ''));
+      if (!u || !token || !safeEqual(String(token), await partToken(u.id))) throw new HttpError(u ? 403 : 404, u ? 'Invalid upload part token.' : 'Upload session not found.');
+      if (u.state !== 'open') throw new HttpError(409, `Upload session is ${u.state}.`);
+      if (u.expires_at < Date.now()) throw new HttpError(410, 'Upload session expired; start a new upload.');
       n = Number(n);
       if (!Number.isInteger(n) || n < 1 || n > u.part_count) throw new HttpError(400, `Part number must be 1..${u.part_count}.`);
       const expected = n < u.part_count ? u.part_size : u.declared_size - u.part_size * (u.part_count - 1);
@@ -237,7 +246,7 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
       }
       const fail = async (err) => {
         await storage.delete(u.storage_key).catch(() => {});
-        await db.run("UPDATE uploads SET state='aborted' WHERE id=?", u.id);
+        await db.run("UPDATE uploads SET state='aborted' WHERE id=? AND workspace_id=?", u.id, ws);
         throw err;
       };
       if (size > maxBytes()) return fail(tooBig());
@@ -248,33 +257,54 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
       let key = u.storage_key;
       if (storage.rename) { await storage.rename(key, filename); key = filename; }
       const row = await finalize({ id: u.id, key, filename, mime, size, originalName: u.original_name });
-      await db.run("UPDATE uploads SET state='completed' WHERE id=?", u.id);
+      await db.run("UPDATE uploads SET state='completed' WHERE id=? AND workspace_id=?", u.id, ws);
       return row;
     },
 
     async abortUpload(id) {
-      const u = await db.get('SELECT * FROM uploads WHERE id = ?', String(id || ''));
+      const u = await db.get('SELECT * FROM uploads WHERE id = ? AND workspace_id = ?', String(id || ''), W());
       if (!u) throw new HttpError(404, 'Upload session not found.');
       if (u.state === 'open') await storage.mpAbort(u.storage_key, u.multipart_id);
-      await db.run("UPDATE uploads SET state='aborted' WHERE id=? AND state='open'", u.id);
+      await db.run("UPDATE uploads SET state='aborted' WHERE id=? AND workspace_id=? AND state='open'", u.id, ws);
       return true;
     },
 
     /** Abort expired sessions (maintenance). */
     async cleanupUploads(limit = 20) {
-      const rows = await db.all("SELECT * FROM uploads WHERE state = 'open' AND expires_at < ? LIMIT ?", Date.now(), limit);
+      const rows = await db.all("SELECT * FROM uploads WHERE state = 'open' AND expires_at < ? LIMIT ? /* ws:system */", Date.now(), limit);
       for (const u of rows) {
         await storage.mpAbort(u.storage_key, u.multipart_id).catch(() => {});
-        await db.run("UPDATE uploads SET state='aborted' WHERE id=?", u.id);
+        await db.run("UPDATE uploads SET state='aborted' WHERE id=? /* ws:system */", u.id);
       }
-      await db.run("DELETE FROM uploads WHERE state <> 'open' AND created_at < ?", Date.now() - 7 * 86400000);
+      await db.run("DELETE FROM uploads WHERE state <> 'open' AND created_at < ? /* ws:system */", Date.now() - 7 * 86400000);
       return rows.length;
     },
 
+    /**
+     * Store a poster frame (JPEG) for a video that has none (Workers has no ffmpeg; the browser grabs a
+     * frame at upload time or when it first renders the video). Refuses to replace an existing poster
+     * unless replace=true.
+     */
+    async setPoster(id, bytes, { replace = false } = {}) {
+      const m = await db.get('SELECT * FROM media WHERE id = ? AND workspace_id = ?', String(id ?? ''), W());
+      if (!m) throw new HttpError(404, 'Media not found.');
+      if (m.kind !== 'video') throw new HttpError(400, 'Only videos have a poster frame.');
+      if (m.poster && !replace) return m;
+      const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+      if (b.length < 100 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) throw new HttpError(415, 'Poster must be a JPEG image.');
+      if (b.length > 2 * MiB) throw new HttpError(413, 'Poster must be at most 2 MB.');
+      const info = imageSize(b, 'image/jpeg');
+      if (!info?.width || !info?.height) throw new HttpError(400, 'Could not read the poster image size.');
+      const pname = `${m.id}.poster.jpg`;
+      await storage.put(pname, new ReadableStream({ start(c) { c.enqueue(b); c.close(); } }), { size: b.length });
+      await db.run('UPDATE media SET poster = ? WHERE id = ? AND workspace_id = ?', pname, m.id, ws);
+      return { ...m, poster: pname };
+    },
+
     async remove(id) {
-      const m = await db.get('SELECT * FROM media WHERE id = ?', id);
+      const m = await db.get('SELECT * FROM media WHERE id = ? AND workspace_id = ?', String(id ?? ''), W());
       if (!m) return false;
-      await db.run('DELETE FROM media WHERE id = ?', id);
+      await db.run('DELETE FROM media WHERE id = ? AND workspace_id = ?', m.id, ws);
       await storage.delete(keyOf(m)).catch(() => {});
       if (m.poster) await storage.delete(m.poster).catch(() => {});
       return true;
@@ -282,7 +312,8 @@ export function createMedia({ db, cfg, storage, hooks = {} }) {
 
     /** Public media endpoint with Range support (Meta and Google fetchers use ranges). Returns a Response. */
     async serve(request, token, name) {
-      const m = await db.get('SELECT * FROM media WHERE token = ?', token);
+      // Public by unguessable per-file token (Meta/Google fetch these without a session).
+      const m = await db.get('SELECT * FROM media WHERE token = ? /* ws:system */', String(token || ''));
       if (!m || (name !== m.filename && name !== m.poster)) return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
       const isPoster = name === m.poster;
       const key = isPoster ? m.poster : keyOf(m);

@@ -272,6 +272,9 @@ a.kpi-tile:hover { background: var(--surface-2); }
 .chip-time { font-size: 10.5px; color: var(--text-2); flex: none; }
 .chip-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip .avatar { flex: none; }
+.chip-thumb { flex: none; width: 18px; height: 18px; object-fit: cover; border-radius: 3px; background: var(--surface-3); }
+.chip-thumb.ph { display: inline-flex; align-items: center; justify-content: center; color: var(--text-3); }
+
 .chip .avatar .initial { font-size: 8px; }
 .chip-menu { appearance: none; border: 0; background: transparent; color: var(--text-3); padding: 0; width: 18px; height: 18px; display: none; align-items: center; justify-content: center; border-radius: 3px; cursor: pointer; flex: none; }
 .chip:hover .chip-menu, .chip:focus-within .chip-menu { display: inline-flex; }

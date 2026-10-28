@@ -1,6 +1,7 @@
 // Composer: global caption + per-account overrides/settings, media upload, live validation, previews.
 import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime } from './core.js';
 import { segmented } from './ui.js';
+import { mediaVisual, ensurePoster } from './media.js';
 import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, charCount } from '/assets/shared/validate.js';
 import { formatLocal, parseLocal } from '/assets/shared/time.js';
 
@@ -166,6 +167,8 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
           st.media.push(media);
           row.remove();
           render();
+          // No server-side poster (Workers / no ffmpeg): grab a frame from the local file and store it.
+          if (media.kind === 'video' && !media.poster) ensurePoster(media, f).then((p) => { if (p) render(); });
         } catch (e) {
           row.classList.add('error');
           row.append(h('span', { class: 'err small' }, e.message));
@@ -179,7 +182,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       ondragover: (e) => e.preventDefault(),
       ondrop: (e) => { e.preventDefault(); e.stopPropagation(); if (dragIdx === null || dragIdx === i) return; const [x] = st.media.splice(dragIdx, 1); st.media.splice(i, 0, x); dragIdx = null; render(); },
     },
-    md.kind === 'video' ? (md.poster ? h('img', { src: md.poster, alt: '' }) : h('video', { src: md.url, muted: true, preload: 'metadata' })) : h('img', { src: md.url, alt: '', loading: 'lazy' }),
+    mediaVisual(md),
     h('span', { class: 'media-meta mono' }, `${md.kind === 'video' ? `▶ ${md.duration ? `${Math.round(md.duration)}s` : ''}` : ''} ${md.width && md.height ? `${md.width}×${md.height}` : ''}`),
     h('span', { class: 'media-idx mono' }, i + 1),
     h('button', { type: 'button', class: 'icon-btn remove', 'aria-label': `Remove ${md.name || 'media'}`, onclick: (e) => { e.stopPropagation(); st.media.splice(i, 1); render(); } }, icon('x', 14)))));
@@ -296,7 +299,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
   function preview(a, t) {
     const cap = captionFor(a.id);
     const first = st.media[0];
-    const mediaEl = first ? (first.kind === 'video' ? h('video', { src: first.url, muted: true, controls: true, preload: 'metadata' }) : h('img', { src: first.url, alt: '' })) : null;
+    const mediaEl = first ? mediaVisual(first, { playable: true }) : null;
     const p = a.provider;
     if (p === 'youtube') {
       return h('div', { class: `preview yt ${t.settings.isShort ? 'short' : ''}` }, h('div', { class: 'pv-media' }, mediaEl || h('div', { class: 'pv-empty' }, icon('play', 20), 'No video')),

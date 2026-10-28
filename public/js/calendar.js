@@ -3,6 +3,7 @@ import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVID
 import { openComposer } from './composer.js';
 import { pageHeader, segmented, emptyState, skeleton, dropdown } from './ui.js';
 import { zonedParts, zonedToUtc, formatLocal } from '/assets/shared/time.js';
+import { listThumb } from './media.js';
 
 const DAY = 86400000;
 const view = { mode: localStorage.getItem('pl_view') || (matchMedia('(max-width: 760px)').matches ? 'list' : 'week'), anchor: Date.now(), filter: '' };
@@ -108,6 +109,7 @@ function chip(e, tz, refresh, { compact = false } = {}) {
   h('i', { class: `sd s-${e.status}`, 'aria-hidden': 'true' }),
   h('span', { class: 'chip-time mono' }, formatLocal(when(e), tz).slice(11)),
   avatar({ provider: e.provider, name: e.account_name, picture: e.account_picture }, compact ? 16 : 18),
+  e.media?.[0] ? listThumb(e.media[0], { cls: 'chip-thumb', size: 10 }) : null,
   h('span', { class: 'chip-text' }, e.caption.slice(0, 60) || (e.settings?.title ?? '') || '(no caption)'),
   h('button', { class: 'chip-menu', 'aria-label': 'Post actions', 'aria-haspopup': 'menu', onclick: (ev) => { ev.stopPropagation(); chipMenu(ev.currentTarget, e, refresh); } }, icon('more', 14)));
   return el;
@@ -205,10 +207,9 @@ function listView(entries, drafts, tz, refresh) {
 }
 
 function listRow(e, tz, refresh) {
-  const thumb = e.media?.[0] ? (e.media[0].poster || (e.media[0].kind === 'image' ? e.media[0].url : '')) : '';
   return h('tr', { tabindex: '0', onclick: () => openPost(e.group_id), onkeydown: (ev) => { if (ev.key === 'Enter') openPost(e.group_id); } },
     h('td', { class: 'mono nowrap hide-sm' }, when(e) ? formatLocal(when(e), tz).slice(11) : '—'),
-    h('td', {}, h('div', { class: 'cell-post' }, thumb ? h('img', { class: 'lthumb', src: thumb, alt: '', onerror: (ev) => ev.target.remove() }) : h('span', { class: 'lthumb ph' }, icon('image', 14)),
+    h('td', {}, h('div', { class: 'cell-post' }, listThumb(e.media?.[0]),
       h('div', { class: 'cp-text' }, h('div', { class: 'cp-title ellipsis' }, e.settings?.title || e.caption || '(no caption)'), h('div', { class: 'muted small ellipsis show-sm' }, when(e) ? `${formatLocal(when(e), tz).slice(11)} · ${e.account_name}` : e.account_name)))),
     h('td', { class: 'hide-sm' }, h('div', { class: 'row gap' }, avatar({ provider: e.provider, name: e.account_name, picture: e.account_picture }, 22), h('span', { class: 'ellipsis' }, e.account_name))),
     h('td', {}, statusBadge(e.status)),

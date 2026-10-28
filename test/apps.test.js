@@ -63,7 +63,7 @@ test('save encrypts the secret, takes effect immediately (no restart) and OAuth 
   assert.equal(r.json.platform_app.secret_hint, '…9876');
   assert.ok(!r.text.includes(G_SECRET));
   // at rest: encrypted, not plaintext
-  const raw = (await app.core.db.get("SELECT value FROM settings WHERE key = 'platform_app.google'")).value;
+  const raw = (await app.core.db.get("SELECT value FROM workspace_settings WHERE workspace_id = 'owner' AND key = 'platform_app.google'")).value;
   assert.ok(!raw.includes(G_SECRET));
   assert.match(JSON.parse(raw).secret_enc, /^v1:/);
   assert.equal(app.core.cfg.google.clientSecret, G_SECRET); // live getter

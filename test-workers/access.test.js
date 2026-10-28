@@ -9,6 +9,7 @@ import { startWorker, hasWrangler } from './harness.js';
 const TEAM = 'myteam.cloudflareaccess.com';
 const AUD = 'aud-0123456789abcdef0123456789abcdef';
 const OWNER = 'owner@example.com';
+const FRIEND = 'friend@example.com';
 const skip = !hasWrangler() && 'wrangler devDependency not installed (npm install)';
 const keyPair = () => crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
 const k1 = { kid: 'kid-one', ...keyPair() };
@@ -34,7 +35,7 @@ before(async () => {
   await new Promise((r) => jwksServer.listen(0, '127.0.0.1', r));
   w = await startWorker({
     vars: {
-      AUTH_MODE: 'cloudflare-access', CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: AUD, ALLOWED_EMAILS: OWNER,
+      AUTH_MODE: 'cloudflare-access', CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: AUD, ALLOWED_EMAILS: `${OWNER},${FRIEND}`,
       // R2 S3 API credentials → uploads switch to presigned direct-to-R2 mode (fake endpoint; local R2 has no S3 API)
       R2_ACCESS_KEY_ID: 'test-r2-key-id', R2_SECRET_ACCESS_KEY: 'test-r2-secret', R2_BUCKET_NAME: 'postlite-media', R2_S3_ENDPOINT: 'https://acct.r2.cloudflarestorage.com',
       CF_ACCESS_CERTS_URL: `http://127.0.0.1:${jwksServer.address().port}/cdn-cgi/access/certs`, CF_ACCESS_JWKS_MIN_REFRESH_MS: '0',
@@ -87,4 +88,29 @@ test('presigned mode: with R2 API credentials, create_upload returns SigV4-signe
   assert.equal(u.searchParams.get('X-Amz-Algorithm'), 'AWS4-HMAC-SHA256');
   assert.match(u.searchParams.get('X-Amz-Credential'), /^test-r2-key-id\/\d{8}\/auto\/s3\/aws4_request$/);
   assert.match(u.searchParams.get('X-Amz-Signature'), /^[0-9a-f]{64}$/);
+});
+
+test('workspaces on D1: each Access email gets its own workspace; the other one\'s post is 404', { skip }, async () => {
+  const login = async (email) => {
+    const tok = sign({ email });
+    const r = await page('/', tok);
+    const sid = /pl_sid=([^;]+)/.exec(r.headers.get('set-cookie') || '')[1];
+    const cookie = `pl_sid=${sid}; CF_Authorization=${tok}`;
+    const s = await (await fetch(`${w.base}/api/v1/session`, { headers: { cookie } })).json();
+    const call = async (method, p, body) => {
+      const res = await fetch(`${w.base}/api/v1${p}`, { method, headers: { cookie, 'x-csrf-token': s.csrf, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      return { status: res.status, json: await res.json().catch(() => null) };
+    };
+    return { s, call };
+  };
+  const a = await login(OWNER);
+  const b = await login(FRIEND);
+  assert.ok(a.s.workspace.id && b.s.workspace.id && a.s.workspace.id !== b.s.workspace.id);
+  await a.call('PATCH', '/settings', { timezone: 'Pacific/Auckland' });
+  const hook = await a.call('POST', '/webhooks', { url: 'https://example.com/a-hook' });
+  assert.equal(hook.status, 200);
+  assert.equal((await b.call('GET', '/webhooks')).json.webhooks.length, 0);
+  assert.equal((await b.call('DELETE', `/webhooks/${hook.json.webhook.id}`)).status, 404);
+  assert.notEqual((await b.call('GET', '/settings')).json.settings.timezone, 'Pacific/Auckland');
+  assert.equal((await a.call('GET', '/webhooks')).json.webhooks.length, 1);
 });

@@ -197,7 +197,13 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
       }
       return json(res, 200, { data: metrics.map((name, i) => ({ name, period: 'lifetime', values: [{ value: name.includes('reactions') ? { like: 3, love: 2 } : 100 + i }] })) });
     }
-    if (p[1] === 'published_posts') return json(res, 200, { data: [{ id: 'page1_900', message: 'Older post', permalink_url: 'https://facebook.com/page1/posts/900', created_time: new Date(Date.now() - 5 * 86400000).toISOString() }] });
+    if (p[1] === 'published_posts') {
+      return json(res, 200, { data: [
+        { id: 'page1_900', message: 'Older post', permalink_url: 'https://facebook.com/page1/posts/900', created_time: new Date(Date.now() - 5 * 86400000).toISOString(), full_picture: 'https://example.invalid/fb900.jpg' },
+        // video/reel post: no full_picture, the frame is on the attachment
+        { id: 'page1_901', message: 'Older reel', permalink_url: 'https://facebook.com/reel/901', created_time: new Date(Date.now() - 4 * 86400000).toISOString(), attachments: { data: [{ type: 'video_inline', media: { image: { src: 'https://example.invalid/fb901.jpg' } } }] } },
+      ] });
+    }
     if (req.method === 'GET' && p[1] === 'media') return json(res, 200, { data: [{ id: 'igold1', caption: 'Older reel', media_type: 'VIDEO', media_product_type: 'REELS', permalink: 'https://instagram.com/reel/old1', timestamp: new Date(Date.now() - 3 * 86400000).toISOString(), thumbnail_url: 'https://example.invalid/t.jpg' }] });
 
     if (req.method === 'GET' && p.length === 1) {
@@ -218,6 +224,9 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
         const done = c.polls > state.videoStatusPolls;
         return json(res, 200, { id, status: { video_status: done ? 'ready' : 'processing', uploading_phase: { status: done || c.uploaded ? 'complete' : 'in_progress' } } });
       }
+      if (fields.includes('thumbnails')) return json(res, 200, { id, picture: `https://example.invalid/${id}-small.jpg`, thumbnails: { data: [{ uri: `https://example.invalid/${id}-a.jpg`, is_preferred: false }, { uri: `https://example.invalid/${id}-pref.jpg`, is_preferred: true }] } });
+      if (fields.includes('thumbnail_url')) return json(res, 200, { id, media_type: 'VIDEO', thumbnail_url: `https://example.invalid/${id}-ig.jpg` });
+      if (fields === 'full_picture') return json(res, 200, { id, full_picture: `https://example.invalid/${id}-full.jpg` });
       if (fields.includes('permalink')) return json(res, 200, { id, permalink: `https://www.instagram.com/p/${id}/` });
       if (fields.includes('followers_count') || fields.includes('fan_count')) return json(res, 200, { id, followers_count: 1234 + state.seq, fan_count: 1200, follows_count: 50, media_count: 42 });
       if (fields.includes('shares')) return json(res, 200, { id, shares: { count: 4 }, comments: { summary: { total_count: 7 } } });
@@ -286,6 +295,7 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
         return json(res, 200, { access_token: 'ya29.initial', refresh_token: '1//refresh', expires_in: 3599, token_type: 'Bearer', scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly' });
       }
       if (body.grant_type === 'refresh_token') {
+        (state.googleRefreshClients ||= []).push(body.client_id);
         if (state.googleRefreshInvalid) return json(res, 400, { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' });
         return json(res, 200, { access_token: `ya29.refreshed${++state.ytTokenCounter}`, expires_in: 3599, token_type: 'Bearer' });
       }

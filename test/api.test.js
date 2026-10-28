@@ -16,7 +16,7 @@ const key = async (opts) => (await app.core.apiKeys.create({ name: 'test', ...op
 
 test('API keys: hashed at rest, bearer auth, revoked keys rejected', async () => {
   const k = await key({ scopes: ['read'] });
-  const row = await app.core.db.get('SELECT hash FROM api_keys ORDER BY created_at DESC LIMIT 1');
+  const row = await app.core.db.get('SELECT hash FROM api_keys ORDER BY created_at DESC LIMIT 1 /* ws:system */');
   assert.ok(!row.hash.includes(k.split('_')[2]));
   assert.equal((await app.api('GET', '/accounts', { key: k })).status, 200);
   assert.equal((await app.api('GET', '/accounts', { key: k + 'x' })).status, 401);
@@ -116,7 +116,7 @@ test('approval mode: agent posts wait for a human; approval-mode keys cannot app
   assert.equal(r.json.post.status, 'pending_approval');
   assert.match(r.json.note, /approval/);
   const pid = r.json.post.id;
-  assert.equal((await app.core.db.get('SELECT COUNT(*) n FROM jobs WHERE post_id = ?', r.json.post.targets[0].id)).n, 0, 'no job until approved');
+  assert.equal((await app.core.db.get('SELECT COUNT(*) n FROM jobs WHERE post_id = ? /* ws:system */', r.json.post.targets[0].id)).n, 0, 'no job until approved');
   await app.core.scheduler.drain();
   assert.equal((await app.core.posts.getGroup(pid)).status, 'pending_approval');
   const self = await app.api('POST', `/posts/${pid}/approve`, { key: agent, body: {} });

@@ -4,6 +4,9 @@ import { meteredFetch } from '../meter.js';
 import { request, qs, ProviderError, classifyHttp } from './http.js';
 import { shortReason } from './facebook.js';
 
+/** Best snippet.thumbnails URL, else the public hqdefault frame for the video id. */
+export const ytThumb = (t, id) => t?.high?.url || t?.medium?.url || t?.standard?.url || t?.default?.url || (id ? `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg` : '');
+
 export const YOUTUBE_SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',
   'https://www.googleapis.com/auth/youtube.readonly',
@@ -269,11 +272,14 @@ export const youtube = {
       external_id: String(i.contentDetails?.videoId || i.snippet?.resourceId?.videoId),
       caption: i.snippet?.title || '',
       permalink: `https://www.youtube.com/watch?v=${i.contentDetails?.videoId || i.snippet?.resourceId?.videoId}`,
-      thumbnail: i.snippet?.thumbnails?.medium?.url || i.snippet?.thumbnails?.default?.url || '',
+      thumbnail: ytThumb(i.snippet?.thumbnails, i.contentDetails?.videoId || i.snippet?.resourceId?.videoId),
       published_at: Date.parse(i.contentDetails?.videoPublishedAt || i.snippet?.publishedAt) || null,
       kind: 'video',
     }));
   },
+
+  /** Thumbnail for a video we know only by id (no API call: i.ytimg.com serves hqdefault for every video). */
+  async thumbnailFor(_ctx, item) { return ytThumb(null, item.external_id); },
 
   async postAnalytics(ctx, item) {
     const { cfg } = ctx;

@@ -114,7 +114,7 @@ async function friendlyValidation(core, e) {
 
 async function nextSlotTime(core, from = Date.now()) {
   const s = await core.settings.get();
-  const taken = new Set((await core.db.all("SELECT publish_at FROM posts WHERE status IN ('scheduled','pending_approval') AND publish_at >= ?", from)).map((r) => Math.floor(r.publish_at / 60000)));
+  const taken = new Set((await core.db.all("SELECT publish_at FROM posts WHERE workspace_id = ? AND status IN ('scheduled','pending_approval') AND publish_at >= ?", core.workspaceId, from)).map((r) => Math.floor(r.publish_at / 60000)));
   const [t] = nextSlots(s.posting_slots, s.timezone, { from, count: 1, isTaken: (ms) => taken.has(Math.floor(ms / 60000)) });
   if (!t) throw new HttpError(409, 'No free posting slot in the next 60 days. Add slots with update_settings(posting_slots).');
   return t;
@@ -208,8 +208,8 @@ export function isPrivateIp(ip) {
 
 function mediaInUse(core, mediaId) {
   const like = `%${mediaId}%`;
-  return core.db.get(`SELECT 1 FROM posts p JOIN groups g ON g.id = p.group_id WHERE p.status IN ('draft','scheduled','pending_approval','publishing','failed')
-    AND (g.media LIKE ? OR p.media_override LIKE ? OR p.settings LIKE ?) LIMIT 1`, like, like, like);
+  return core.db.get(`SELECT 1 FROM posts p JOIN groups g ON g.id = p.group_id WHERE p.workspace_id = ? AND g.workspace_id = ? AND p.status IN ('draft','scheduled','pending_approval','publishing','failed')
+    AND (g.media LIKE ? OR p.media_override LIKE ? OR p.settings LIKE ?) LIMIT 1`, core.workspaceId, core.workspaceId, like, like, like);
 }
 
 const mediaOut = (core, m) => m && { ...core.media.view(m), public_url: core.media.publicUrl(m) };
@@ -253,7 +253,7 @@ export const operations = [
     summary: 'Identify the caller and server settings',
     description: 'Returns the authenticated principal (API key name, scopes, approval mode), server time, timezone and public URL. Call this first to learn what you are allowed to do.',
     input: S({ properties: {} }),
-    handler: async (core, _i, p) => ({ principal: { type: p.type, id: p.id, name: p.name, scopes: p.scopes, approval_mode: !!p.approval }, server_time: new Date().toISOString(), timezone: (await core.settings.get()).timezone, public_url: core.cfg.publicUrl, runtime: core.cfg.platform, scope_help: SCOPE_HELP }),
+    handler: async (core, _i, p) => ({ principal: { type: p.type, id: p.id, name: p.name, scopes: p.scopes, approval_mode: !!p.approval }, workspace: { id: core.workspaceId, name: (await core.workspace())?.name || null }, server_time: new Date().toISOString(), timezone: (await core.settings.get()).timezone, public_url: core.cfg.publicUrl, runtime: core.cfg.platform, scope_help: SCOPE_HELP }),
   },
   {
     name: 'list_platforms', method: 'GET', path: '/platforms', scope: 'read', tags: ['meta'], readOnly: true,
@@ -315,7 +315,7 @@ export const operations = [
     name: 'list_media', method: 'GET', path: '/media', scope: 'read', tags: ['media'], readOnly: true,
     summary: 'List uploaded media', description: 'Recently uploaded media with kind, mime, size, width/height and duration (seconds).',
     input: S({ properties: { limit: { type: 'integer', minimum: 1, maximum: 500 } } }),
-    handler: async (core, i) => ({ media: (await core.db.all('SELECT * FROM media ORDER BY created_at DESC LIMIT ?', i.limit || 100)).map((m) => mediaOut(core, m)) }),
+    handler: async (core, i) => ({ media: (await core.media.rows(i.limit || 100)).map((m) => mediaOut(core, m)) }),
   },
   {
     name: 'get_media', method: 'GET', path: '/media/{media_id}', scope: 'read', tags: ['media'], readOnly: true,
@@ -355,6 +355,19 @@ export const operations = [
       if (await mediaInUse(core, i.media_id)) throw new HttpError(409, 'This media is used by an unpublished post. Remove it from the post first.');
       await core.media.remove(i.media_id);
       return { deleted: true };
+    },
+  },
+  {
+    name: 'set_media_poster', method: 'POST', path: '/media/{media_id}/poster', scope: 'write', tags: ['media'],
+    summary: 'Attach a poster frame to a video',
+    description: 'Stores a JPEG (base64, ≤ 2 MB) as the poster/thumbnail frame shown for a video in the UI. Used when the server cannot extract one (Cloudflare Workers has no ffmpeg, or older uploads). Keeps an existing poster unless replace=true. Not the YouTube custom thumbnail (use settings.thumbnail for that).',
+    input: S({ required: ['media_id', 'data'], properties: { media_id: id('Media'), data: str('Base64 JPEG (a data: prefix is allowed).'), replace: { type: 'boolean', description: 'Replace an existing poster.' } } }),
+    handler: async (core, i) => {
+      const b64 = String(i.data).replace(/^data:[^;]+;base64,/, '');
+      if (b64.length > 3 * 1024 * 1024) throw new HttpError(413, 'Poster must be at most 2 MB.');
+      let bytes;
+      try { bytes = fromBase64(b64); } catch { throw new HttpError(400, 'data must be base64.'); }
+      return { media: mediaOut(core, await core.media.setPoster(i.media_id, bytes, { replace: !!i.replace })) };
     },
   },
   {
@@ -608,7 +621,7 @@ export const operations = [
     handler: async (core, i) => {
       const s = await core.settings.get();
       const from = parseTime(i.from, s.timezone, 'from') ?? Date.now();
-      const taken = new Set((await core.db.all("SELECT publish_at FROM posts WHERE status IN ('scheduled','pending_approval') AND publish_at >= ?", from)).map((r) => Math.floor(r.publish_at / 60000)));
+      const taken = new Set((await core.db.all("SELECT publish_at FROM posts WHERE workspace_id = ? AND status IN ('scheduled','pending_approval') AND publish_at >= ?", core.workspaceId, from)).map((r) => Math.floor(r.publish_at / 60000)));
       const slots = nextSlots(s.posting_slots, s.timezone, { from, count: i.count || 7, isTaken: (ms) => taken.has(Math.floor(ms / 60000)) });
       return { timezone: s.timezone, slots: slots.map((t) => ({ at: new Date(t).toISOString(), local: formatLocal(t, s.timezone), epoch_ms: t })) };
     },
@@ -718,17 +731,18 @@ export const operations = [
     name: 'list_webhook_deliveries', method: 'GET', path: '/webhooks/{webhook_id}/deliveries', scope: 'admin', tags: ['webhooks'], readOnly: true,
     summary: 'Webhook delivery log', description: 'Recent deliveries with status, attempts and last error.',
     input: S({ required: ['webhook_id'], properties: { webhook_id: id('Webhook') } }),
-    handler: async (core, i) => ({ deliveries: await core.webhooks.deliveries(i.webhook_id) }),
+    handler: async (core, i) => {
+      if (!(await core.webhooks.get(i.webhook_id))) throw new HttpError(404, 'Webhook not found.');
+      return { deliveries: await core.webhooks.deliveries(i.webhook_id) };
+    },
   },
   {
     name: 'test_webhook', method: 'POST', path: '/webhooks/{webhook_id}/test', scope: 'admin', tags: ['webhooks'],
     summary: 'Send a test event', description: 'Queues a "ping" delivery to this webhook only.',
     input: S({ required: ['webhook_id'], properties: { webhook_id: id('Webhook') } }),
     handler: async (core, i) => {
-      const w = await core.webhooks.get(i.webhook_id);
+      const w = await core.webhooks.ping(i.webhook_id);
       if (!w) throw new HttpError(404, 'Webhook not found.');
-      const payload = JSON.stringify({ id: `ping-${Date.now()}`, event: 'ping', created_at: new Date().toISOString(), data: { hello: 'from postlite' } });
-      await core.db.run("INSERT INTO webhook_deliveries(webhook_id, event, payload, state, attempts, next_attempt_at, created_at) VALUES(?, 'ping', ?, 'pending', 0, ?, ?)", w.id, payload, Date.now(), Date.now());
       await core.webhooks.deliverDue();
       return { deliveries: await core.webhooks.deliveries(w.id, 1) };
     },
@@ -821,8 +835,24 @@ export const opsByName = Object.fromEntries(operations.map((o) => [o.name, o]));
  * Execute an operation with auth, validation and audit.
  * @returns {Promise<any>} result; throws HttpError
  */
-export async function execute(core, op, input, principal, via) {
+/**
+ * The workspace view of the core for a principal. Every REST / MCP / CLI call goes through here, so a
+ * credential can only ever reach its own workspace (sessions: the signed-in email's; API keys: the
+ * workspace the key was created in).
+ */
+export async function scopeFor(core, principal) {
+  const ws = principal?.workspace_id;
+  if (!ws) throw new HttpError(403, 'This credential is not bound to a workspace.');
+  const root = core.root || core;
+  if (core.workspaceId && core.workspaceId !== ws) throw new HttpError(403, 'Workspace mismatch.');
+  const sc = root.scope(ws);
+  await sc.prepare();
+  return sc;
+}
+
+export async function execute(rootCore, op, input, principal, via) {
   if (!principal) throw new HttpError(401, 'Authentication required. Send "Authorization: Bearer <API key>".');
+  const core = await scopeFor(rootCore, principal);
   if (op.scope) need(principal, op.scope);
   const errs = validate(op.input, input || {});
   if (errs.length) {

@@ -27,6 +27,8 @@ Create keys in **Settings → API keys** or `node bin/postlite.js keys create --
 
 **Approval mode (default ON for new keys):** anything that would publish (`create_post` with mode schedule/now/next_slot, `schedule_post`, `publish_post_now`, `retry_post`, editing a scheduled post) puts the post in `pending_approval`. A human approves under **Approvals** (or a non-approval admin key calls `approve_post`). Rejections come back as drafts with `approval_note` explaining what to change — read it, fix with `update_post`, resubmit. Keys in approval mode can never approve posts or mint keys without approval mode. `reschedule_post` only moves the time and keeps the approval state.
 
+A key belongs to one workspace (the person who created it) and only sees that workspace's accounts, posts, media, analytics, webhooks and settings; ids from other workspaces answer 404. `whoami` returns the `workspace`. On the server CLI, `keys create` takes `--email` (or `--workspace`) when there is more than one workspace.
+
 Each key has a rate limit (default 120 req/min → HTTP 429 + `Retry-After`). Every mutating call is recorded in the audit log with the key name and transport.
 
 ## Recommended call sequence
@@ -34,7 +36,7 @@ Each key has a rate limit (default 120 req/min → HTTP 429 + `Retry-After`). Ev
 1. `whoami` — learn your scopes, approval mode, timezone.
 2. `list_accounts` — ids + status. If `needs_reconnect`, call `get_connect_url` (admin) and ask the human to open the link.
 3. `list_platforms` — rules, limits, and the JSON schema of `targets[].settings` per platform.
-4. Media: `upload_media_from_url` (public URL), `upload_media_base64` (≤ 25 MB on Node, ≤ 8 MB on Cloudflare Workers), `upload_media_from_path` (stdio only), `POST /api/v1/media` raw body (≤ 100 MB on Workers), or for big files the resumable `create_upload` → PUT each part to its URL (keep the ETag) → `complete_upload`. Check the returned `width`, `height`, `duration`. `whoami` tells you the `runtime` (`node` or `workers`).
+4. Media: `upload_media_from_url` (public URL), `upload_media_base64` (≤ 25 MB on Node, ≤ 8 MB on Cloudflare Workers), `upload_media_from_path` (stdio only), `POST /api/v1/media` raw body (≤ 100 MB on Workers), or for big files the resumable `create_upload` → PUT each part to its URL (keep the ETag) → `complete_upload`. Check the returned `width`, `height`, `duration`. Videos carry a `poster` frame (ffmpeg on Node); where none could be made you can attach a JPEG with `set_media_poster`. `whoami` tells you the `runtime` (`node` or `workers`).
 5. `validate_post` — dry run; returns per-account `errors`, `warnings`, and `will_publish` (e.g. "Reel", "Carousel (3)").
 6. `create_post` with `mode`: `"draft"`, `"schedule"` + `publish_at`, `"next_slot"` (first free weekly posting slot), or `"now"`.
 7. `get_post` — poll status; targets show `published_url`, `error`, `warning` and an event log.

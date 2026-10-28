@@ -460,7 +460,13 @@ code.url { word-break: break-all; }
 .app-card.focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-bg); }
 .app-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .app-head .status { margin-left: auto; }
-.app-logo { width: 34px; height: 34px; border-radius: var(--r); display: inline-flex; align-items: center; justify-content: center; font: 700 12px var(--mono); color: #fff; background: var(--pc); flex: none; }
+.app-logos { display: inline-flex; flex: none; }
+.app-logos .app-logo + .app-logo { margin-left: -8px; box-shadow: 0 0 0 2px var(--surface); }
+.app-logo { width: 34px; height: 34px; border-radius: 9px; display: inline-grid; place-items: center; color: #fff; flex: none; }
+.app-logo svg { width: 19px; height: 19px; }
+.al-youtube { background: #ff0033; }
+.al-facebook { background: #0866ff; }
+.al-instagram { background: radial-gradient(circle at 30% 107%, #fdf497 0%, #fdf497 5%, #fd5949 45%, #d6249f 60%, #285aeb 90%); }
 .app-form { margin: 6px 0 4px; }
 .app-test { display: flex; align-items: center; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
 .copy-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -1,5 +1,5 @@
 // Settings → Platform apps: paste each platform's developer-app credentials (stored encrypted).
-import { h, mount, api, toast, confirmDialog, PROVIDER_META, icon, relTime } from './core.js';
+import { h, mount, api, toast, confirmDialog, PROVIDER_META, MARKS, icon, relTime } from './core.js';
 import { copyButton } from './ui.js';
 
 const BADGE = {
@@ -8,7 +8,8 @@ const BADGE = {
   not_configured: ['Not configured', 's-failed'],
 };
 const COLORS = { meta: PROVIDER_META.facebook.color, instagram: PROVIDER_META['instagram-standalone'].color, google: PROVIDER_META.youtube.color };
-const SHORT = { meta: 'FB', instagram: 'IG', google: 'YT' };
+const LOGOS = { meta: ['facebook', 'instagram'], instagram: ['instagram'], google: ['youtube'] };
+const logo = (kind) => { const el = h('span', { class: `app-logo al-${kind}` }); el.innerHTML = MARKS[kind]; return el; };
 
 function testLine(t) {
   if (!t) return null;
@@ -26,7 +27,7 @@ function appCard(a, refresh) {
 
   return h('section', { class: 'card app-card', id: `app-${a.app}`, style: { '--pc': COLORS[a.app] } },
     h('div', { class: 'app-head' },
-      h('span', { class: 'app-logo' }, SHORT[a.app]),
+      h('span', { class: 'app-logos' }, LOGOS[a.app].map(logo)),
       h('div', { class: 'min0' }, h('h2', { class: 'section-title' }, a.label), h('div', { class: 'muted small' }, a.redirect_uris.length > 1 ? `${a.redirect_uris.length} redirect URIs` : 'OAuth app')),
       h('span', { class: `status ${badgeCls}` }, h('i', { class: 'sd' }), badgeText)),
     a.status === 'configured_env' ? h('p', { class: 'muted small' }, `Using ${a.env_vars.join(' / ')} from .env (${a.client_id}). Saving here overrides .env; Clear returns to it.`) : null,

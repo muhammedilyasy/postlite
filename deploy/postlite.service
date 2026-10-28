@@ -1,0 +1,29 @@
+# systemd *user* unit for postlite. Not installed automatically.
+#   mkdir -p ~/.config/systemd/user && cp deploy/postlite.service ~/.config/systemd/user/
+#   # edit WorkingDirectory / ExecStart paths below if your checkout lives elsewhere
+#   systemctl --user daemon-reload && systemctl --user enable --now postlite
+#   loginctl enable-linger "$USER"     # keep it running after you log out
+#   journalctl --user -u postlite -f
+[Unit]
+Description=postlite social media scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/postlite
+EnvironmentFile=%h/apps/postlite/.env
+ExecStart=/usr/bin/env node bin/postlite.js start
+Restart=on-failure
+RestartSec=5
+# graceful stop: finishes the current publish step, everything else resumes on next boot
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# small-server friendly
+Environment=NODE_OPTIONS=--max-old-space-size=192
+MemoryMax=400M
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

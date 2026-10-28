@@ -1,0 +1,13 @@
+# Add to your Hermes config.yaml; put POSTLITE_API_KEY in the profile's .env
+mcp_servers:
+  postlite:
+    url: "https://social.example.com/mcp"
+    headers:
+      Authorization: "Bearer ${POSTLITE_API_KEY}"
+
+# Alternative when Hermes runs on the same server as postlite (stdio, local file uploads work):
+#  postlite:
+#    command: "node"
+#    args: ["/home/you/apps/postlite/bin/postlite.js", "mcp"]
+#    env:
+#      POSTLITE_API_KEY: "${POSTLITE_API_KEY}"

@@ -1,0 +1,19 @@
+{
+  "name": "postlite",
+  "version": "0.1.0",
+  "description": "Lightweight, Docker-free, self-hosted social media scheduler for YouTube, Instagram and Facebook Pages.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "postlite": "bin/postlite.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node bin/postlite.js start",
+    "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
+    "fake": "node test/fake/server.js"
+  },
+  "dependencies": {}
+}

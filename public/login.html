@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>postlite · Sign in</title>
+<link rel="icon" href="/assets/favicon.svg">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="center-page">
+  <form class="card narrow login" method="post" action="/login">
+    <div class="brand big"><span class="logo">◆</span> postlite</div>
+    <p class="muted">Lightweight scheduler for YouTube, Instagram &amp; Facebook</p>
+    {{ERROR}}
+    {{SETUP}}
+    <input type="hidden" name="csrf" value="{{CSRF}}">
+    <label>Password
+      <input type="password" name="password" autocomplete="current-password" autofocus required>
+    </label>
+    <button class="btn primary block" type="submit">Sign in</button>
+  </form>
+</body>
+</html>

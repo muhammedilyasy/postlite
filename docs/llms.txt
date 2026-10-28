@@ -1,0 +1,36 @@
+# postlite
+
+> Agents: read `/AGENTS.md` (workflows; docs/agent-guide.md in the repo) and `/api/v1/openapi.json` (full API). MCP endpoint: `/mcp` (Streamable HTTP, `Authorization: Bearer <API key>`), or stdio via `node bin/postlite.js mcp`.
+
+postlite is a lightweight, self-hosted social media scheduler for YouTube, Facebook Pages and Instagram (via Facebook Login or Instagram Login). It runs as one Node.js process with SQLite. Everything in the web UI is also available through the REST API, the MCP server and the CLI.
+
+## Concepts
+- **account**: a connected YouTube channel, Facebook Page or Instagram professional account. Get ids from `list_accounts`. Status `needs_reconnect` means a human must re-authorize (`get_connect_url`).
+- **post**: one piece of content (global `content` + ordered `media_ids`) sent to one or more accounts (`targets`). Each target may override `content`/`media_ids` and has platform `settings`.
+- **status**: draft → (pending_approval) → scheduled → publishing → published | failed.
+- **approval mode**: API keys default to approval mode. Scheduling/publishing with such a key sets `pending_approval`; a human approves in the UI. Tell the user when this happens. You cannot approve with such a key.
+- **times**: ISO-8601 with offset, epoch ms, or local `YYYY-MM-DDTHH:mm` in the server timezone (`get_settings`).
+
+## Tools / operations (same names in MCP, REST operationId and `postlite call <name>`)
+- whoami, list_platforms, get_settings, update_settings, list_free_slots
+- list_accounts, get_account, check_account, get_connect_url, disconnect_account
+- list_media, get_media, upload_media_from_url, upload_media_base64, delete_media (stdio only: upload_media_from_path; REST: POST /api/v1/media raw body)
+- list_posts, get_post, get_calendar, validate_post, create_post, update_post, schedule_post, reschedule_post, publish_post_now, retry_post, duplicate_post, delete_post, delete_post_target
+- list_pending_approvals, approve_post, reject_post
+- get_analytics_overview, get_account_analytics, get_top_posts, get_post_metrics, sync_analytics (REST CSV: GET /api/v1/analytics/export.csv)
+- list_webhooks, create_webhook, update_webhook, delete_webhook, rotate_webhook_secret, list_webhook_deliveries, test_webhook
+- list_api_keys, create_api_key, update_api_key, revoke_api_key, list_audit_log
+
+## Platform rules (summary — call list_platforms for the authoritative list)
+- YouTube: exactly one video; settings.title required (2–100 chars); description ≤ 5000; Shorts = vertical/square ≤ 180 s (`isShort: true`); privacy public|unlisted|private.
+- Facebook Page: text/link, 1–10 photos, or one video (`post_type: post`); Reels one vertical video 3–90 s (`post_type: reel`); stories (`post_type: story`).
+- Instagram: ≥ 1 media, JPEG images only; 1 image = image post, 1 video = Reel, 2–10 items = carousel; `post_type: story` for stories; caption ≤ 2200, ≤ 30 hashtags, ≤ 20 mentions; feed image ratio 4:5–1.91:1; ≤ 3 collaborators.
+
+## Workflows
+1. Plan a week: get_settings → list_free_slots(count 7) → list_accounts → for each slot: validate_post → create_post(mode "schedule", publish_at = slot).
+2. Video → YouTube Short (+ Instagram Reel): upload_media_from_url (check width < height and duration ≤ 180) → validate_post with targets [{account_id: yt, settings: {title, isShort: true}}, {account_id: ig}] → create_post(mode "next_slot").
+3. Fix a failure: list_posts(status "failed") → get_post → read target.error → fix (update_post) → retry_post. If the error says the post "may have been published", ask the user to check the platform first.
+4. Weekly report: sync_analytics → get_analytics_overview(from 7 days ago) → get_top_posts(limit 5).
+
+## Errors
+JSON `{"error":{"status","message","details"}}`; MCP tool errors return `isError: true` with the same message. 400 = bad input (message lists fields, unknown fields suggest the right name), 403 = missing scope (message names it), 422 = platform validation (per-account list), 409 = state conflict, 429 = rate limit (Retry-After).

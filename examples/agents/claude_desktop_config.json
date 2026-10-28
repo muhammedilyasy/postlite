@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "postlite": {
+      "command": "node",
+      "args": ["/path/to/postlite/bin/postlite.js", "mcp"],
+      "env": {
+        "POSTLITE_URL": "https://social.example.com",
+        "POSTLITE_API_KEY": "pl_xxxxxxxx_your_key_here"
+      }
+    }
+  }
+}

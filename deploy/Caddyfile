@@ -1,0 +1,16 @@
+# Caddy (automatic HTTPS). Put this in your Caddyfile and `caddy reload`.
+social.example.com {
+	encode zstd gzip
+	# large video uploads
+	request_body {
+		max_size 2GB
+	}
+	reverse_proxy 127.0.0.1:4100 {
+		# MCP + long uploads: don't buffer, generous timeouts
+		flush_interval -1
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "postlite": {
+      "url": "https://social.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${env:POSTLITE_API_KEY}" }
+    }
+  }
+}

@@ -704,5 +704,11 @@ code.uri, .uri-row code.uri { border: 0; font: 12.5px var(--mono); word-break: b
 .app-perms { margin-top: 14px; }
 .app-perms summary { cursor: pointer; color: var(--text-2); font-size: 13px; }
 .app-perms summary:hover { color: var(--text); }
-.app-perms .scope-chips { margin: 10px 0 6px; }
+.perm-list { margin: 10px 0 0; border: 1px solid var(--border); border-radius: var(--r); }
+.perm-row { display: grid; grid-template-columns: minmax(0, 240px) 1fr; gap: 16px; padding: 9px 12px; align-items: baseline; }
+.perm-row + .perm-row { border-top: 1px solid var(--border); }
+.perm-name { font: 12px var(--mono); color: var(--text); background: none; border: 0; padding: 0; word-break: break-all; }
+.perm-why { font-size: 13px; color: var(--text-2); }
+.perm-apis { margin: 10px 0 0; }
+@media (max-width: 560px) { .perm-row { grid-template-columns: 1fr; gap: 2px; } }
 .form-narrow .field { margin: 0; }

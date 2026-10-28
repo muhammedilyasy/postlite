@@ -16,6 +16,26 @@ const BLURB = {
 const NAME = { meta: 'Meta', instagram: 'Instagram Login', google: 'Google' };
 const CONSOLE = { meta: 'https://developers.facebook.com/apps', instagram: 'https://developers.facebook.com/apps', google: 'https://console.cloud.google.com/apis/credentials' };
 
+const WHY = {
+  pages_show_list: 'See the Pages you manage, so you can pick one',
+  business_management: 'Reach Pages owned by a Business portfolio',
+  pages_manage_posts: 'Publish posts, photos, videos and Reels',
+  pages_manage_engagement: 'Add the optional first comment',
+  pages_read_engagement: 'Read Page details and post stats',
+  read_insights: 'Read Page analytics',
+  instagram_basic: 'See the Instagram account linked to the Page',
+  instagram_content_publish: 'Publish posts, carousels, Reels and Stories',
+  instagram_manage_comments: 'Add the optional first comment',
+  instagram_manage_insights: 'Read Instagram analytics',
+  instagram_business_basic: 'See your Instagram profile',
+  instagram_business_content_publish: 'Publish posts, carousels, Reels and Stories',
+  instagram_business_manage_comments: 'Add the optional first comment',
+  instagram_business_manage_insights: 'Read Instagram analytics',
+  'youtube.upload': 'Upload videos and Shorts',
+  'youtube.readonly': 'See your channel and its videos',
+  'yt-analytics.readonly': 'Read channel and video analytics',
+};
+const shortScope = (s) => s.replace(/^https:\/\/www\.googleapis\.com\/auth\//, '');
 const mark = (kind) => { const el = h('span', { class: 'pmark' }); el.innerHTML = MARKS[kind]; return el; };
 const marks = (app) => h('span', { class: 'pmarks' }, LOGOS[app].map(mark));
 const pill = (status) => { const [t, c] = STATUS[status] || STATUS.not_configured; return h('span', { class: `status ${c}` }, h('i', { class: 'sd' }), t); };
@@ -81,8 +101,10 @@ function detail(a, refresh) {
       h('a', { class: 'btn', href: a.guide, target: '_blank', rel: 'noopener' }, 'Step-by-step guide', icon('external', 13)),
       h('a', { class: 'btn ghost', href: CONSOLE[a.app], target: '_blank', rel: 'noopener' }, 'Developer console', icon('external', 13))),
     h('details', { class: 'app-perms' }, h('summary', {}, `Permissions requested (${a.scopes.length})`),
-      h('div', { class: 'scope-chips' }, a.scopes.map((s) => h('code', { class: 'scope-chip' }, s))),
-      a.apis.length ? h('p', { class: 'muted small' }, 'APIs to enable: ', a.apis.join(', ')) : null));
+      h('div', { class: 'perm-list' }, a.scopes.map((sc) => h('div', { class: 'perm-row' },
+        h('code', { class: 'perm-name' }, shortScope(sc)),
+        h('span', { class: 'perm-why' }, WHY[shortScope(sc)] || '')))),
+      a.apis.length ? h('p', { class: 'muted small perm-apis' }, 'Turn on: ', a.apis.join(', ')) : null));
 
   const danger = a.saved_in_app ? section('Remove credentials', { sub: a.env_fallback ? 'postlite falls back to the .env values.' : 'Connecting and token refresh stop until new keys are saved.' },
     h('button', { class: 'btn danger-outline', onclick: (e) => busy(e.currentTarget, async () => {

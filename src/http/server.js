@@ -187,11 +187,43 @@ export function createServer(core) {
     fs.stat(file, (err, st) => {
       if (err || !st.isFile()) return send(res, 404, 'Not found', { 'content-type': 'text/plain' });
       const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
-      const headers = { ...baseHeaders, etag, 'cache-control': file.endsWith('.woff2') ? 'public, max-age=31536000, immutable' : 'no-cache', ...(csp ? { 'content-security-policy': CSP } : {}) };
+      const versioned = !!req && /[?&]v=[0-9a-f]{8,}/.test(req.url || '');
+      const headers = { ...baseHeaders, etag, 'cache-control': file.endsWith('.woff2') || versioned ? 'public, max-age=31536000, immutable' : 'no-cache', ...(csp ? { 'content-security-policy': CSP } : {}) };
       if (req && req.headers['if-none-match'] === etag) { res.writeHead(304, headers); return res.end(); }
       res.writeHead(200, { ...headers, 'content-type': MIME[path.extname(file)] || 'application/octet-stream', 'content-length': st.size });
       fs.createReadStream(file).pipe(res);
     });
+  }
+
+
+  // ---- App shell: content-hashed asset URLs + import map + modulepreload, so a refresh needs no
+  // revalidation round trips and the module graph loads in one parallel batch (matters behind a tunnel).
+  let shellCache = null;
+  function appShell() {
+    if (shellCache) return shellCache;
+    const jsDir = path.join(ROOT, 'public', 'js');
+    const sharedDir = path.join(ROOT, 'src', 'shared');
+    const mods = fs.readdirSync(jsDir).filter((f) => f.endsWith('.js') && f !== 'theme.js').map((f) => [`/assets/js/${f}`, path.join(jsDir, f)]);
+    const shared = fs.readdirSync(sharedDir).filter((f) => f.endsWith('.js')).map((f) => [`/assets/shared/${f}`, path.join(sharedDir, f)]);
+    const all = [...mods, ...shared, ['/assets/app.css', path.join(ROOT, 'public', 'app.css')], ['/assets/js/theme.js', path.join(jsDir, 'theme.js')]];
+    const hash = crypto.createHash('sha256');
+    for (const [, f] of all) hash.update(fs.readFileSync(f));
+    const v = hash.digest('hex').slice(0, 12);
+    const imports = Object.fromEntries([...mods, ...shared].map(([u]) => [u, `${u}?v=${v}`]));
+    const importmap = JSON.stringify({ imports });
+    const ihash = crypto.createHash('sha256').update(importmap).digest('base64');
+    const preload = mods.map(([u]) => `<link rel="modulepreload" href="${u}?v=${v}">`).join('');
+    let html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8')
+      .replace('href="/assets/app.css"', `href="/assets/app.css?v=${v}"`)
+      .replace('src="/assets/js/theme.js"', `src="/assets/js/theme.js?v=${v}"`)
+      .replace('<script type="module" src="/assets/js/app.js"></script>', `<script type="importmap">${importmap}</script>${preload}<script type="module" src="/assets/js/app.js?v=${v}"></script>`);
+    const csp = CSP.replace("script-src 'self'", `script-src 'self' 'sha256-${ihash}'`);
+    shellCache = { html, csp, v };
+    return shellCache;
+  }
+  function sendShell(res, extra = {}) {
+    const sh = appShell();
+    return send(res, 200, sh.html, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': sh.csp, 'cache-control': 'no-store', ...extra });
   }
 
   const LOGO = '<svg class="logo-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 16.5V7.5h4.6a3 3 0 0 1 0 6H8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -447,9 +479,9 @@ export function createServer(core) {
         if (!ui) return;
         if (ui.setCookie) {
           // first request after Access sign-in: set the session cookie, then serve the shell
-          return send(res, 200, fs.readFileSync(path.join(ROOT, 'public', 'index.html')), htmlHeaders({ 'set-cookie': ui.setCookie }));
+          return sendShell(res, { 'set-cookie': ui.setCookie });
         }
-        return serveFile(res, path.join(ROOT, 'public', 'index.html'), { csp: true });
+        return sendShell(res);
       }
       if (accessMode && pageGet) {
         // unknown paths: don't reveal anything to callers without a valid Access identity

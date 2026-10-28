@@ -35,6 +35,16 @@ export function getConfig(env = {}, { platform = 'node' } = {}) {
     meta: { appId: E('META_APP_ID'), appSecret: E('META_APP_SECRET') },
     instagram: { appId: E('INSTAGRAM_APP_ID'), appSecret: E('INSTAGRAM_APP_SECRET') },
     google: { clientId: E('GOOGLE_CLIENT_ID'), clientSecret: E('GOOGLE_CLIENT_SECRET') },
+    x: { clientId: E('X_CLIENT_ID'), clientSecret: E('X_CLIENT_SECRET') },
+    linkedin: { clientId: E('LINKEDIN_CLIENT_ID'), clientSecret: E('LINKEDIN_CLIENT_SECRET') },
+    // Optional second LinkedIn app for Company Pages (Community Management API), when it lives on its own app.
+    linkedinPages: { clientId: E('LINKEDIN_PAGES_CLIENT_ID'), clientSecret: E('LINKEDIN_PAGES_CLIENT_SECRET') },
+    // Extra scopes once LinkedIn approved them for your app, e.g. "r_member_postAnalytics w_member_social_feed".
+    linkedinExtraScopes: E('LINKEDIN_EXTRA_SCOPES'),
+    linkedinPageExtraScopes: E('LINKEDIN_PAGE_EXTRA_SCOPES'),
+    // LinkedIn-Version header (YYYYMM). LinkedIn supports each version for about a year; bump when it sunsets.
+    linkedinVersion: E('LINKEDIN_API_VERSION') || '202610',
+    xAnalyticsPosts: num(E('X_ANALYTICS_RECENT_POSTS'), 10), // X bills every read; keep the recent window small
     // Upstream base URLs — overridable so tests / local verification can point at fake servers.
     urls: {
       graph: trimSlash(E('GRAPH_BASE_URL') || 'https://graph.facebook.com'),
@@ -46,6 +56,10 @@ export function getConfig(env = {}, { platform = 'node' } = {}) {
       googleToken: trimSlash(E('GOOGLE_TOKEN_URL') || 'https://oauth2.googleapis.com'),
       youtube: trimSlash(E('YOUTUBE_API_BASE_URL') || 'https://www.googleapis.com'),
       ytAnalytics: trimSlash(E('YOUTUBE_ANALYTICS_BASE_URL') || 'https://youtubeanalytics.googleapis.com'),
+      xApi: trimSlash(E('X_API_BASE_URL') || 'https://api.x.com'),
+      xWww: trimSlash(E('X_WWW_URL') || 'https://x.com'),
+      linkedinApi: trimSlash(E('LINKEDIN_API_BASE_URL') || 'https://api.linkedin.com'),
+      linkedinWww: trimSlash(E('LINKEDIN_WWW_URL') || 'https://www.linkedin.com'),
     },
     scheduler: {
       tickMs: num(E('SCHEDULER_TICK_MS'), 15000),

@@ -5,7 +5,7 @@ import { HttpError } from '../errors.js';
 import { fromBase64 } from '../bytes.js';
 import { meteredFetch, meter } from '../meter.js';
 import { validate } from './schema.js';
-import { PLATFORMS, LIMITS, YOUTUBE_CATEGORIES, defaultSettings, validatePost, describeKind } from '../shared/validate.js';
+import { PLATFORMS, LIMITS, YOUTUBE_CATEGORIES, defaultSettings, validatePost, describeKind, captionLength } from '../shared/validate.js';
 import { parseLocal, nextSlots, formatLocal } from '../shared/time.js';
 import { SCOPES, SCOPE_HELP } from '../apikeys.js';
 import { WEBHOOK_EVENTS } from '../webhooks.js';
@@ -54,6 +54,23 @@ export const SETTINGS_SCHEMAS = {
   }),
 };
 SETTINGS_SCHEMAS['instagram-standalone'] = SETTINGS_SCHEMAS.instagram;
+SETTINGS_SCHEMAS.x = S({
+  properties: {
+    thread: { type: 'array', maxItems: 25, items: S({ properties: { text: str('Text of this follow-up post (same limit as the first post).'), media: { type: 'array', items: { type: 'string' }, maxItems: 4, description: 'Media ids for this follow-up post (up to 4 photos, or 1 GIF, or 1 video).' } } }), description: 'Follow-up posts published as a reply chain under the first post (a thread). The first post is content + media_ids.' },
+    reply_settings: { type: 'string', enum: ['', 'following', 'mentionedUsers', 'subscribers', 'verified'], description: 'Who can reply to the first post. Empty = everyone.' },
+  },
+});
+SETTINGS_SCHEMAS.linkedin = S({
+  properties: {
+    post_type: { type: 'string', enum: ['post', 'document'], description: 'post = text, 1–20 images, or 1 video; document = one PDF (carousel-style document post).' },
+    visibility: { type: 'string', enum: ['PUBLIC', 'CONNECTIONS'], description: 'Member posts only; Company Page posts are always PUBLIC.' },
+    document_title: str('Title shown above a document post (≤ 400 chars).'),
+    url: str('Link for an article (link) post without media.'),
+    url_title: str('Title of the article card.'),
+    first_comment: str('Optional first comment. Needs w_member_social_feed / w_organization_social_feed (Community Management API); otherwise the post is published with a warning.'),
+  },
+});
+SETTINGS_SCHEMAS['linkedin-page'] = SETTINGS_SCHEMAS.linkedin;
 
 const TARGET = S({
   required: ['account_id'],
@@ -223,7 +240,7 @@ async function platformInfo(core) {
     configured: providers[pid].isConfigured(core.cfg),
     connected_accounts: accounts.filter((a) => a.provider === pid).length,
     caption_limit: meta.maxCaption,
-    limits: LIMITS[pid === 'instagram-standalone' ? 'instagram' : pid],
+    limits: LIMITS[pid === 'instagram-standalone' ? 'instagram' : pid === 'linkedin-page' ? 'linkedin' : pid],
     default_settings: defaultSettings(pid),
     settings_schema: SETTINGS_SCHEMAS[pid],
     rules: RULES[pid],
@@ -237,11 +254,17 @@ const RULES = {
   instagram: ['At least one media item; JPEG images only.', 'Carousel: 2–10 items (images and videos ≤ 60 s).', 'Single video becomes a Reel (3 s–15 min).', 'Feed images aspect ratio 4:5 to 1.91:1.', 'Caption ≤ 2200 chars, ≤ 30 hashtags, ≤ 20 @mentions.', 'Stories: each item becomes its own story (videos ≤ 60 s).', 'Media must be reachable by Meta at PUBLIC_URL over HTTPS.'],
 };
 RULES['instagram-standalone'] = RULES.instagram;
+RULES.x = ['Text ≤ 280 weighted characters (URLs count 23, emoji/CJK count 2); X Premium accounts up to 25,000.', 'Up to 4 photos (≤ 5 MB), or 1 GIF (≤ 15 MB), or 1 video (MP4/MOV, ≤ 20 min; 125 min with Premium).', 'settings.thread adds follow-up posts as a reply chain (each one is billed as a post).', 'X API is pay-per-use: every post and read costs credits; posts containing a URL cost more.'];
+RULES.linkedin = ['Text ≤ 3000 characters (sent as LinkedIn little text; #hashtags stay clickable).', '1–20 images (JPG/PNG/GIF, < 36 MP), or 1 MP4 video (3 s–30 min, 75 KB–500 MB), or post_type=document with 1 PDF (≤ 100 MB, 300 pages).', 'Access tokens last 60 days; reconnect unless LinkedIn approved refresh tokens for your app.', 'First comments and analytics need the Community Management API.'];
+RULES['linkedin-page'] = RULES.linkedin;
 const EXAMPLES = {
   youtube: { account_id: '<youtube account id>', settings: { title: 'My first Short', privacy: 'public', isShort: true, tags: ['shorts', 'howto'] } },
   facebook: { account_id: '<facebook page id>', settings: { post_type: 'post', first_comment: 'Link in bio!' } },
   instagram: { account_id: '<instagram account id>', settings: { post_type: 'post', collaborators: ['partner_brand'] } },
   'instagram-standalone': { account_id: '<instagram account id>', settings: { post_type: 'story' } },
+  x: { account_id: '<x account id>', settings: { thread: [{ text: '2/ The details…' }, { text: '3/ Link in the next post', media: [] }] } },
+  linkedin: { account_id: '<linkedin account id>', settings: { post_type: 'post', visibility: 'PUBLIC', first_comment: 'Sources in the comments' } },
+  'linkedin-page': { account_id: '<linkedin page id>', settings: { post_type: 'document', document_title: 'Q3 report' } },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -259,7 +282,7 @@ export const operations = [
   {
     name: 'list_platforms', method: 'GET', path: '/platforms', scope: 'read', tags: ['meta'], readOnly: true,
     summary: 'Supported platforms, rules and per-platform settings schemas',
-    description: 'Lists YouTube, Facebook Pages, Instagram (via Facebook) and Instagram (Instagram Login) with caption limits, media rules, the JSON schema of targets[].settings, defaults and an example target. Read this before composing posts.',
+    description: 'Lists YouTube, Facebook Pages, Instagram (via Facebook), Instagram (Instagram Login), X, LinkedIn profiles and LinkedIn Pages with caption limits, media rules, the JSON schema of targets[].settings, defaults and an example target. Read this before composing posts.',
     input: S({ properties: {} }),
     handler: async (core) => ({ platforms: await platformInfo(core) }),
   },
@@ -449,9 +472,12 @@ export const operations = [
         const caption = t.content ?? i.content ?? '';
         const thumb = settings.thumbnail ? await core.media.get(settings.thumbnail) : null;
         const info = (m) => ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.original_name });
-        const v = validatePost(a.provider, { caption, media: media.map(info), settings, thumbnail: thumb && info(thumb) });
+        const thread = a.provider === 'x' && Array.isArray(settings.thread)
+          ? await Promise.all(settings.thread.map(async (t) => ({ text: t?.text || '', media: (await core.media.getMany(t?.media || [])).map(info) }))) : null;
+        const v = validatePost(a.provider, { caption, media: media.map(info), settings, thumbnail: thumb && info(thumb), thread, account: { premium: !!a.meta?.premium } });
+        const len = captionLength(a.provider, caption, { premium: !!a.meta?.premium });
         const errors = [...serr, ...missing.map((m) => `Unknown media id ${m}`), ...v.errors, ...(a.status !== 'active' ? ['Account needs to be reconnected (get_connect_url with reconnect_account_id).'] : [])];
-        results.push({ account_id: a.id, account: a.name, provider: a.provider, ok: !errors.length, will_publish: describeKind(a.provider, media, settings), caption_length: [...caption].length, caption_limit: PLATFORMS[a.provider].maxCaption, errors, warnings: v.warnings });
+        results.push({ account_id: a.id, account: a.name, provider: a.provider, ok: !errors.length, will_publish: describeKind(a.provider, media, settings), caption_length: len.n, caption_limit: len.max, errors, warnings: v.warnings });
       }
       return { ok: results.every((r) => r.ok), results };
     },

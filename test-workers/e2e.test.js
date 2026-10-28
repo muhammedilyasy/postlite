@@ -262,11 +262,51 @@ test('MCP over Streamable HTTP with an approval-mode key; human approval; cron p
   assert.equal(unauth.status, 401);
 });
 
+test('X and LinkedIn on Workers: connect, X thread + chunked video, LinkedIn video parts + images + PDF, analytics', { skip }, async () => {
+  for (const p of ['x', 'linkedin', 'linkedin-page']) {
+    const r = await oauthRoundTrip(p);
+    assert.equal(r.status, 200, `${p}: ${await r.text()}`);
+  }
+  const list = (await w.api('GET', '/accounts', { key: admin })).json.accounts;
+  for (const a of list) acct[a.provider] = a.id;
+  const pdf = await w.api('POST', '/media?filename=deck.pdf', { session, body: Buffer.from(`%PDF-1.4\n${'x'.repeat(20000)}\n%%EOF`), raw: true, headers: { 'content-type': 'application/pdf' } });
+  assert.equal(pdf.status, 200, pdf.text);
+  assert.equal(pdf.json.media.kind, 'document');
+  const create = (targets, media, content) => w.api('POST', '/posts', { key: admin, body: { content, media_ids: media, targets, mode: 'now' }, label: 'REST create_post' });
+  const rs = [
+    await create([{ account_id: acct.x, settings: { thread: [{ text: 'cf 2/ photo', media: [img1.id] }, { text: 'cf 3/ end' }] } }], [], 'cf x thread 1/'),
+    await create([{ account_id: acct.x }], [video.id], 'cf x video'),
+    await create([{ account_id: acct.linkedin }], [video.id], 'cf li video (part 1)'),
+    await create([{ account_id: acct['linkedin-page'] }], [img1.id, img2.id], 'cf li page images #workers'),
+    await create([{ account_id: acct.linkedin, settings: { post_type: 'document', document_title: 'Deck' } }], [pdf.json.media.id], 'cf li document'),
+  ];
+  for (const r of rs) assert.equal(r.status, 200, r.text);
+  const ids = rs.map((r) => r.json.post.id);
+  await w.cronUntil(async () => (await Promise.all(ids.map(posts))).every((p) => p.status === 'published' || p.status === 'failed'), { label: 'cron publish step (x/linkedin)' });
+  const all = await Promise.all(ids.map(posts));
+  for (const p of all) assert.equal(p.status, 'published', `${p.content}: ${p.targets[0].error}`);
+  const st = w.fake.state;
+  const xs = st.published.filter((p) => p.platform === 'x');
+  assert.ok(xs.some((p) => p.data.reply), 'thread replies');
+  assert.equal(Object.values(st.xl.x.media).find((m) => m.category === 'tweet_video').segs.length, 4, '12 MB + 12 KB video in 4 MB segments');
+  const liVid = st.published.find((p) => p.platform === 'linkedin' && p.kind === 'video');
+  assert.ok(liVid, 'LinkedIn video post');
+  assert.ok(st.published.some((p) => p.platform === 'linkedin-page' && p.kind === 'multiImage'));
+  assert.ok(st.published.some((p) => p.platform === 'linkedin' && p.kind === 'document'));
+  const sync = await w.api('POST', '/analytics/sync', { key: admin, body: { account_id: acct.x } });
+  assert.equal(sync.status, 200, sync.text);
+  await w.cronUntil(async () => !!(await w.api('GET', `/analytics/accounts/${acct.x}`, { key: admin })).json.sync?.last_sync_at, { label: 'cron analytics (x)' });
+  const xa = (await w.api('GET', `/analytics/accounts/${acct.x}`, { key: admin })).json;
+  assert.ok(xa.summary.followers.value >= 500);
+  const lia = await w.api('POST', '/analytics/sync', { key: admin, body: { account_id: acct['linkedin-page'] } });
+  assert.equal(lia.status, 200, lia.text);
+});
+
 test('REST parity: OpenAPI, platforms, calendar, base64 cap, audit log', { skip }, async () => {
   const spec = await (await fetch(`${w.base}/api/v1/openapi.json`)).json();
   assert.ok(spec.paths['/api/v1/media/uploads']);
   const plats = await w.api('GET', '/platforms', { key: admin, label: 'REST list_platforms' });
-  assert.equal(plats.json.platforms.length, 4);
+  assert.equal(plats.json.platforms.length, 7);
   const cal = await w.api('GET', '/calendar', { key: admin, label: 'REST get_calendar' });
   assert.equal(cal.status, 200);
   const list = await w.api('GET', '/posts?limit=50', { key: admin, label: 'REST list_posts (50)' });

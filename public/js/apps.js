@@ -7,14 +7,17 @@ const STATUS = {
   configured_env: ['Configured in .env', 's-published'],
   not_configured: ['Not set up', 's-draft'],
 };
-const LOGOS = { meta: ['facebook', 'instagram'], instagram: ['instagram'], google: ['youtube'] };
+const LOGOS = { meta: ['facebook', 'instagram'], instagram: ['instagram'], google: ['youtube'], x: ['x'], linkedin: ['linkedin'], 'linkedin-pages': ['linkedin'] };
 const BLURB = {
   meta: 'Facebook Pages and Instagram accounts linked to a Page',
   instagram: 'Instagram accounts that log in directly, no Page needed',
   google: 'YouTube channels, uploads and analytics',
+  x: 'X accounts: posts, threads, photos and video (pay-per-use API)',
+  linkedin: 'LinkedIn profiles, and Company Pages once the Community Management API is approved',
+  'linkedin-pages': 'Optional: a second LinkedIn app that holds Community Management API access',
 };
-const NAME = { meta: 'Meta', instagram: 'Instagram Login', google: 'Google' };
-const CONSOLE = { meta: 'https://developers.facebook.com/apps', instagram: 'https://developers.facebook.com/apps', google: 'https://console.cloud.google.com/apis/credentials' };
+const NAME = { meta: 'Meta', instagram: 'Instagram Login', google: 'Google', x: 'X', linkedin: 'LinkedIn', 'linkedin-pages': 'LinkedIn Pages app' };
+const CONSOLE = { meta: 'https://developers.facebook.com/apps', instagram: 'https://developers.facebook.com/apps', google: 'https://console.cloud.google.com/apis/credentials', x: 'https://console.x.com', linkedin: 'https://www.linkedin.com/developers/apps', 'linkedin-pages': 'https://www.linkedin.com/developers/apps' };
 
 const WHY = {
   pages_show_list: 'See the Pages you manage, so you can pick one',
@@ -34,6 +37,18 @@ const WHY = {
   'youtube.upload': 'Upload videos and Shorts',
   'youtube.readonly': 'See your channel and its videos',
   'yt-analytics.readonly': 'Read channel and video analytics',
+  'tweet.read': 'Read your posts and their public metrics',
+  'tweet.write': 'Publish posts, replies and threads',
+  'users.read': 'See your profile (name, @handle, followers)',
+  'media.write': 'Upload photos, GIFs and videos',
+  'offline.access': 'Stay connected: renew the 2-hour token without logging in again',
+  openid: 'Sign in with LinkedIn (identifies your member id)',
+  profile: 'See your name and photo',
+  email: 'See your email address, to label the account',
+  w_member_social: 'Publish posts, images, videos and documents as you',
+  r_organization_social: 'Read the Page posts (to find a post after a timeout)',
+  w_organization_social: 'Publish posts, images, videos and documents as the Page',
+  rw_organization_admin: 'List the Pages you admin and read Page analytics',
 };
 const shortScope = (s) => s.replace(/^https:\/\/www\.googleapis\.com\/auth\//, '');
 const mark = (kind) => { const el = h('span', { class: 'pmark' }); el.innerHTML = MARKS[kind]; return el; };

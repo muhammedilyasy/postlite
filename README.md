@@ -1,6 +1,6 @@
 # postlite
 
-**A lightweight, self-hosted social media scheduler for YouTube, Instagram and Facebook Pages.**
+**A lightweight, self-hosted social media scheduler for YouTube, Instagram, Facebook Pages, X and LinkedIn.**
 Runs as **one Node.js process** (one SQLite file, zero runtime dependencies, no Docker) **or entirely on Cloudflare's free plan** (Workers + D1 + R2 + Cron). Agent-first: everything the web UI does is available through a REST API, an MCP server and a CLI, so you can run your socials from Claude, ChatGPT, Cursor, Hermes or a shell script.
 
 | Dashboard (week) | Posts | Post events |
@@ -18,12 +18,27 @@ More in [`docs/screenshots/`](docs/screenshots/) (dark and light theme, desktop 
 ## Features
 
 - **Platforms**
-  - **YouTube** — Google OAuth (offline access + automatic token refresh), resumable chunked uploads that survive restarts, title/description/tags/category/privacy/made-for-kids/notify-subscribers, custom thumbnails, Shorts validation (vertical/square, ≤ 3 min).
+  - **YouTube** — Google OAuth (offline access + automatic token refresh), resumable chunked uploads that survive restarts, title/description/tags/category/privacy/made-for-kids/notify-subscribers, custom thumbnails, Shorts validation (vertical/square, ≤ 3 min). Without the YouTube Analytics API, subscribers and channel/video views come from the Data API.
   - **Facebook Pages** — Facebook Login with long-lived token exchange and page tokens; text, link, single/multi-photo, video, Reels and Stories; optional first comment.
   - **Instagram** — both *Instagram via Facebook Page* (Facebook Login) and *Instagram API with Instagram Login* (standalone). Image posts, Reels, carousels (2–10 mixed items), Stories, collaborators, Trial Reels, first comment. Container → status polling → `media_publish`, with Meta's limits validated up front (JPEG only, 4:5–1.91:1, caption/hashtag/mention limits…).
+  - **X** — OAuth 2.0 with PKCE and rotating refresh tokens; text (280 weighted characters, 25,000 for Premium), up to 4 photos, GIF or video via chunked media upload v2, **threads** (reply chains, each item with its own media), who-can-reply. Pay-per-use API: [costs and setup](docs/setup/x.md).
+  - **LinkedIn** — personal profiles (Share on LinkedIn + OpenID Connect) and Company Pages (Community Management API, needs LinkedIn's review): text with clickable hashtags, 1–20 images, video (multipart upload), PDF document posts, article links, first comment. 60-day tokens with a *reconnect by* date. [Setup and approval limits](docs/setup/linkedin.md).
+
+  | | YouTube | Facebook Page | Instagram | X | LinkedIn profile | LinkedIn Page |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | Text only | — | ✓ | — | ✓ | ✓ | ✓ |
+  | Images | thumbnail | 1–10 | 1–10 (JPEG) | 1–4 | 1–20 | 1–20 |
+  | Video | ✓ (resumable) | ✓ / Reels | Reels | ✓ (chunked) | ✓ (multipart) | ✓ (multipart) |
+  | Stories / Shorts | Shorts | Stories | Stories | — | — | — |
+  | Threads / carousels / documents | — | — | carousels | threads | PDF | PDF |
+  | First comment | — | ✓ | ✓ | (use a thread) | needs approval | needs approval |
+  | Analytics | ✓ (Data API fallback) | ✓ | ✓ | ✓ (billed reads) | needs approval | needs approval |
+  | Token refresh | automatic | 60-day, renewed | 60-day, renewed | automatic (2 h, rotating) | reconnect every 60 days* | reconnect every 60 days* |
+
+  \* automatic when LinkedIn grants your app refresh tokens (partners only).
 - **Scheduler** — in-process, restart-safe, never double-posts (atomic job claiming, persisted publish phases, crash recovery that asks the platform whether a post went live), retries with exponential backoff, clear transient/permanent/auth error classification, missed-post grace window.
 - **Web UI** — a developer-console style dashboard: dark by default with an optional light theme, left sidebar, breadcrumbs, a **New** menu, and an account menu. It has a calendar (week / month / list) with drag-and-drop rescheduling, a posts table with status dots and filters, and post detail pages with tabs (overview, publish-attempt event timeline, metrics). The composer has one global caption plus per-account overrides, per-platform settings, drag-and-drop media upload with progress, live validation and previews. There's also an approvals inbox, analytics charts, and settings for API keys, webhooks, the audit log and platform apps. Other details: toasts, skeleton loaders, visible keyboard focus, a mobile drawer, and Inter + JetBrains Mono bundled locally (OFL). No build step, no CDN.
-- **Analytics** — periodic sync (default every 6 h) + manual refresh: followers/subscribers over time, views/reach/engagement/profile views, YouTube watch time and average view duration, per-post views/likes/comments/shares/saves/reach, for posts published through postlite *and* recent posts fetched from the accounts. Deprecated metrics and missing permissions show up as "not available" instead of failing. Inline SVG charts, top-posts table, CSV export.
+- **Analytics** — periodic sync (default every 6 h) + manual refresh: followers/subscribers over time, views/reach/engagement/profile views, YouTube watch time and average view duration, per-post views/likes/comments/shares/saves/reach, for posts published through postlite *and* recent posts fetched from the accounts. When an API is turned off or a permission is missing, each account shows one notice with the fix ("Turn on YouTube Analytics API", Reconnect, "How to get access") instead of failing. Inline SVG charts, top-posts table, CSV export.
 - **Agent-first API** — versioned REST API (`/api/v1`, OpenAPI 3.1 at `/api/v1/openapi.json`), built-in MCP server (stdio + Streamable HTTP at `/mcp`), CLI. Scoped API keys (read / write / publish / analytics / admin), hashed at rest, per-key rate limits, audit log, and **approval mode** (default on) so agent-created posts wait for a human.
 - **Webhooks** — `post.published`, `post.failed`, `post.pending_approval`, `account.needs_reconnect`, `analytics.synced`, HMAC-SHA256 signed, retried with backoff.
 - **Security** — single admin password (scrypt), or **Cloudflare Zero Trust Access** (email one-time PIN; postlite verifies the RS256 JWT itself and enforces its own `ALLOWED_EMAILS`, see [the guide](docs/setup/cloudflare-access.md)), HttpOnly/SameSite session cookies, CSRF tokens + Origin checks, OAuth `state` + PKCE (Google), OAuth tokens encrypted at rest (AES-256-GCM), unguessable 256-bit media URLs, strict CSP, SSRF guard for media-from-URL.
@@ -139,6 +154,8 @@ If a platform isn't configured, its **Connect** button on the Accounts page link
 - [Facebook Pages + Instagram via Facebook Login (Meta app)](docs/setup/facebook-and-instagram.md)
 - [Instagram without a Facebook Page (Instagram Login)](docs/setup/instagram-standalone.md)
 - [YouTube (Google Cloud project + OAuth client)](docs/setup/youtube.md)
+- [X (developer app, OAuth 2.0, pay-per-use credits)](docs/setup/x.md)
+- [LinkedIn (profiles; Company Pages via the Community Management API)](docs/setup/linkedin.md)
 - [Sign-in with Cloudflare Zero Trust Access (email one-time PIN)](docs/setup/cloudflare-access.md)
 - [Run on Cloudflare Workers (Free plan): D1, R2, Cron, Access](docs/setup/cloudflare-workers.md)
 
@@ -149,6 +166,8 @@ Redirect URIs are always `PUBLIC_URL/oauth/<provider>/callback`:
 | Meta | `…/oauth/facebook/callback`, `…/oauth/instagram/callback` | App ID / App Secret |
 | Instagram Login | `…/oauth/instagram-standalone/callback` | Instagram app ID / secret (not the Meta App ID) |
 | Google | `…/oauth/youtube/callback` | OAuth Client ID / secret (Web application) |
+| X | `…/oauth/x/callback` | OAuth 2.0 Client ID / Client Secret (Web App, confidential) |
+| LinkedIn | `…/oauth/linkedin/callback`, `…/oauth/linkedin-page/callback` | Client ID / Primary Client Secret |
 
 **`.env` fallback.** You can still set `META_APP_ID`/`META_APP_SECRET`, `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET` and
 `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `.env`. Values saved in the UI override them; **Clear** returns to `.env`.
@@ -166,6 +185,8 @@ Key gotchas (details in the guides):
   unverified-app screen. Uploads use their own `videos.insert` bucket (default 100/day); other calls share 10,000 units/day.
   Google's current `videos.insert` reference says uploads from unverified projects are no longer locked to private. If yours are, request the
   [API audit](https://support.google.com/youtube/contact/yt_api_form).
+- **X:** every API call costs credits (posting $0.015, a post with a URL $0.20, owned reads $0.001 each at the time of writing). postlite reads metrics for only the last `X_ANALYTICS_RECENT_POSTS` (10) posts per sync.
+- **LinkedIn:** Company Pages, first comments, analytics and refresh tokens all need LinkedIn's approval (Community Management API / partner program). Without it, profiles still publish, and you reconnect every 60 days.
 
 ## Using it from AI agents
 
@@ -194,7 +215,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Known limitations
 
-- Real Meta/Google APIs are **not** exercised by the test suite (fake servers only). Verify with your own app credentials before relying on it.
+- Real Meta/Google/X/LinkedIn APIs are **not** exercised by the test suite (fake servers only). Verify with your own app credentials before relying on it.
 - Facebook *Login for Business* configurations (`config_id`) are not used; postlite uses the classic `scope` dialog like Postiz.
 - Instagram accepts only JPEG images via the API; postlite validates instead of converting.
 - Video posters: made with ffmpeg on upload when `FFMPEG_PATH` is set; otherwise (always on Workers) the browser grabs a frame and stores it as the poster (`set_media_poster`).

@@ -122,7 +122,7 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
       cfg,
       integration: integ,
       token: integ.access_token,
-      post: { id: post.id, caption: c.caption, media: c.media, settings: c.settings, thumbnail: c.thumbnail },
+      post: { id: post.id, caption: c.caption, media: c.media, settings: c.settings, thumbnail: c.thumbnail, thread: c.thread || [] },
       thumbnail: c.thumbnail,
       mediaUrl: (m) => media.publicUrl(m),
       mediaSize: (m) => media.size(m),

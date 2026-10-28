@@ -203,6 +203,8 @@ export const MARKS = {
   youtube: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M23 7.2a3 3 0 0 0-2.1-2.1C19 4.6 12 4.6 12 4.6s-7 0-8.9.5A3 3 0 0 0 1 7.2 31 31 0 0 0 .5 12a31 31 0 0 0 .5 4.8 3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1 31 31 0 0 0 .5-4.8 31 31 0 0 0-.5-4.8ZM9.7 15.1V8.9L15.5 12l-5.8 3.1Z"/></svg>',
   facebook: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M13.5 21v-7.6h2.6l.4-3h-3V8.5c0-.9.3-1.5 1.5-1.5h1.6V4.3c-.3 0-1.2-.1-2.3-.1-2.3 0-3.9 1.4-3.9 4v2.2H7.8v3h2.6V21h3.1Z"/></svg>',
   instagram: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" d="M7.5 3h9A4.5 4.5 0 0 1 21 7.5v9a4.5 4.5 0 0 1-4.5 4.5h-9A4.5 4.5 0 0 1 3 16.5v-9A4.5 4.5 0 0 1 7.5 3Z"/><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="17.3" cy="6.7" r="1.1" fill="currentColor"/></svg>',
+  x: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>',
+  linkedin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20.45 20.45h-3.55v-5.57c0-1.33-.03-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zm1.78 13.02H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/></svg>',
 };
 
 export const PROVIDER_META = {
@@ -210,7 +212,12 @@ export const PROVIDER_META = {
   facebook: { label: 'Facebook', short: 'FB', color: '#3b82f6' },
   instagram: { label: 'Instagram', short: 'IG', color: '#e1306c' },
   'instagram-standalone': { label: 'Instagram', short: 'IG', color: '#c13584' },
+  x: { label: 'X', short: 'X', color: '#a1a1aa' },
+  linkedin: { label: 'LinkedIn', short: 'in', color: '#0a66c2' },
+  'linkedin-page': { label: 'LinkedIn Page', short: 'in', color: '#0a66c2' },
 };
+/** Brand mark key for a provider (the two Instagram logins share one mark, as do LinkedIn profiles and Pages). */
+export const markOf = (provider) => ({ 'instagram-standalone': 'instagram', 'linkedin-page': 'linkedin' }[provider] || provider);
 
 export function avatar(account, size = 28) {
   const m = PROVIDER_META[account.provider] || {};
@@ -219,7 +226,7 @@ export function avatar(account, size = 28) {
   return h('span', { class: 'avatar', style: { width: `${size}px`, height: `${size}px`, fontSize: `${Math.round(size * 0.42)}px`, '--pc': m.color }, title: `${account.name || account.account_name} · ${m.label}` },
     pic ? h('img', { src: pic, alt: '', loading: 'lazy', onerror: (e) => e.target.remove() }) : null,
     h('span', { class: 'initial' }, initials),
-    size >= 20 ? (() => { const b = h('span', { class: 'badge-p' }); b.innerHTML = MARKS[account.provider === 'instagram-standalone' ? 'instagram' : account.provider] || ''; return b; })() : null);
+    size >= 20 ? (() => { const b = h('span', { class: 'badge-p' }); b.innerHTML = MARKS[markOf(account.provider)] || ''; return b; })() : null);
 }
 
 export const STATUS_LABEL = { published: 'Published', scheduled: 'Scheduled', failed: 'Failed', pending_approval: 'Pending approval', draft: 'Draft', publishing: 'Publishing', partially_failed: 'Partially failed', missed: 'Missed' };

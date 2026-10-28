@@ -56,14 +56,15 @@ export function createPosts({ db, media, integrations, ws }) {
   if (!ws) throw new Error('createPosts: workspace id required');
   const event = (postId, level, message) => db.run(...eventStmt(postId, level, message));
 
-  const SELECT = `SELECT p.*, i.provider, i.name, i.picture, i.status AS istatus, j.state AS job_state, j.run_at
+  const SELECT = `SELECT p.*, i.provider, i.name, i.picture, i.status AS istatus, i.meta AS imeta, j.state AS job_state, j.run_at
                   FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id LEFT JOIN jobs j ON j.post_id = p.id`;
   // Every use is `${SELECT} WHERE p.workspace_id = ? AND …`.
 
   const mediaIdsOf = (post, group) => {
     const settings = parse(post.settings, {});
     const ids = post.media_override !== null && post.media_override !== undefined ? parse(post.media_override, []) : parse(group?.media, []);
-    return settings.thumbnail ? [...ids, settings.thumbnail] : ids;
+    const thread = Array.isArray(settings.thread) ? settings.thread.flatMap((t) => (Array.isArray(t?.media) ? t.media : [])) : [];
+    return [...ids, ...(settings.thumbnail ? [settings.thumbnail] : []), ...thread];
   };
   const loadMedia = async (ids) => new Map((await inChunks(ids, (c) => db.all(`SELECT * FROM media WHERE workspace_id = ? AND id IN (${marks(c.length)})`, ws, ...c))).map((m) => [m.id, m]));
   const loadGroupsRaw = async (ids) => new Map((await inChunks(ids, (c) => db.all(`SELECT * FROM groups WHERE workspace_id = ? AND id IN (${marks(c.length)})`, ws, ...c))).map((g) => [g.id, g]));
@@ -74,7 +75,9 @@ export function createPosts({ db, media, integrations, ws }) {
     const caption = post.content_override !== null && post.content_override !== undefined ? post.content_override : g.content;
     const mediaRows = mediaIds.map((id) => mediaMap.get(String(id))).filter(Boolean);
     const thumbnail = settings.thumbnail ? mediaMap.get(String(settings.thumbnail)) || null : null;
-    return { caption, settings, media: mediaRows, thumbnail };
+    // X threads: follow-up posts with their own text and media (settings.thread = [{ text, media: [ids] }]).
+    const thread = Array.isArray(settings.thread) ? settings.thread.map((t) => ({ text: String(t?.text || ''), media: (Array.isArray(t?.media) ? t.media : []).map((id) => mediaMap.get(String(id))).filter(Boolean) })) : [];
+    return { caption, settings, media: mediaRows, thumbnail, thread };
   }
 
   /** Effective caption/media/settings of a post (loads its group and media). */
@@ -83,9 +86,11 @@ export function createPosts({ db, media, integrations, ws }) {
     return composeWith(post, g, await loadMedia(mediaIdsOf(post, g)));
   }
 
-  function validateComposed(provider, c) {
+  function validateComposed(provider, c, accountMeta = null) {
     const toInfo = (m) => ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.original_name });
-    return validatePost(provider, { caption: c.caption, media: c.media.map(toInfo), settings: c.settings, thumbnail: c.thumbnail ? toInfo(c.thumbnail) : null });
+    const meta = typeof accountMeta === 'string' ? parse(accountMeta, {}) : accountMeta || {};
+    return validatePost(provider, { caption: c.caption, media: c.media.map(toInfo), settings: c.settings, thumbnail: c.thumbnail ? toInfo(c.thumbnail) : null,
+      thread: provider === 'x' ? (c.thread || []).map((t) => ({ text: t.text, media: t.media.map(toInfo) })) : null, account: { premium: !!meta.premium } });
   }
 
   const postViewWith = (p, g, mediaMap) => {
@@ -171,7 +176,7 @@ export function createPosts({ db, media, integrations, ws }) {
 
       // Load everything needed for validation up front (3 queries).
       const integ = new Map((await inChunks(list.map((p) => p.integration_id), (c) => db.all(`SELECT * FROM integrations WHERE workspace_id = ? AND id IN (${marks(c.length)})`, ws, ...c))).map((r) => [r.id, r]));
-      const thumbs = list.map((p) => p.settings?.thumbnail).filter(Boolean);
+      const thumbs = [...list.map((p) => p.settings?.thumbnail), ...list.flatMap((p) => (Array.isArray(p.settings?.thread) ? p.settings.thread.flatMap((t) => (Array.isArray(t?.media) ? t.media : [])) : []))].filter(Boolean);
       const overrides = list.flatMap((p) => (Array.isArray(p.media_override) ? p.media_override.map(String) : []));
       const mediaMap = await loadMedia([...mediaIds, ...overrides, ...thumbs]);
       for (const mid of [...mediaIds, ...overrides, ...thumbs.map(String)]) if (!mediaMap.has(mid)) throw new HttpError(400, `Unknown media ${mid}`);
@@ -190,7 +195,7 @@ export function createPosts({ db, media, integrations, ws }) {
         const c = composeWith(fake, g0, mediaMap);
         if (action !== 'draft') {
           if (ig.status !== 'active') (errors[ig.id] ||= []).push(`${ig.name}: account needs to be reconnected.`);
-          const v = validateComposed(ig.provider, c);
+          const v = validateComposed(ig.provider, c, ig.meta);
           if (v.errors.length) (errors[ig.id] ||= []).push(...v.errors);
         }
         plan.push({ integ: ig, settings, content_override, media_override });
@@ -243,13 +248,13 @@ export function createPosts({ db, media, integrations, ws }) {
     async approve(groupId, { target_ids = null, publish_at = null, principal = null } = {}) {
       const g = await db.get('SELECT * FROM groups WHERE id = ? AND workspace_id = ?', groupId, ws);
       if (!g) throw new HttpError(404, 'Post not found');
-      const pend = (await db.all("SELECT p.*, i.provider, i.status AS istatus FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.group_id = ? AND p.workspace_id = ? AND p.status = 'pending_approval'", groupId, ws))
+      const pend = (await db.all("SELECT p.*, i.provider, i.status AS istatus, i.meta AS imeta FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.group_id = ? AND p.workspace_id = ? AND p.status = 'pending_approval'", groupId, ws))
         .filter((p) => !target_ids || target_ids.includes(p.id));
       if (!pend.length) throw new HttpError(409, 'Nothing is awaiting approval in this post.');
       const mediaMap = await loadMedia(pend.flatMap((p) => mediaIdsOf(p, g)));
       const errors = {};
       for (const p of pend) {
-        const v = validateComposed(p.provider, composeWith(p, g, mediaMap));
+        const v = validateComposed(p.provider, composeWith(p, g, mediaMap), p.imeta);
         if (v.errors.length) errors[p.integration_id] = v.errors;
         if (p.istatus !== 'active') (errors[p.integration_id] ||= []).push('Account needs to be reconnected.');
       }
@@ -371,12 +376,12 @@ export function createPosts({ db, media, integrations, ws }) {
 
     /** Retry a failed post, or publish a draft/scheduled post immediately. */
     async publishNow(postId, { retry = false, principal = null } = {}) {
-      const p = await db.get('SELECT p.*, i.provider, i.status AS istatus FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.id = ? AND p.workspace_id = ?', postId, ws);
+      const p = await db.get('SELECT p.*, i.provider, i.status AS istatus, i.meta AS imeta FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.id = ? AND p.workspace_id = ?', postId, ws);
       if (!p) throw new HttpError(404, 'Not found');
       if (LOCKED.has(p.status)) throw new HttpError(409, `Post is already ${p.status}.`);
       if (retry && p.status !== 'failed') throw new HttpError(409, 'Only failed posts can be retried.');
       if (p.istatus !== 'active') throw new HttpError(409, 'Reconnect the account first.');
-      const v = validateComposed(p.provider, await composed(p));
+      const v = validateComposed(p.provider, await composed(p), p.imeta);
       if (v.errors.length) throw new HttpError(422, 'Please fix the validation errors.', { errors: { [p.integration_id]: v.errors } });
       const now = Date.now();
       if (principal?.approval) {

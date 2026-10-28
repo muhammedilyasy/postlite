@@ -62,6 +62,7 @@ export async function createTestApp({ env = {}, listen = true } = {}) {
     META_APP_ID: 'meta-app', META_APP_SECRET: 'meta-secret',
     INSTAGRAM_APP_ID: 'ig-app', INSTAGRAM_APP_SECRET: 'ig-secret',
     GOOGLE_CLIENT_ID: 'g-client', GOOGLE_CLIENT_SECRET: 'g-secret',
+    X_CLIENT_ID: 'x-client-id-123', X_CLIENT_SECRET: 'x-client-secret', LINKEDIN_CLIENT_ID: 'liclient123', LINKEDIN_CLIENT_SECRET: 'li-secret-xyz',
     SCHEDULER_TICK_MS: '50', POLL_INTERVAL_MS: '20', BACKOFF_BASE_MS: '30', MAX_ATTEMPTS: '3',
     YOUTUBE_CHUNK_BYTES: String(256 * 1024),
     ALLOW_PRIVATE_MEDIA_URLS: '1',
@@ -93,10 +94,23 @@ export async function createTestApp({ env = {}, listen = true } = {}) {
         'instagram-standalone': { external_id: 'igs1', name: 'Standalone IG', username: 'standalone_ig', access_token: 'ig-long', refresh_token: 'ig-long', token_expires_at: Date.now() + 50 * 86400000 },
         youtube: { external_id: 'UC1', name: 'Test Channel', access_token: 'ya29.initial', refresh_token: '1//refresh', token_expires_at: Date.now() + 3600000 },
       }[provider];
+      if (!defaults) throw new Error(`seed(${provider}): connect X/LinkedIn through the OAuth flow (app.connect)`);
       return core.integrations.upsert(provider, { ...defaults, ...extra });
     },
     async upload(buf, name) {
       return core.media.save(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength), name);
+    },
+    /** Full OAuth connect against the fake (consent auto-approves). Returns { status, location, accounts }. */
+    async connect(provider, { reconnect = null, session = null } = {}) {
+      const s = session || await app.login();
+      const r1 = await fetch(`${base}/oauth/${provider}/start${reconnect ? `?reconnect=${reconnect}` : ''}`, { redirect: 'manual', headers: { cookie: s.cookie } });
+      const auth = r1.headers.get('location');
+      if (!auth) return { status: r1.status, text: await r1.text() };
+      const r2 = await fetch(auth, { redirect: 'manual' });
+      const cb = r2.headers.get('location');
+      const r3 = await fetch(cb, { redirect: 'manual', headers: { cookie: s.cookie } });
+      const text = await r3.text();
+      return { status: r3.status, location: r3.headers.get('location'), text, accounts: (await core.integrations.list()).filter((a) => a.provider === provider) };
     },
     async login() {
       const r1 = await fetch(`${base}/login`);

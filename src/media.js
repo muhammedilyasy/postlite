@@ -76,9 +76,10 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
 
   /** Probe dimensions/duration and (Node + ffmpeg) make a poster; insert the media row. */
   async function finalize({ id, key, filename, mime, size, originalName }) {
-    const kind = mime.startsWith('video/') ? 'video' : 'image';
+    const kind = mime.startsWith('video/') ? 'video' : mime === 'application/pdf' ? 'document' : 'image';
     let info = { width: null, height: null, duration: null };
     if (kind === 'image') info = { ...imageSize(await storage.read(key, 0, Math.min(size, 512 * 1024)), mime), duration: null };
+    else if (kind === 'document') info = { width: null, height: null, duration: null };
     else {
       info = await probeMp4(reader(key, size), size);
       const local = storage.localPath?.(key);
@@ -173,7 +174,7 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
       const mime = sniffMime(pk.head);
       if (!mime || !EXT_BY_MIME[mime]) {
         pk.reader.cancel().catch(() => {});
-        throw new HttpError(415, 'Unsupported file type. Use JPEG, PNG, GIF, WebP, MP4 or MOV.');
+        throw new HttpError(415, 'Unsupported file type. Use JPEG, PNG, GIF, WebP, MP4, MOV or PDF (LinkedIn documents).');
       }
       const id = uid();
       const filename = `${id}.${EXT_BY_MIME[mime]}`;
@@ -252,7 +253,7 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
       if (size > maxBytes()) return fail(tooBig());
       if (size !== u.declared_size) return fail(new HttpError(400, `Uploaded ${size} bytes but the session declared ${u.declared_size}.`));
       const mime = sniffMime(await storage.read(u.storage_key, 0, Math.min(HEAD_BYTES, size)));
-      if (!mime || !EXT_BY_MIME[mime]) return fail(new HttpError(415, 'Unsupported file type. Use JPEG, PNG, GIF, WebP, MP4 or MOV.'));
+      if (!mime || !EXT_BY_MIME[mime]) return fail(new HttpError(415, 'Unsupported file type. Use JPEG, PNG, GIF, WebP, MP4, MOV or PDF (LinkedIn documents).'));
       const filename = `${u.id}.${EXT_BY_MIME[mime]}`;
       let key = u.storage_key;
       if (storage.rename) { await storage.rename(key, filename); key = filename; }

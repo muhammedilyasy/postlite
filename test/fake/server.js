@@ -3,8 +3,10 @@
 //   /fb (graph.facebook.com)  /www (www.facebook.com)  /ig (graph.instagram.com)  /igapi (api.instagram.com)
 //   /igwww (www.instagram.com)  /gauth (accounts.google.com)  /gtoken (oauth2.googleapis.com)
 //   /yt (www.googleapis.com)  /yta (youtubeanalytics.googleapis.com)  /rupload (rupload.facebook.com)
+//   /xapi /xwww (X)  /liapi /liwww /liup (LinkedIn) — see ./x-linkedin.js
 import http from 'node:http';
 import { pathToFileURL } from 'node:url';
+import { xLinkedInState, makeXLinkedInHandler } from './x-linkedin.js';
 
 const VER = process.env.GRAPH_API_VERSION || 'v25.0';
 
@@ -32,7 +34,8 @@ export function createFakeState() {
     fetchedMedia: [],
     hangOnce: null,        // path regex: drop the connection once (simulates unknown outcome)
     // Developer-app credentials the fake platforms accept (client_credentials, test exchanges, Google code exchange).
-    apps: { meta: { id: 'meta-app', secret: 'meta-secret' }, instagram: { id: 'ig-app', secret: 'ig-secret' }, google: { id: 'g-client', secret: 'g-secret' } },
+    apps: { meta: { id: 'meta-app', secret: 'meta-secret' }, instagram: { id: 'ig-app', secret: 'ig-secret' }, google: { id: 'g-client', secret: 'g-secret' }, x: { id: 'x-client-id-123', secret: 'x-client-secret' }, linkedin: { id: 'liclient123', secret: 'li-secret-xyz' }, linkedinPages: null },
+    xl: xLinkedInState(),
   };
 }
 
@@ -71,6 +74,7 @@ async function fetchMedia(state, url) {
 export function startFake({ port = 0, host = '127.0.0.1', state = createFakeState() } = {}) {
   let base = '';
   const nid = (p) => `${p}_${++state.seq}`;
+  const xl = makeXLinkedInHandler(state, () => base);
 
   async function graph(req, res, url, q, body, prefix) {
     const parts = url.pathname.split('/').filter(Boolean); // [prefix, ver, ...]
@@ -358,6 +362,7 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
       if (url.pathname === '/yt/youtube/v3/playlistItems') return json(res, 200, { items: [{ snippet: { title: 'Old video', publishedAt: new Date(Date.now() - 10 * 86400000).toISOString(), thumbnails: {} }, contentDetails: { videoId: 'oldvid1', videoPublishedAt: new Date(Date.now() - 10 * 86400000).toISOString() } }] });
       if (url.pathname === '/yt/youtube/v3/videos') return json(res, 200, { items: String(q.get('id')).split(',').map((id) => ({ id, statistics: { viewCount: '321', likeCount: '12', commentCount: '3' } })) });
     }
+    if (await xl(seg, req, res, url, q, body, buf)) return;
     if (seg === 'yta') {
       if (!ytAuth(req, res)) return;
       if (q.get('dimensions') === 'day') {
@@ -389,6 +394,8 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
           META_APP_ID: state.apps.meta.id, META_APP_SECRET: state.apps.meta.secret,
           INSTAGRAM_APP_ID: state.apps.instagram.id, INSTAGRAM_APP_SECRET: state.apps.instagram.secret,
           GOOGLE_CLIENT_ID: state.apps.google.id, GOOGLE_CLIENT_SECRET: state.apps.google.secret,
+          X_API_BASE_URL: `${base}/xapi`, X_WWW_URL: `${base}/xwww`, LINKEDIN_API_BASE_URL: `${base}/liapi`, LINKEDIN_WWW_URL: `${base}/liwww`,
+          X_CLIENT_ID: state.apps.x.id, X_CLIENT_SECRET: state.apps.x.secret, LINKEDIN_CLIENT_ID: state.apps.linkedin.id, LINKEDIN_CLIENT_SECRET: state.apps.linkedin.secret,
         }),
       });
     });

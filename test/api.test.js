@@ -165,7 +165,7 @@ test('slots, settings, duplicate, delete, calendar, platforms, openapi', async (
   assert.equal((await app.api('DELETE', `/posts/${dup.json.post.id}`, { key: k })).status, 200);
   assert.equal((await app.api('GET', `/posts/${dup.json.post.id}`, { key: k })).status, 404);
   const pl = await app.api('GET', '/platforms', { key: k });
-  assert.equal(pl.json.platforms.length, 4);
+  assert.equal(pl.json.platforms.length, 7);
   assert.ok(pl.json.platforms.find((p) => p.provider === 'youtube').settings_schema.properties.isShort);
   const spec = await (await fetch(`${app.base}/api/v1/openapi.json`)).json();
   assert.equal(spec.openapi, '3.1.0');

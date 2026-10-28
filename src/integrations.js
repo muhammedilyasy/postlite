@@ -5,11 +5,17 @@ import { ProviderError } from './providers/http.js';
 import { HttpError } from './errors.js';
 
 const REFRESH_MARGIN_MS = 5 * 60000;
+const LONG_MARGIN_MS = 10 * 86400000;
+/** How long before expiry a token is renewed: short-lived (YouTube 1 h, X 2 h) vs long-lived (Meta/LinkedIn 60 days). */
+const marginFor = (p, provider) => p.refreshMarginMs ?? (provider === 'youtube' ? REFRESH_MARGIN_MS : LONG_MARGIN_MS);
+const canRefreshFor = (p, integ) => !!p.canRefresh && (!p.canRefreshFor || p.canRefreshFor(integ));
+// One refresh at a time per account (X rotates refresh tokens: a second concurrent refresh would use a dead token).
+const inflight = new Map();
 
 /** Connected accounts of ONE workspace (ws). Every statement filters by workspace_id. */
 export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeedsReconnect = () => {} }) {
   if (!ws) throw new Error('createIntegrations: workspace id required');
-  const safeMeta = (m) => ({ page_id: m.page_id, page_name: m.page_name, user_token_expires_at: m.user_token_expires_at });
+  const safeMeta = (m) => ({ page_id: m.page_id, page_name: m.page_name, user_token_expires_at: m.user_token_expires_at, premium: m.premium, has_refresh: m.has_refresh, refresh_expires_at: m.refresh_expires_at, urn: m.urn });
   const publicRow = (r) => r && {
     id: r.id, provider: r.provider, external_id: r.external_id, name: r.name, username: r.username, picture: r.picture,
     status: r.status, status_message: r.status_message, token_expires_at: r.token_expires_at, meta: safeMeta(JSON.parse(r.meta || '{}')),
@@ -74,19 +80,28 @@ export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeed
 
     /** Refresh tokens when the provider supports it. Marks needs_reconnect on unrecoverable failure. */
     async refresh(id) {
-      const integ = await api.secret(id);
-      if (!integ) throw new ProviderError('permanent', 'The connected account was removed.');
-      const p = getProvider(integ.provider);
-      if (!p.canRefresh || !p.refresh) throw new ProviderError('auth', 'Token expired and this platform does not support refresh; reconnect the account.');
-      try {
-        const t = await p.refresh(cfg, integ);
-        await api.saveTokens(id, t);
-        return api.secret(id);
-      } catch (e) {
-        if (e.kind === 'transient') throw e;
-        await api.markNeedsReconnect(id, `Token refresh failed: ${e.message}`);
-        throw new ProviderError('auth', `Token refresh failed: ${e.message}`);
-      }
+      const key = `${ws}:${id}`;
+      if (inflight.has(key)) return inflight.get(key);
+      const run = (async () => {
+        const integ = await api.secret(id);
+        if (!integ) throw new ProviderError('permanent', 'The connected account was removed.');
+        const p = getProvider(integ.provider);
+        if (!p.canRefresh || !p.refresh) throw new ProviderError('auth', 'Token expired and this platform does not support refresh; reconnect the account.');
+        try {
+          const t = await p.refresh(cfg, integ);
+          await api.saveTokens(id, t);
+          return api.secret(id);
+        } catch (e) {
+          if (e.kind === 'transient') throw e;
+          // Another process (Workers isolate, CLI) may have rotated the token meanwhile: use it instead of giving up.
+          const now = await api.secret(id);
+          if (now && now.refresh_token && now.refresh_token !== integ.refresh_token) return now;
+          await api.markNeedsReconnect(id, `Token refresh failed: ${e.message}`);
+          throw new ProviderError('auth', `Token refresh failed: ${e.message}`);
+        }
+      })().finally(() => inflight.delete(key));
+      inflight.set(key, run);
+      return run;
     },
 
     /** Return decrypted integration with a fresh access token (refreshing proactively when close to expiry). */
@@ -94,7 +109,7 @@ export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeed
       let integ = await api.secret(id);
       if (!integ) throw new ProviderError('permanent', 'The connected account was removed.');
       const p = getProvider(integ.provider);
-      if (p.canRefresh && integ.token_expires_at && integ.token_expires_at - Date.now() < (integ.provider === 'youtube' ? REFRESH_MARGIN_MS : 10 * 86400000)) {
+      if (canRefreshFor(p, integ) && integ.token_expires_at && integ.token_expires_at - Date.now() < marginFor(p, integ.provider)) {
         integ = await api.refresh(id);
       }
       return integ;
@@ -109,7 +124,7 @@ export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeed
         await api.markActive(id);
         return { ok: true };
       } catch (e) {
-        if (e.kind === 'auth' && p.canRefresh) {
+        if (e.kind === 'auth' && canRefreshFor(p, integ)) {
           try {
             const r = await api.refresh(id);
             await p.healthCheck({ cfg, integration: r, token: r.access_token });
@@ -135,8 +150,9 @@ export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeed
         if (budget && !budget.has({ fetches: 4, queries: 6 })) break;
         try {
           const p = getProvider(r.provider);
-          if (p.canRefresh && r.token_expires_at && r.token_expires_at - Date.now() < 10 * 86400000 && r.provider !== 'youtube') await api.refresh(r.id);
           const m = JSON.parse(r.meta || '{}');
+          // Long-lived tokens are renewed ahead of time here; short-lived ones (YouTube, X) just before use.
+          if (canRefreshFor(p, { meta: m }) && r.token_expires_at && marginFor(p, r.provider) >= LONG_MARGIN_MS && r.token_expires_at - Date.now() < LONG_MARGIN_MS) await api.refresh(r.id);
           if (m.user_token_expires_at && m.user_token_expires_at < Date.now()) {
             // Page tokens normally outlive the user token; verify instead of assuming.
             await api.check(r.id);

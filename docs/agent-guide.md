@@ -57,6 +57,13 @@ Each key has a rate limit (default 120 req/min → HTTP 429 + `Retry-After`). Ev
 }
 ```
 
+## X and LinkedIn
+
+- **X threads**: the first post is `content` + `media_ids`; follow-ups go in `settings.thread: [{ "text": "2/ …", "media": ["<media id>"] }]`. Each item is billed as an X post, and a URL in a post makes it much more expensive; prefer one link at the end. Check `validate_post` → `caption_length` (weighted: URLs count 23).
+- **LinkedIn documents**: upload a PDF (`upload_media_from_url` works; kind `document`), then `settings: { "post_type": "document", "document_title": "…" }`. PDFs are rejected for every other platform, so give LinkedIn its own post or target override.
+- **LinkedIn first comment / analytics** need the Community Management API; without it the post publishes with a `warning` and analytics return one `needs_approval` notice. Don't retry those.
+- **Reconnects**: LinkedIn accounts expire after 60 days unless LinkedIn granted refresh tokens; X tokens refresh automatically. On `account.needs_reconnect`, call `get_connect_url` and ask the human.
+
 ## Workflows
 
 **Plan a week of posts** — `get_settings` → `list_free_slots {count: 7}` → `list_accounts` → `list_platforms` → per slot: write caption, `validate_post`, `create_post {mode: "schedule", publish_at: slot.at}` → summarize as a table. (MCP prompt: `plan_week`.)

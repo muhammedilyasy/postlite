@@ -2,7 +2,7 @@
 import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime } from './core.js';
 import { segmented } from './ui.js';
 import { mediaVisual, ensurePoster } from './media.js';
-import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, charCount } from '/assets/shared/validate.js';
+import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, captionLength, xWeightedLength } from '/assets/shared/validate.js';
 import { formatLocal, parseLocal } from '/assets/shared/time.js';
 
 export { relTime };
@@ -17,8 +17,9 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     for (const t of post.targets) {
       st.targets.set(t.integration_id, { content_override: t.content_override, settings: { ...t.settings }, status: t.status, error: t.error, warning: t.warning, published_url: t.published_url, target_id: t.id });
       if (['published', 'publishing'].includes(t.status)) st.locked.add(t.integration_id);
-      if (t.settings.thumbnail) {
-        try { st.thumbs.set(t.settings.thumbnail, (await api('GET', `/media/${t.settings.thumbnail}`)).media); } catch {}
+      const extra = [t.settings.thumbnail, ...(Array.isArray(t.settings.thread) ? t.settings.thread.flatMap((x) => x.media || []) : [])].filter(Boolean);
+      for (const id of extra) {
+        try { st.thumbs.set(id, (await api('GET', `/media/${id}`)).media); } catch {}
       }
     }
     st.active = post.targets[0]?.integration_id || null;
@@ -34,7 +35,8 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     if (!a) return { errors: ['Account removed'], warnings: [] };
     const t = st.targets.get(aid);
     const thumb = t.settings.thumbnail ? st.thumbs.get(t.settings.thumbnail) : null;
-    const v = validatePost(a.provider, { caption: captionFor(aid), media: st.media.map(info), settings: t.settings, thumbnail: info(thumb) });
+    const thread = a.provider === 'x' ? (t.settings.thread || []).map((x) => ({ text: x.text || '', media: (x.media || []).map((id) => info(st.thumbs.get(id))).filter(Boolean) })) : null;
+    const v = validatePost(a.provider, { caption: captionFor(aid), media: st.media.map(info), settings: t.settings, thumbnail: info(thumb), thread, account: { premium: !!a.meta?.premium } });
     if (a.status !== 'active') v.errors.unshift('Account needs to be reconnected.');
     if (st.serverErrors[aid]) v.errors.push(...st.serverErrors[aid].filter((e) => !v.errors.includes(e)));
     return v;
@@ -109,11 +111,10 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     mount(box, [...st.targets.keys()].map((aid) => {
       const p = accs[aid]?.provider;
       const custom = st.targets.get(aid).content_override !== null && st.targets.get(aid).content_override !== undefined;
-      const key = `${PROVIDER_META[p]?.short}${PLATFORMS[p]?.maxCaption}`;
+      const { n, max } = captionLength(p, captionFor(aid), { premium: !!accs[aid]?.meta?.premium });
+      const key = `${PROVIDER_META[p]?.short}${max}`;
       if (!p || (seen.has(key) && !custom)) return null;
       seen.add(key);
-      const n = charCount(captionFor(aid));
-      const max = PLATFORMS[p].maxCaption;
       return h('span', { class: `counter mono ${n > max ? 'over' : n > max * 0.9 ? 'near' : ''}`, style: { '--pc': PROVIDER_META[p].color } }, `${PROVIDER_META[p].short}${custom ? '*' : ''} ${n}/${max}`);
     }));
   }
@@ -147,7 +148,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
   }
 
   function mediaBox() {
-    const input = h('input', { type: 'file', multiple: true, accept: 'image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime', hidden: true, onchange: (e) => addFiles([...e.target.files]) });
+    const input = h('input', { type: 'file', multiple: true, accept: 'image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,application/pdf', hidden: true, onchange: (e) => addFiles([...e.target.files]) });
     const progress = h('div', { class: 'uploads' });
     const drop = h('div', {
       class: 'dropzone', tabindex: 0, role: 'button', 'aria-label': 'Upload media',
@@ -156,7 +157,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       ondragover: (e) => { e.preventDefault(); drop.classList.add('over'); },
       ondragleave: () => drop.classList.remove('over'),
       ondrop: (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); },
-    }, icon('upload', 18), h('div', {}, h('strong', {}, 'Drop images or videos'), ' or click to browse'), h('div', { class: 'muted small' }, 'JPEG · PNG · WebP · GIF · MP4 · MOV'));
+    }, icon('upload', 18), h('div', {}, h('strong', {}, 'Drop images or videos'), ' or click to browse'), h('div', { class: 'muted small' }, 'JPEG · PNG · WebP · GIF · MP4 · MOV · PDF (LinkedIn)'));
     async function addFiles(files) {
       for (const f of files) {
         const bar = h('div', { class: 'bar' }, h('span', { style: { width: '0%' } }));
@@ -274,6 +275,15 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
         h('div', { class: 'field' }, h('span', {}, 'Custom thumbnail'), h('div', { class: 'row gap' }, thumb ? h('img', { class: 'thumb-prev', src: thumb.url, alt: '' }) : null, h('button', { type: 'button', class: 'btn small', onclick: () => thumbInput.click() }, thumb ? 'Replace' : 'Upload JPEG/PNG'), thumb ? h('button', { type: 'button', class: 'btn small ghost', onclick: () => set(t, 'thumbnail', null, true) }, 'Remove') : null, thumbInput)),
         h('div', { class: 'notice info small' }, icon('info', 14), h('span', {}, 'Uploads use the separate videos.insert quota (default 100 uploads/day per project); custom thumbnails cost 50 of the 10,000 daily units. See the YouTube setup guide for the API audit.')));
     }
+    if (a.provider === 'x') return xSettings(a, t, sel);
+    if (a.provider === 'linkedin' || a.provider === 'linkedin-page') {
+      return h('div', { class: 'settings' },
+        field('Type', seg('post_type', [['post', 'Post'], ['document', 'Document (PDF)']])),
+        a.provider === 'linkedin' ? field('Who can see it', sel('visibility', [['PUBLIC', 'Anyone'], ['CONNECTIONS', 'Connections only']])) : null,
+        s.post_type === 'document' ? field('Document title', txt('document_title', 'Shown above the pages', { maxlength: 400 })) : null,
+        s.post_type !== 'document' && !st.media.length ? [field('Link', txt('url', 'https://…'), 'Text posts only: shown as an article card'), s.url ? field('Link title', txt('url_title', 'Optional')) : null] : null,
+        field('First comment', txt('first_comment', 'Optional'), 'Needs the Community Management API on your LinkedIn app'));
+    }
     if (a.provider === 'facebook') {
       return h('div', { class: 'settings' },
         field('Type', seg('post_type', [['post', 'Post'], ['reel', 'Reel'], ['story', 'Story']])),
@@ -292,6 +302,40 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       s.post_type !== 'story' ? field('First comment', txt('first_comment', 'Optional')) : null);
   }
 
+  /** X: reply settings + thread items (each with its own text, counter and media). */
+  function xSettings(a, t, sel) {
+    const s = t.settings;
+    s.thread ||= [];
+    const limit = a.meta?.premium ? 25000 : 280;
+    const item = (it, i) => {
+      const ta = h('textarea', { class: 'input', rows: 3, placeholder: `Post ${i + 2}`, 'aria-label': `Thread post ${i + 2}` });
+      ta.value = it.text || '';
+      const cnt = h('span', { class: 'counter mono' });
+      const upd = () => { const n = xWeightedLength(ta.value); cnt.textContent = `${n}/${limit}`; cnt.classList.toggle('over', n > limit); };
+      upd();
+      const live = debounce(refreshLive, 150);
+      ta.addEventListener('input', () => { it.text = ta.value; upd(); live(); });
+      const file = h('input', { type: 'file', multiple: true, accept: 'image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime', hidden: true, onchange: async (e) => {
+        for (const f of [...e.target.files]) {
+          try { const md = await uploadFile(f); st.thumbs.set(md.id, md); (it.media ||= []).push(md.id); if (md.kind === 'video' && !md.poster) ensurePoster(md, f); } catch (err) { toast(err.message, 'error'); }
+        }
+        renderSide();
+      } });
+      return h('div', { class: 'thread-item' },
+        h('div', { class: 'ti-head' }, h('span', { class: 'mono small muted' }, `${i + 2}/`), cnt,
+          h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Remove thread post ${i + 2}`, onclick: () => { s.thread.splice(i, 1); renderSide(); } }, icon('x', 14))),
+        ta,
+        (it.media || []).length ? h('div', { class: 'ti-media' }, it.media.map((id, k) => h('div', { class: 'ti-thumb' }, mediaVisual(st.thumbs.get(id)),
+          h('button', { type: 'button', class: 'icon-btn remove', 'aria-label': 'Remove media', onclick: () => { it.media.splice(k, 1); renderSide(); } }, icon('x', 12))))) : null,
+        h('button', { type: 'button', class: 'btn small ghost', onclick: () => file.click() }, icon('image', 13), 'Add media'), file);
+    };
+    return h('div', { class: 'settings' },
+      field('Who can reply', sel('reply_settings', [['', 'Everyone'], ['following', 'Accounts you follow'], ['mentionedUsers', 'Only accounts you mention'], ['verified', 'Verified accounts'], ['subscribers', 'Subscribers']])),
+      h('div', { class: 'field' }, h('span', {}, 'Thread'),
+        s.thread.length ? h('div', { class: 'thread-list' }, s.thread.map(item)) : h('small', { class: 'muted' }, 'The caption above is the first post. Add more to publish a thread.'),
+        h('button', { type: 'button', class: 'btn small', onclick: () => { s.thread.push({ text: '', media: [] }); renderSide(); } }, icon('plus', 13), 'Add to thread')));
+  }
+
   function previewBox(a, t) {
     return h('div', { id: 'side-prev', class: 'preview-wrap' }, h('div', { class: 'eyebrow' }, 'Preview'), preview(a, t));
   }
@@ -304,6 +348,22 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     if (p === 'youtube') {
       return h('div', { class: `preview yt ${t.settings.isShort ? 'short' : ''}` }, h('div', { class: 'pv-media' }, mediaEl || h('div', { class: 'pv-empty' }, icon('play', 20), 'No video')),
         h('div', { class: 'pv-row' }, avatar(a, 28), h('div', {}, h('div', { class: 'pv-title' }, t.settings.title || 'Untitled'), h('div', { class: 'pv-sub' }, `${a.name} · ${t.settings.privacy}`))), cap ? h('div', { class: 'pv-cap' }, cap.slice(0, 160)) : null);
+    }
+    if (p === 'x') {
+      const post = (text, media, first) => h('div', { class: `pv-x ${first ? '' : 'reply'}` }, avatar(a, 30),
+        h('div', { class: 'min0' }, h('div', { class: 'pv-x-head' }, h('strong', {}, a.name), h('span', { class: 'muted' }, ` @${a.username || ''}`)),
+          h('div', { class: 'pv-cap' }, text || h('span', { class: 'muted' }, 'Write something…')),
+          media.length ? h('div', { class: `pv-grid n${Math.min(media.length, 4)}` }, media.slice(0, 4).map((md) => mediaVisual(md))) : null));
+      return h('div', { class: 'preview x' }, post(cap, st.media, true),
+        (t.settings.thread || []).map((it) => post(it.text, (it.media || []).map((id) => st.thumbs.get(id)).filter(Boolean), false)));
+    }
+    if (p === 'linkedin' || p === 'linkedin-page') {
+      const doc = t.settings.post_type === 'document' && first?.kind === 'document';
+      return h('div', { class: 'preview li' }, h('div', { class: 'pv-head' }, avatar(a, 32), h('div', {}, h('strong', {}, a.name), h('div', { class: 'muted small' }, p === 'linkedin-page' ? 'Company Page' : t.settings.visibility === 'CONNECTIONS' ? 'Connections' : 'Anyone'))),
+        h('div', { class: 'pv-cap' }, cap.length > 210 ? `${cap.slice(0, 210)}… see more` : cap),
+        doc ? h('div', { class: 'pv-doc' }, icon('docs', 18), h('span', {}, t.settings.document_title || first.name || 'Document')) :
+        st.media.length > 1 && first?.kind === 'image' ? h('div', { class: 'pv-grid' }, st.media.slice(0, 4).map((md) => h('img', { src: md.url, alt: '' }))) :
+        mediaEl ? h('div', { class: 'pv-media' }, mediaEl) : t.settings.url ? h('div', { class: 'pv-link' }, t.settings.url_title || t.settings.url) : null);
     }
     if (p === 'facebook') {
       return h('div', { class: 'preview fb' }, h('div', { class: 'pv-head' }, avatar(a, 32), h('div', {}, h('strong', {}, a.name), h('div', { class: 'muted small' }, st.publish_at ? formatLocal(st.publish_at, tz).replace('T', ' ') : 'Now'))),

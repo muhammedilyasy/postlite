@@ -10,7 +10,7 @@ import { ytThumb } from './providers/youtube.js';
 import { buildNotices } from './notices.js';
 
 const DAY = 86400000;
-export const SNAPSHOT_METRICS = new Set(['followers', 'following', 'media_count', 'total_views', 'video_views', 'page_likes']);
+export const SNAPSHOT_METRICS = new Set(['followers', 'following', 'media_count', 'total_views', 'video_views', 'post_views', 'page_likes']);
 export const AVERAGE_METRICS = new Set(['avg_view_sec', 'avg_watch_ms']);
 const today = () => new Date().toISOString().slice(0, 10);
 const STEP_COST = { fetches: 12, queries: 10 };

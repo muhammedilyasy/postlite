@@ -74,6 +74,59 @@ export const APPS = {
       'Publish the app (Audience → In production) to avoid 7-day refresh-token expiry in Testing. If uploads get locked as private, request the YouTube API audit (see the full guide).',
     ],
   },
+  x: {
+    label: 'X developer app (OAuth 2.0)',
+    guide: '/docs/setup/x',
+    cfgKey: 'x', idKey: 'clientId', secretKey: 'clientSecret', env: ['X_CLIENT_ID', 'X_CLIENT_SECRET'],
+    idLabel: 'OAuth 2.0 Client ID', secretLabel: 'OAuth 2.0 Client Secret',
+    providers: ['x'],
+    idPattern: /^[A-Za-z0-9_-]{10,100}$/, idHint: 'The OAuth 2.0 Client ID from Keys and tokens (not the API Key / consumer key).',
+    products: ['App inside a Project, with credits (pay-per-use)', 'User authentication settings: OAuth 2.0, type "Web App" (confidential client), Read and write'],
+    apis: [],
+    links: { 'X Developer Console': 'https://console.x.com' },
+    steps: [
+      'Open https://console.x.com → create a Project and an App inside it; buy a few dollars of credits (X API is pay-per-use).',
+      'App → User authentication settings → Set up: App permissions "Read and write", Type of App "Web App, Automated App or Bot".',
+      'Callback URI / Redirect URL: paste the redirect URI shown here exactly; Website URL: your PUBLIC_URL.',
+      'Keys and tokens → OAuth 2.0 Client ID and Client Secret: copy both here.',
+      'Save, press Test, then Accounts → Connect X.',
+    ],
+  },
+  linkedin: {
+    label: 'LinkedIn app (Share on LinkedIn + Sign In with OpenID Connect)',
+    guide: '/docs/setup/linkedin',
+    cfgKey: 'linkedin', idKey: 'clientId', secretKey: 'clientSecret', env: ['LINKEDIN_CLIENT_ID', 'LINKEDIN_CLIENT_SECRET'],
+    idLabel: 'Client ID', secretLabel: 'Primary Client Secret',
+    providers: ['linkedin', 'linkedin-page'],
+    idPattern: /^[A-Za-z0-9]{8,40}$/, idHint: 'LinkedIn Client IDs are short letters and digits (Auth tab).',
+    products: ['Share on LinkedIn (w_member_social)', 'Sign In with LinkedIn using OpenID Connect (openid, profile, email)', 'Company Pages: Community Management API (app review)'],
+    apis: [],
+    links: { 'LinkedIn Developer Portal': 'https://www.linkedin.com/developers/apps' },
+    steps: [
+      'Open https://www.linkedin.com/developers/apps → Create app (it must be linked to a LinkedIn Page you admin; verify the app from that Page).',
+      'Products tab: add "Share on LinkedIn" and "Sign In with LinkedIn using OpenID Connect".',
+      'Auth tab → Authorized redirect URLs: add both redirect URIs shown here.',
+      'Copy the Client ID and Primary Client Secret here, Save, press Test, then Accounts → Connect LinkedIn.',
+      'Company Pages and analytics need the Community Management API (request access on the Products tab; LinkedIn reviews the company and app).',
+    ],
+  },
+  'linkedin-pages': {
+    label: 'LinkedIn Pages app (Community Management API), only if it is a separate app',
+    guide: '/docs/setup/linkedin',
+    cfgKey: 'linkedinPages', idKey: 'clientId', secretKey: 'clientSecret', env: ['LINKEDIN_PAGES_CLIENT_ID', 'LINKEDIN_PAGES_CLIENT_SECRET'],
+    idLabel: 'Client ID', secretLabel: 'Primary Client Secret',
+    providers: ['linkedin-page'],
+    optional: true,
+    idPattern: /^[A-Za-z0-9]{8,40}$/, idHint: 'LinkedIn Client IDs are short letters and digits (Auth tab).',
+    products: ['Community Management API (Development or Standard tier)'],
+    apis: [],
+    links: { 'LinkedIn Developer Portal': 'https://www.linkedin.com/developers/apps' },
+    steps: [
+      'Only needed when your Community Management API access is on a different LinkedIn app than the one above.',
+      'Auth tab → Authorized redirect URLs: add the redirect URI shown here.',
+      'Copy that app\'s Client ID and Primary Client Secret here; LinkedIn Pages then connect through it.',
+    ],
+  },
 };
 
 export const APP_IDS = Object.keys(APPS);
@@ -248,6 +301,7 @@ const errText = (e) => {
 const errCode = (e) => { try { const j = JSON.parse(e.body || '{}'); return typeof j.error === 'string' ? j.error : j.error?.code ?? j.code; } catch { return null; } };
 
 const TESTERS = {
+  'linkedin-pages': (...a) => TESTERS.linkedin(...a),
   // App access token via client_credentials, then GET /app — proves both id and secret.
   async meta(cfg, { id, secret }) {
     const base = `${cfg.urls.graph}/${cfg.graphVersion}`;
@@ -276,6 +330,35 @@ const TESTERS = {
       if (/client|secret|platform app|app id|application/i.test(msg)) return { ok: false, verified: true, message: `Instagram rejected the app credentials: ${msg}` };
       if (/code|redirect/i.test(msg)) return { ok: true, verified: true, message: 'App ID and secret accepted by Instagram (test exchange stopped at the dummy authorization code, as expected).' };
       return { ok: true, verified: false, message: `Could not fully verify (${msg}). Credentials will be verified on first connect.` };
+    }
+  },
+
+  // X: token endpoint with a dummy code + Basic auth → invalid_client/unauthorized_client = wrong id/secret.
+  async x(cfg, { id, secret }, redirectUri) {
+    try {
+      await request(`${cfg.urls.xApi}/2/oauth2/token`, { headers: { authorization: `Basic ${btoa(`${id}:${secret}`)}` }, form: { client_id: id, grant_type: 'authorization_code', redirect_uri: redirectUri, code: TEST_CODE, code_verifier: 'postlite-credential-test-verifier-000000000000000' }, ...timeout(cfg) });
+      return { ok: true, verified: false, message: 'Unexpected success with a dummy code; credentials will be verified on first connect.' };
+    } catch (e) {
+      if (e.kind === 'transient') throw e;
+      const code = errCode(e);
+      const msg = errText(e);
+      if (code === 'invalid_client' || code === 'unauthorized_client' || e.status === 401) return { ok: false, verified: true, message: `X rejected the client: ${msg}` };
+      if (code === 'invalid_request' || code === 'invalid_grant') return { ok: true, verified: true, message: 'Client ID and secret accepted by X (the test stopped at the dummy authorization code, as expected).' };
+      return { ok: true, verified: false, message: `Will be verified on first connect (${msg}).` };
+    }
+  },
+  // LinkedIn: accessToken with a dummy code → invalid_client = wrong id/secret; invalid_request/invalid_grant about the code = accepted.
+  async linkedin(cfg, { id, secret }, redirectUri) {
+    try {
+      await request(`${cfg.urls.linkedinWww}/oauth/v2/accessToken`, { form: { grant_type: 'authorization_code', code: TEST_CODE, redirect_uri: redirectUri, client_id: id, client_secret: secret }, ...timeout(cfg) });
+      return { ok: true, verified: false, message: 'Unexpected success with a dummy code; credentials will be verified on first connect.' };
+    } catch (e) {
+      if (e.kind === 'transient') throw e;
+      const code = errCode(e);
+      const msg = errText(e);
+      if (code === 'invalid_client' || /client authentication|client_id|client secret/i.test(msg)) return { ok: false, verified: true, message: `LinkedIn rejected the client: ${msg}` };
+      if (code === 'invalid_request' || code === 'invalid_grant' || /authorization code|redirect/i.test(msg)) return { ok: true, verified: true, message: 'Client ID and secret accepted by LinkedIn (the test stopped at the dummy authorization code, as expected).' };
+      return { ok: true, verified: false, message: `Will be verified on first connect (${msg}).` };
     }
   },
 

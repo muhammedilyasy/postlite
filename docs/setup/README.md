@@ -13,6 +13,8 @@ The credentials are encrypted in postlite's database. You don't need to edit `.e
 | Facebook Pages + Instagram (via a linked Facebook Page) | Meta app with Facebook Login for Business | [facebook-and-instagram.md](facebook-and-instagram.md) |
 | Instagram without a Facebook Page | Meta app with the Instagram product ("API setup with Instagram login") | [instagram-standalone.md](instagram-standalone.md) |
 | YouTube | Google Cloud project + OAuth client (Web application) | [youtube.md](youtube.md) |
+| X | X developer app (OAuth 2.0, Web App) with pay-per-use credits | [x.md](x.md) |
+| LinkedIn profiles and Company Pages | LinkedIn app with Share on LinkedIn + OpenID Connect; Pages need the Community Management API | [linkedin.md](linkedin.md) |
 
 **Sign-in:** to protect the web UI with Cloudflare Zero Trust Access (email one-time PIN) instead of the admin
 password, follow [cloudflare-access.md](cloudflare-access.md).

@@ -30,15 +30,16 @@ export async function renderAccounts(root, params = {}) {
   const table = state.accounts.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Account'), h('th', { class: 'hide-sm' }, 'Platform'), h('th', {}, 'Status'), h('th', { class: 'hide-sm' }, 'Last checked'), h('th', { class: 'w-act' }, h('span', { class: 'sr-only' }, 'Actions')))),
     h('tbody', {}, state.accounts.map((a) => h('tr', {},
-      h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name), h('div', { class: 'muted small ellipsis' }, a.username ? `@${String(a.username).replace(/^@/, '')}` : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
-      h('td', { class: 'hide-sm' }, PROVIDER_META[a.provider].label, a.provider === 'instagram-standalone' ? h('span', { class: 'muted small' }, ' · Instagram Login') : a.provider === 'instagram' ? h('span', { class: 'muted small' }, ' · via Facebook') : null),
+      h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name), h('div', { class: 'muted small ellipsis' }, a.username ? (a.provider.startsWith('linkedin') ? String(a.username) : `@${String(a.username).replace(/^@/, '')}`) : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
+      h('td', { class: 'hide-sm' }, PROVIDER_META[a.provider].label, a.provider === 'instagram-standalone' ? h('span', { class: 'muted small' }, ' · Instagram Login') : a.provider === 'instagram' ? h('span', { class: 'muted small' }, ' · via Facebook') : a.provider === 'x' && a.meta?.premium ? h('span', { class: 'muted small' }, ' · Premium') : null),
       h('td', {}, a.status === 'active' ? pill('s-published', 'Connected') : pill('s-failed', 'Needs reconnect'), a.status !== 'active' && a.status_message ? h('div', { class: 'err small' }, a.status_message) : null,
-        a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small' }, `Token renews before ${fmtTime(a.token_expires_at).slice(0, 10)}`) : null),
+        a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small' }, `Token renews before ${fmtTime(a.token_expires_at).slice(0, 10)}`) : null,
+        a.status === 'active' && a.token_expires_at && a.provider.startsWith('linkedin') && !a.meta?.has_refresh ? h('div', { class: 'muted small' }, `Reconnect before ${fmtTime(a.token_expires_at).slice(0, 10)}`) : null),
       h('td', { class: 'small muted hide-sm' }, a.last_checked_at ? relTime(a.last_checked_at) : 'never'),
       h('td', { class: 'w-act' }, h('div', { class: 'row gap end' },
         a.status !== 'active' ? h('a', { class: 'btn small primary', href: `/oauth/${a.provider}/start?reconnect=${a.id}` }, 'Reconnect') : null,
         h('button', { class: 'icon-btn', 'aria-label': `Actions for ${a.name}`, 'aria-haspopup': 'menu', onclick: menuFor(a) }, icon('more', 16)))))))))
-    : h('div', { class: 'card' }, emptyState({ icon: 'accounts', title: 'No accounts connected', body: 'Connect a YouTube channel, Facebook Page or Instagram account below.' }));
+    : h('div', { class: 'card' }, emptyState({ icon: 'accounts', title: 'No accounts connected', body: 'Connect a YouTube channel, Facebook Page, Instagram, X or LinkedIn account below.' }));
 
   mount(root,
     pageHeader({ title: 'Accounts', sub: 'Channels, Pages and profiles postlite can publish to.', actions: h('a', { class: 'btn', href: '#/settings/apps' }, icon('apps', 15), 'Platform apps') }),
@@ -57,8 +58,10 @@ function connectList(providers) {
     { kind: 'youtube', name: 'YouTube', desc: 'Videos and Shorts on your channel', opts: [by.youtube] },
     { kind: 'facebook', name: 'Facebook', desc: 'Posts, Reels and Stories on a Page you manage', opts: [by.facebook] },
     { kind: 'instagram', name: 'Instagram', desc: 'Posts, carousels, Reels and Stories on a Business or Creator account', opts: [by.instagram, by['instagram-standalone']] },
-  ];
-  const optLabel = (p) => (p.provider === 'instagram' ? 'Through a Facebook Page' : 'With Instagram login');
+    { kind: 'x', name: 'X', desc: 'Posts, threads, photos and video on your X account', opts: [by.x] },
+    { kind: 'linkedin', name: 'LinkedIn', desc: 'Posts, images, video and PDF documents on your profile or a Company Page', opts: [by.linkedin, by['linkedin-page']] },
+  ].filter((r) => r.opts.some(Boolean));
+  const optLabel = (p) => ({ instagram: 'Through a Facebook Page', 'instagram-standalone': 'With Instagram login', linkedin: 'My profile', 'linkedin-page': 'A Company Page I admin' }[p.provider] || p.label);
   const action = (r) => {
     const opts = r.opts.filter(Boolean);
     const ready = opts.filter((p) => p.configured);
@@ -119,7 +122,8 @@ function analyticsNotice(a, accountId) {
   const n = (a.sync?.unavailable?.notices || []).find((x) => x.action) || (a.sync?.unavailable?.notices || [])[0];
   if (!n) return null;
   const link = n.action === 'open' && n.url ? h('a', { href: n.url, target: '_blank', rel: 'noopener' }, n.api ? `Turn on ${n.api}` : 'Open console')
-    : n.action === 'reconnect' ? h('a', { href: `/oauth/${a.provider}/start?reconnect=${accountId}` }, 'Reconnect') : null;
+    : n.action === 'reconnect' ? h('a', { href: `/oauth/${a.provider}/start?reconnect=${accountId}` }, 'Reconnect')
+    : n.action === 'guide' && n.url ? h('a', { href: n.url, target: '_blank', rel: 'noopener' }, 'How to get access') : null;
   return h('div', { class: 'notice warn small an-notice' }, icon('alert', 14), h('span', {}, n.text, link ? [' ', link] : null));
 }
 const label = (m) => METRIC_LABELS[m] || m;

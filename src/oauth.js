@@ -67,7 +67,8 @@ export function createOAuth(core) {
         await del(row.state);
         throw new HttpError(400, provider.startsWith('instagram')
           ? 'No Instagram professional account found. Make sure it is a Business/Creator account (and, for the Facebook flavour, linked to a Page you manage).'
-          : 'No pages/channels were found for this login.');
+          : provider === 'linkedin-page' ? 'No LinkedIn Pages found where this member is an admin or content admin.'
+            : 'No pages/channels were found for this login.');
       }
       if (row.reconnect_id) {
         const existing = await integrations.rawGet(row.reconnect_id);

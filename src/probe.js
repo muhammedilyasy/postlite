@@ -7,7 +7,7 @@ export const MIME_BY_EXT = {
   jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
   mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime',
 };
-export const EXT_BY_MIME = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/quicktime': 'mov' };
+export const EXT_BY_MIME = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'application/pdf': 'pdf' };
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -18,6 +18,7 @@ export function sniffMime(buf) {
   if (buf.length >= 6 && /^GIF8[79]a$/.test(latin1(buf, 0, 6))) return 'image/gif';
   if (buf.length >= 12 && latin1(buf, 0, 4) === 'RIFF' && latin1(buf, 8, 12) === 'WEBP') return 'image/webp';
   if (buf.length >= 12 && latin1(buf, 4, 8) === 'ftyp') return latin1(buf, 8, 12) === 'qt  ' ? 'video/quicktime' : 'video/mp4';
+  if (buf.length >= 5 && latin1(buf, 0, 5) === '%PDF-') return 'application/pdf'; // LinkedIn document posts
   return null;
 }
 

@@ -87,6 +87,8 @@ export function ensurePoster(md, source = null) {
  */
 export function mediaVisual(md, { playable = false, cls = null, alt = '' } = {}) {
   if (!md) return null;
+  // PDF (LinkedIn document posts): a quiet file tile with the name, no browser PDF viewer.
+  if (md.kind === 'document') return h('span', { class: `${cls || ''} doc-tile`, title: md.name || 'PDF' }, icon('docs', 18), h('span', { class: 'doc-name' }, md.name || 'PDF'));
   if (md.kind !== 'video') return h('img', { class: cls, src: md.url, alt, loading: 'lazy' });
   if (md.poster && !playable) return h('img', { class: cls, src: md.poster, alt, loading: 'lazy' });
   const v = h('video', {
@@ -108,6 +110,7 @@ export function mediaVisual(md, { playable = false, cls = null, alt = '' } = {})
 export function listThumb(md, { cls = 'lthumb', size = 14 } = {}) {
   if (!md) return h('span', { class: `${cls} ph` }, icon('image', size));
   const el = mediaVisual(md, { cls });
+  if (md.kind === 'document') return h('span', { class: `${cls} ph` }, icon('docs', size));
   if (el.tagName === 'IMG') el.addEventListener('error', () => el.replaceWith(h('span', { class: `${cls} ph` }, icon(md.kind === 'video' ? 'play' : 'image', size))));
   return el;
 }

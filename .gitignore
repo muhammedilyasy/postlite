@@ -11,3 +11,6 @@ uploads/
 *.log
 .DS_Store
 coverage/
+.cf-assets/
+.wrangler/
+.dev.vars

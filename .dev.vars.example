@@ -1,0 +1,8 @@
+# Secrets for the Cloudflare Workers deployment (wrangler secret put NAME). Copy to .dev.vars for `wrangler dev`.
+TOKEN_ENC_KEY=   # openssl rand -base64 32  (never change after connecting accounts)
+SESSION_SECRET=  # openssl rand -base64 32
+# Optional
+# ADMIN_PASSWORD_HASH=   # AUTH_MODE=password only: node bin/postlite.js hash-password
+# META_APP_ID= / META_APP_SECRET= / INSTAGRAM_APP_ID= / INSTAGRAM_APP_SECRET= / GOOGLE_CLIENT_ID= / GOOGLE_CLIENT_SECRET=
+#   (or save them in the UI: Settings → Platform apps)
+# R2_ACCOUNT_ID= / R2_ACCESS_KEY_ID= / R2_SECRET_ACCESS_KEY= / R2_BUCKET_NAME=   # direct-to-R2 presigned uploads

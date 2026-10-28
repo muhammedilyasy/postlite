@@ -13,7 +13,46 @@
   "scripts": {
     "start": "node bin/postlite.js start",
     "test": "node --test --test-concurrency=1 \"test/*.test.js\"",
-    "fake": "node test/fake/server.js"
+    "test:workers": "node --test --test-concurrency=1 \"test-workers/*.test.js\"",
+    "test:all": "npm test && npm run test:workers",
+    "fake": "node test/fake/server.js",
+    "cf:assets": "node scripts/cf-assets.mjs",
+    "cf:dev": "wrangler dev --test-scheduled",
+    "cf:migrate": "wrangler d1 migrations apply DB --remote",
+    "cf:deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "deploy": "npm run cf:deploy"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "devDependencies": {
+    "wrangler": "4.154.0"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "workerd": true
+  },
+  "cloudflare": {
+    "bindings": {
+      "TOKEN_ENC_KEY": {
+        "description": "32 random bytes, base64 (`openssl rand -base64 32`). Encrypts platform tokens at rest. Never change it after connecting accounts."
+      },
+      "SESSION_SECRET": {
+        "description": "Random string used to pepper session ids (`openssl rand -base64 32`)."
+      },
+      "AUTH_MODE": {
+        "description": "`cloudflare-access` (recommended) or `password`."
+      },
+      "CF_ACCESS_TEAM_DOMAIN": {
+        "description": "Your Zero Trust team domain, e.g. `myteam.cloudflareaccess.com`."
+      },
+      "CF_ACCESS_AUD": {
+        "description": "Application Audience (AUD) tag of the Access application."
+      },
+      "ALLOWED_EMAILS": {
+        "description": "Comma-separated emails allowed to sign in (enforced by postlite too)."
+      },
+      "PUBLIC_URL": {
+        "description": "Public URL of this Worker, e.g. `https://postlite.example.com`."
+      }
+    }
+  }
 }

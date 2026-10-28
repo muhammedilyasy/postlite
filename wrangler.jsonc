@@ -1,0 +1,40 @@
+{
+  // postlite on Cloudflare Workers (Free plan): Worker + D1 + R2 + static assets + a 1-minute Cron Trigger.
+  // Setup guide: docs/setup/cloudflare-workers.md. Deploy: `npm run cf:deploy` (or the Deploy button).
+  // D1 / R2 have no IDs here on purpose: `wrangler deploy` provisions them automatically on first deploy
+  // (https://developers.cloudflare.com/workers/wrangler/configuration/#automatic-provisioning).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "postlite",
+  "main": "src/workers/index.js",
+  "compatibility_date": "2026-10-20",
+  "build": { "command": "node scripts/cf-assets.mjs" },
+  "assets": {
+    "directory": ".cf-assets",
+    "binding": "ASSETS",
+    // /assets/* (UI code, CSS, fonts) is served by Cloudflare directly: free and never counts as a Worker request.
+    "run_worker_first": ["/*", "!/assets/*"],
+    "html_handling": "none",
+    "not_found_handling": "none"
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "postlite", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA" }
+  ],
+  // Every minute: claim due posts and advance them in small resumable steps, deliver webhooks,
+  // continue analytics syncs. One trigger of the 5 allowed on the Free plan.
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    // Recommended: Cloudflare Zero Trust Access (free for up to 50 users). Fill in after creating the Access app,
+    // or switch to "password" and set the ADMIN_PASSWORD_HASH secret.
+    "AUTH_MODE": "cloudflare-access",
+    "CF_ACCESS_TEAM_DOMAIN": "",
+    "CF_ACCESS_AUD": "",
+    "ALLOWED_EMAILS": "",
+    // Your public URL, e.g. https://postlite.example.com (empty: the URL the Worker is first opened at).
+    "PUBLIC_URL": "",
+    "DEFAULT_TIMEZONE": "UTC"
+  },
+  "observability": { "enabled": true }
+}

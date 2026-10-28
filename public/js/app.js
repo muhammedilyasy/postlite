@@ -141,6 +141,6 @@ export async function updateBadge() {
     if (e.key === 'n' && !e.metaKey && !e.ctrlKey && !e.altKey && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !document.querySelector('.modal-back') && !document.querySelector('.menu')) { e.preventDefault(); newPost(); }
   });
   await route();
-  if (!state.accounts.length && !location.hash.includes('accounts')) toast('Connect an account to get started → Accounts', 'info', 6000);
+  if (!state.accounts.length && !location.hash.includes('accounts')) toast('No accounts connected yet. Add one in Accounts.', 'info', 6000);
   setInterval(updateBadge, 60000);
 })();

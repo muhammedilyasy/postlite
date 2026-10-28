@@ -1,8 +1,10 @@
 // Composer: global caption + per-account overrides/settings, media upload, live validation, previews.
-import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce } from './core.js';
-import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, charCount, youtubeTagsLength } from '/assets/shared/validate.js';
+import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime } from './core.js';
+import { segmented } from './ui.js';
+import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, charCount } from '/assets/shared/validate.js';
 import { formatLocal, parseLocal } from '/assets/shared/time.js';
 
+export { relTime };
 const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.name });
 
 export async function openComposer({ groupId = null, at = null, onSaved = () => {} } = {}) {
@@ -22,7 +24,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
   }
 
   const root = h('div', { class: 'composer' });
-  const m = modal(root, { wide: true });
+  const m = modal(root, { wide: true, label: st.id ? 'Edit post' : 'New post' });
 
   const accountsById = () => Object.fromEntries(state.accounts.map((a) => [a.id, a]));
   const captionFor = (aid) => { const t = st.targets.get(aid); return t?.content_override ?? st.content; };
@@ -37,57 +39,59 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     return v;
   };
   const allErrors = () => [...st.targets.keys()].filter((aid) => !st.locked.has(aid)).flatMap((aid) => validation(aid).errors.map((e) => ({ aid, e })));
+  const footStatus = (errs) => (errs.length ? h('div', { class: 'foot-errors' }, icon('alert', 15), `${errs.length} issue${errs.length > 1 ? 's' : ''} to fix`) : h('div', { class: 'foot-ok' }, st.targets.size ? [icon('check-circle', 15), 'Ready to publish'] : h('span', { class: 'muted' }, 'Pick at least one account')));
 
   function render() {
     const accs = accountsById();
     const errs = allErrors();
-    mount(root, 
+    mount(root,
       h('div', { class: 'composer-head' },
-        h('h2', {}, st.id ? 'Edit post' : 'New post'), st.id ? statusBadge(st.status) : null,
-        h('button', { class: 'icon-btn close', title: 'Close (Esc)', onclick: () => m.close() }, '×')),
-      st.approval_note ? h('div', { class: 'notice warn' }, st.approval_note) : null,
+        h('div', {}, h('div', { class: 'eyebrow' }, st.id ? 'Edit post' : 'New post'), h('h2', { class: 'ch-title' }, st.id ? 'Edit post' : 'Compose')),
+        st.id ? statusBadge(st.status) : null,
+        h('button', { class: 'icon-btn close', 'aria-label': 'Close (Esc)', onclick: () => m.close() }, icon('x', 18))),
+      st.approval_note ? h('div', { class: 'notice warn' }, icon('alert', 15), h('span', {}, st.approval_note)) : null,
       h('div', { class: 'composer-body' },
         h('div', { class: 'col-main' },
           h('div', { class: 'label' }, 'Publish to'),
           h('div', { class: 'acc-picker' }, state.accounts.length ? state.accounts.map((a) => {
             const on = st.targets.has(a.id);
             return h('button', {
-              class: `acc-pill ${on ? 'on' : ''} ${a.status !== 'active' ? 'warn' : ''}`, disabled: st.locked.has(a.id), title: a.status !== 'active' ? `${a.name}: needs reconnect` : a.name,
+              type: 'button', class: `acc-pill ${on ? 'on' : ''} ${a.status !== 'active' ? 'warn' : ''}`, disabled: st.locked.has(a.id), 'aria-pressed': on ? 'true' : 'false', title: a.status !== 'active' ? `${a.name}: needs reconnect` : a.name,
               onclick: () => {
                 if (on) { st.targets.delete(a.id); if (st.active === a.id) st.active = [...st.targets.keys()][0] || null; }
                 else { st.targets.set(a.id, { content_override: null, settings: defaultSettings(a.provider) }); st.active = a.id; }
                 render();
               },
-            }, avatar(a, 26), h('span', {}, a.name));
+            }, avatar(a, 22), h('span', {}, a.name), on ? icon('check-circle', 14, 'pill-check') : null);
           }) : h('p', { class: 'muted' }, 'No accounts connected yet. ', h('a', { href: '#/accounts', onclick: () => m.close() }, 'Connect one'), '.')),
-          h('div', { class: 'label' }, 'Caption'),
+          h('label', { class: 'label', for: 'pl-caption' }, 'Caption'),
           captionBox(),
           counters(),
           h('div', { class: 'label' }, 'Media'),
           mediaBox(),
-          h('div', { class: 'label' }, `Schedule (${tz})`),
+          h('label', { class: 'label', for: 'pl-when' }, 'Schedule', h('span', { class: 'label-hint mono' }, tz)),
           h('div', { class: 'row gap wrap' },
-            h('input', { type: 'datetime-local', class: 'input', value: st.publish_at ? formatLocal(st.publish_at, tz) : '', onchange: (e) => { st.publish_at = e.target.value ? parseLocal(e.target.value, tz) : null; render(); } }),
-            h('button', { class: 'btn', onclick: async () => { try { const r = await api('GET', '/slots?count=1'); st.publish_at = r.slots[0].epoch_ms; render(); } catch (e) { toast(e.message, 'error'); } } }, 'Next free slot'),
+            h('input', { id: 'pl-when', type: 'datetime-local', class: 'input when', value: st.publish_at ? formatLocal(st.publish_at, tz) : '', onchange: (e) => { st.publish_at = e.target.value ? parseLocal(e.target.value, tz) : null; render(); } }),
+            h('button', { type: 'button', class: 'btn', onclick: async () => { try { const r = await api('GET', '/slots?count=1'); st.publish_at = r.slots[0].epoch_ms; render(); } catch (e) { toast(e.message, 'error'); } } }, icon('clock', 15), 'Next free slot'),
             st.publish_at ? h('span', { class: 'muted small' }, relTime(st.publish_at)) : null)),
         h('div', { class: 'col-side' }, sidePanel(accs))),
       h('div', { class: 'composer-foot' },
-        errs.length ? h('div', { class: 'foot-errors' }, `${errs.length} issue${errs.length > 1 ? 's' : ''} to fix`) : h('div', { class: 'foot-ok' }, st.targets.size ? '✓ Ready' : ''),
+        footStatus(errs),
         h('div', { class: 'row gap wrap end' },
-          st.id ? h('button', { class: 'btn ghost danger', onclick: del }, 'Delete') : null,
+          st.id ? h('button', { class: 'btn ghost danger', onclick: del }, icon('trash', 15), 'Delete') : null,
           st.id ? h('button', { class: 'btn ghost', onclick: dup }, 'Duplicate') : null,
           st.status === 'pending_approval' ? [
             h('button', { class: 'btn', onclick: reject }, 'Reject'),
-            h('button', { class: 'btn primary', onclick: approve, disabled: !!errs.length }, 'Approve'),
+            h('button', { class: 'btn primary', dataset: { act: 'approve' }, onclick: approve, disabled: !!errs.length }, 'Approve'),
           ] : [
             h('button', { class: 'btn', onclick: () => save('draft') }, 'Save draft'),
-            h('button', { class: 'btn', onclick: () => save('now'), disabled: !!errs.length || !st.targets.size }, 'Post now'),
-            h('button', { class: 'btn primary', onclick: () => save('schedule'), disabled: !!errs.length || !st.targets.size || !st.publish_at }, st.status === 'scheduled' ? 'Update' : 'Schedule'),
+            h('button', { class: 'btn', dataset: { act: 'now' }, onclick: () => save('now'), disabled: !!errs.length || !st.targets.size }, icon('send', 14), 'Post now'),
+            h('button', { class: 'btn primary', dataset: { act: 'schedule' }, onclick: () => save('schedule'), disabled: !!errs.length || !st.targets.size || !st.publish_at }, st.status === 'scheduled' ? 'Update schedule' : 'Schedule'),
           ])));
   }
 
   function captionBox() {
-    const ta = h('textarea', { class: 'input caption', rows: 6, placeholder: 'Write something… (#hashtags and @mentions welcome)' });
+    const ta = h('textarea', { id: 'pl-caption', class: 'input caption', rows: 6, placeholder: 'Write something… #hashtags and @mentions welcome' });
     ta.value = st.content;
     ta.addEventListener('input', debounce(() => { st.content = ta.value; refreshLive(); }, 120));
     return ta;
@@ -104,11 +108,12 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     mount(box, [...st.targets.keys()].map((aid) => {
       const p = accs[aid]?.provider;
       const custom = st.targets.get(aid).content_override !== null && st.targets.get(aid).content_override !== undefined;
-      if (!p || (seen.has(p) && !custom)) return null;
-      seen.add(p);
+      const key = `${PROVIDER_META[p]?.short}${PLATFORMS[p]?.maxCaption}`;
+      if (!p || (seen.has(key) && !custom)) return null;
+      seen.add(key);
       const n = charCount(captionFor(aid));
       const max = PLATFORMS[p].maxCaption;
-      return h('span', { class: `counter ${n > max ? 'over' : n > max * 0.9 ? 'near' : ''}`, style: { '--pc': PROVIDER_META[p].color } }, `${PROVIDER_META[p].short}${custom ? '*' : ''} ${n}/${max}`);
+      return h('span', { class: `counter mono ${n > max ? 'over' : n > max * 0.9 ? 'near' : ''}`, style: { '--pc': PROVIDER_META[p].color } }, `${PROVIDER_META[p].short}${custom ? '*' : ''} ${n}/${max}`);
     }));
   }
   function renderSide() {
@@ -125,7 +130,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       const v = root.querySelector('#side-val');
       if (v) v.replaceWith(validationBox(accs[aid], st.targets.get(aid)));
       const pv = root.querySelector('#side-prev');
-      if (pv) pv.replaceWith(h('div', { id: 'side-prev' }, preview(accs[aid], st.targets.get(aid))));
+      if (pv) pv.replaceWith(previewBox(accs[aid], st.targets.get(aid)));
       const tb = root.querySelector('#side-tabs');
       if (tb) tb.replaceWith(tabsBar(accs));
     } else {
@@ -135,10 +140,8 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     const foot = root.querySelector('.composer-foot');
     if (foot) {
       const errs = allErrors();
-      foot.firstChild.replaceWith(errs.length ? h('div', { class: 'foot-errors' }, `${errs.length} issue${errs.length > 1 ? 's' : ''} to fix`) : h('div', { class: 'foot-ok' }, st.targets.size ? '✓ Ready' : ''));
-      for (const b of foot.querySelectorAll('.btn')) {
-        if (/Post now|Schedule|Update|Approve/.test(b.textContent)) b.disabled = !!errs.length || !st.targets.size || (/Schedule|Update/.test(b.textContent) && !st.publish_at);
-      }
+      foot.firstChild.replaceWith(footStatus(errs));
+      for (const b of foot.querySelectorAll('[data-act]')) b.disabled = !!errs.length || !st.targets.size || (b.dataset.act === 'schedule' && !st.publish_at);
     }
   }
 
@@ -146,17 +149,17 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     const input = h('input', { type: 'file', multiple: true, accept: 'image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime', hidden: true, onchange: (e) => addFiles([...e.target.files]) });
     const progress = h('div', { class: 'uploads' });
     const drop = h('div', {
-      class: 'dropzone', tabindex: 0,
+      class: 'dropzone', tabindex: 0, role: 'button', 'aria-label': 'Upload media',
       onclick: () => input.click(),
-      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') input.click(); },
+      onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } },
       ondragover: (e) => { e.preventDefault(); drop.classList.add('over'); },
       ondragleave: () => drop.classList.remove('over'),
       ondrop: (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files.length) addFiles([...e.dataTransfer.files]); },
-    }, h('div', {}, h('strong', {}, 'Drop images or videos'), ' or click to browse'), h('div', { class: 'muted small' }, 'JPEG/PNG/WebP/GIF, MP4/MOV'));
+    }, icon('upload', 18), h('div', {}, h('strong', {}, 'Drop images or videos'), ' or click to browse'), h('div', { class: 'muted small' }, 'JPEG · PNG · WebP · GIF · MP4 · MOV'));
     async function addFiles(files) {
       for (const f of files) {
         const bar = h('div', { class: 'bar' }, h('span', { style: { width: '0%' } }));
-        const row = h('div', { class: 'upload-row' }, h('span', { class: 'name' }, f.name), h('span', { class: 'muted small' }, fmtBytes(f.size)), bar);
+        const row = h('div', { class: 'upload-row' }, h('span', { class: 'name ellipsis' }, f.name), h('span', { class: 'muted small mono' }, fmtBytes(f.size)), bar);
         progress.append(row);
         try {
           const media = await uploadFile(f, (p) => { bar.firstChild.style.width = `${Math.round(p * 100)}%`; });
@@ -165,41 +168,41 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
           render();
         } catch (e) {
           row.classList.add('error');
-          row.append(h('span', { class: 'err' }, e.message));
+          row.append(h('span', { class: 'err small' }, e.message));
         }
       }
     }
     let dragIdx = null;
     const grid = h('div', { class: 'media-grid' }, st.media.map((md, i) => h('div', {
-      class: 'media-item', draggable: true,
+      class: 'media-item', draggable: 'true',
       ondragstart: (e) => { dragIdx = i; e.dataTransfer.effectAllowed = 'move'; },
       ondragover: (e) => e.preventDefault(),
       ondrop: (e) => { e.preventDefault(); e.stopPropagation(); if (dragIdx === null || dragIdx === i) return; const [x] = st.media.splice(dragIdx, 1); st.media.splice(i, 0, x); dragIdx = null; render(); },
     },
     md.kind === 'video' ? (md.poster ? h('img', { src: md.poster, alt: '' }) : h('video', { src: md.url, muted: true, preload: 'metadata' })) : h('img', { src: md.url, alt: '', loading: 'lazy' }),
-    h('span', { class: 'media-meta' }, `${md.kind === 'video' ? `▶ ${md.duration ? `${Math.round(md.duration)}s` : ''}` : ''} ${md.width && md.height ? `${md.width}×${md.height}` : ''}`),
-    h('span', { class: 'media-idx' }, i + 1),
-    h('button', { class: 'icon-btn remove', title: 'Remove', onclick: (e) => { e.stopPropagation(); st.media.splice(i, 1); render(); } }, '×'))));
-    return h('div', {}, grid, drop, input, progress);
+    h('span', { class: 'media-meta mono' }, `${md.kind === 'video' ? `▶ ${md.duration ? `${Math.round(md.duration)}s` : ''}` : ''} ${md.width && md.height ? `${md.width}×${md.height}` : ''}`),
+    h('span', { class: 'media-idx mono' }, i + 1),
+    h('button', { type: 'button', class: 'icon-btn remove', 'aria-label': `Remove ${md.name || 'media'}`, onclick: (e) => { e.stopPropagation(); st.media.splice(i, 1); render(); } }, icon('x', 14)))));
+    return h('div', {}, st.media.length ? grid : null, drop, input, progress);
   }
 
   function sidePanel(accs) {
     const ids = [...st.targets.keys()];
-    if (!ids.length) return h('div', { class: 'empty-side' }, h('p', { class: 'muted' }, 'Select one or more accounts to see platform settings, validation and previews.'));
+    if (!ids.length) return h('div', { class: 'empty-side' }, icon('accounts', 22), h('p', { class: 'muted' }, 'Select one or more accounts to see platform settings, validation and a live preview.'));
     if (!st.active || !st.targets.has(st.active)) st.active = ids[0];
     const aid = st.active;
     const a = accs[aid];
     const t = st.targets.get(aid);
     const locked = st.locked.has(aid);
-    return h('div', {},
+    return h('div', { class: 'side-inner' },
       tabsBar(accs),
-      t.status && t.status !== 'draft' ? h('div', { class: 'row gap small' }, statusBadge(t.status), t.published_url ? h('a', { href: t.published_url, target: '_blank', rel: 'noopener' }, 'View live ↗') : null) : null,
-      t.error ? h('div', { class: 'notice error' }, t.error) : null,
-      t.warning ? h('div', { class: 'notice warn' }, t.warning) : null,
+      t.status && t.status !== 'draft' ? h('div', { class: 'row gap small side-status' }, statusBadge(t.status), t.published_url ? h('a', { href: t.published_url, target: '_blank', rel: 'noopener' }, 'View live', icon('external', 12)) : null) : null,
+      t.error ? h('div', { class: 'notice error' }, icon('x-circle', 15), h('span', {}, t.error)) : null,
+      t.warning ? h('div', { class: 'notice warn' }, icon('alert', 15), h('span', {}, t.warning)) : null,
       locked ? h('p', { class: 'muted' }, 'This account was already published and can no longer be edited.') : [
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: t.content_override !== null && t.content_override !== undefined, onchange: (e) => { t.content_override = e.target.checked ? st.content : null; renderSide(); } }), `Custom ${PLATFORMS[a.provider].captionLabel.toLowerCase()} for ${a.name}`),
         t.content_override !== null && t.content_override !== undefined ? (() => {
-          const ta = h('textarea', { class: 'input', rows: 4 });
+          const ta = h('textarea', { class: 'input', rows: 4, 'aria-label': `Custom caption for ${a.name}` });
           ta.value = t.content_override;
           ta.addEventListener('input', debounce(() => { t.content_override = ta.value; refreshLive(); }, 150));
           return ta;
@@ -207,24 +210,24 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
         settingsForm(a, t),
       ],
       validationBox(a, t),
-      h('div', { id: 'side-prev' }, preview(a, t)));
+      previewBox(a, t));
   }
 
   function tabsBar(accs) {
     const ids = [...st.targets.keys()];
-    return h('div', { class: 'tabs', id: 'side-tabs' }, ids.map((id) => {
+    return h('div', { class: 'side-tabs', id: 'side-tabs', role: 'tablist' }, ids.map((id) => {
       const vv = validation(id);
-      return h('button', { class: `tab ${id === st.active ? 'on' : ''}`, onclick: () => { st.active = id; renderSide(); } }, avatar(accs[id] || { name: '?' }, 20), h('span', {}, accs[id]?.name || 'removed'), vv.errors.length && !st.locked.has(id) ? h('span', { class: 'dot err' }) : vv.warnings.length ? h('span', { class: 'dot warn' }) : null);
+      return h('button', { type: 'button', role: 'tab', 'aria-selected': id === st.active ? 'true' : 'false', class: `stab ${id === st.active ? 'on' : ''}`, onclick: () => { st.active = id; renderSide(); } }, avatar(accs[id] || { name: '?' }, 18), h('span', { class: 'ellipsis' }, accs[id]?.name || 'removed'), vv.errors.length && !st.locked.has(id) ? h('span', { class: 'dot err', title: 'Has errors' }) : vv.warnings.length ? h('span', { class: 'dot warn', title: 'Has warnings' }) : null);
     }));
   }
 
   function validationBox(a, t) {
     const v = validation(a.id);
     return h('div', { class: 'validation', id: 'side-val' },
-      h('div', { class: 'kind' }, `Will publish: ${describeKind(a.provider, st.media, t.settings)}`),
-      v.errors.map((e) => h('div', { class: 'v-err' }, '✕ ', e)),
-      v.warnings.map((w) => h('div', { class: 'v-warn' }, '! ', w)),
-      !v.errors.length ? h('div', { class: 'v-ok' }, '✓ Looks good for ', PROVIDER_META[a.provider].label) : null);
+      h('div', { class: 'kind' }, h('span', { class: 'eyebrow' }, 'Will publish'), describeKind(a.provider, st.media, t.settings)),
+      v.errors.map((e) => h('div', { class: 'v-err' }, icon('x-circle', 14), h('span', {}, e))),
+      v.warnings.map((w) => h('div', { class: 'v-warn' }, icon('alert', 14), h('span', {}, w))),
+      !v.errors.length ? h('div', { class: 'v-ok' }, icon('check-circle', 14), h('span', {}, 'Looks good for ', PROVIDER_META[a.provider].label)) : null);
   }
 
   function field(label, control, hint) {
@@ -248,7 +251,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       i.addEventListener('input', debounce(() => set(t, k, i.value.split(',').map((x) => x.trim()).filter(Boolean)), 200));
       return i;
     };
-    const seg = (k, opts) => h('div', { class: 'seg' }, opts.map(([v, l]) => h('button', { class: s[k] === v ? 'on' : '', onclick: () => set(t, k, v, true) }, l)));
+    const seg = (k, opts) => segmented(opts, s[k], (v) => set(t, k, v, true), { label: k });
     if (a.provider === 'youtube') {
       const thumb = s.thumbnail ? st.thumbs.get(s.thumbnail) : null;
       const thumbInput = h('input', { type: 'file', accept: 'image/jpeg,image/png', hidden: true, onchange: async (e) => {
@@ -265,8 +268,8 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
         field('Tags', list('tags', 'comma, separated'), 'Total ≤ 500 characters'),
         chk('notifySubscribers', 'Notify subscribers'),
         chk('isShort', 'This is a Short (vertical, ≤ 3 min)'),
-        field('Custom thumbnail', h('div', { class: 'row gap' }, thumb ? h('img', { class: 'thumb-prev', src: thumb.url, alt: '' }) : null, h('button', { class: 'btn small', onclick: () => thumbInput.click() }, thumb ? 'Replace' : 'Upload JPEG/PNG'), thumb ? h('button', { class: 'btn small ghost', onclick: () => set(t, 'thumbnail', null, true) }, 'Remove') : null, thumbInput)),
-        h('div', { class: 'notice info small' }, 'Note: if YouTube locks uploads from your unaudited Google Cloud project as private, request the YouTube API audit (see the setup guide). Uploads use the separate videos.insert quota (default 100 uploads/day per project); custom thumbnails cost 50 of the 10,000 daily units.'));
+        h('div', { class: 'field' }, h('span', {}, 'Custom thumbnail'), h('div', { class: 'row gap' }, thumb ? h('img', { class: 'thumb-prev', src: thumb.url, alt: '' }) : null, h('button', { type: 'button', class: 'btn small', onclick: () => thumbInput.click() }, thumb ? 'Replace' : 'Upload JPEG/PNG'), thumb ? h('button', { type: 'button', class: 'btn small ghost', onclick: () => set(t, 'thumbnail', null, true) }, 'Remove') : null, thumbInput)),
+        h('div', { class: 'notice info small' }, icon('info', 14), h('span', {}, 'Uploads use the separate videos.insert quota (default 100 uploads/day per project); custom thumbnails cost 50 of the 10,000 daily units. See the YouTube setup guide for the API audit.')));
     }
     if (a.provider === 'facebook') {
       return h('div', { class: 'settings' },
@@ -286,14 +289,18 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       s.post_type !== 'story' ? field('First comment', txt('first_comment', 'Optional')) : null);
   }
 
+  function previewBox(a, t) {
+    return h('div', { id: 'side-prev', class: 'preview-wrap' }, h('div', { class: 'eyebrow' }, 'Preview'), preview(a, t));
+  }
+
   function preview(a, t) {
     const cap = captionFor(a.id);
     const first = st.media[0];
     const mediaEl = first ? (first.kind === 'video' ? h('video', { src: first.url, muted: true, controls: true, preload: 'metadata' }) : h('img', { src: first.url, alt: '' })) : null;
     const p = a.provider;
     if (p === 'youtube') {
-      return h('div', { class: `preview yt ${t.settings.isShort ? 'short' : ''}` }, h('div', { class: 'pv-media' }, mediaEl || h('div', { class: 'pv-empty' }, 'No video')),
-        h('div', { class: 'pv-title' }, t.settings.title || 'Untitled'), h('div', { class: 'pv-sub' }, `${a.name} · ${t.settings.privacy}`), h('div', { class: 'pv-cap' }, cap.slice(0, 160)));
+      return h('div', { class: `preview yt ${t.settings.isShort ? 'short' : ''}` }, h('div', { class: 'pv-media' }, mediaEl || h('div', { class: 'pv-empty' }, icon('play', 20), 'No video')),
+        h('div', { class: 'pv-row' }, avatar(a, 28), h('div', {}, h('div', { class: 'pv-title' }, t.settings.title || 'Untitled'), h('div', { class: 'pv-sub' }, `${a.name} · ${t.settings.privacy}`))), cap ? h('div', { class: 'pv-cap' }, cap.slice(0, 160)) : null);
     }
     if (p === 'facebook') {
       return h('div', { class: 'preview fb' }, h('div', { class: 'pv-head' }, avatar(a, 32), h('div', {}, h('strong', {}, a.name), h('div', { class: 'muted small' }, st.publish_at ? formatLocal(st.publish_at, tz).replace('T', ' ') : 'Now'))),
@@ -301,7 +308,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
         st.media.length > 1 && first?.kind === 'image' ? h('div', { class: 'pv-grid' }, st.media.slice(0, 4).map((md) => h('img', { src: md.url, alt: '' }))) : mediaEl ? h('div', { class: 'pv-media' }, mediaEl) : t.settings.url ? h('div', { class: 'pv-link' }, t.settings.url) : null);
     }
     return h('div', { class: `preview ig ${t.settings.post_type === 'story' ? 'story' : ''}` }, h('div', { class: 'pv-head' }, avatar(a, 28), h('strong', {}, a.username || a.name)),
-      h('div', { class: 'pv-media square' }, mediaEl || h('div', { class: 'pv-empty' }, 'Add media'), st.media.length > 1 ? h('span', { class: 'pv-count' }, `1/${st.media.length}`) : null),
+      h('div', { class: 'pv-media square' }, mediaEl || h('div', { class: 'pv-empty' }, icon('image', 20), 'Add media'), st.media.length > 1 ? h('span', { class: 'pv-count' }, `1/${st.media.length}`) : null),
       t.settings.post_type !== 'story' ? h('div', { class: 'pv-cap' }, h('strong', {}, a.username || a.name), ' ', cap.length > 125 ? `${cap.slice(0, 125)}… more` : cap) : null);
   }
 
@@ -348,12 +355,4 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     try { await api('POST', `/posts/${st.id}/reject`, { reason }); toast('Rejected'); m.close(); onSaved(null); } catch (e) { toast(e.message, 'error'); }
   }
   render();
-}
-
-export function relTime(ms) {
-  const d = ms - Date.now();
-  const abs = Math.abs(d);
-  if (abs < 60000) return 'just now';
-  const u = abs < 3600000 ? [Math.round(abs / 60000), 'min'] : abs < 86400000 ? [Math.round(abs / 3600000), 'h'] : [Math.round(abs / 86400000), 'd'];
-  return d >= 0 ? `in ${u[0]} ${u[1]}` : `${u[0]} ${u[1]} ago`;
 }

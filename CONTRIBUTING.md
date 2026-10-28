@@ -25,7 +25,7 @@ The fake consent screens auto-approve, so “Connect” buttons work locally.
 - `src/providers/*` — platform integrations (publish state machine, OAuth, analytics, error classification)
 - `src/scheduler.js` — job claiming, retries, crash recovery
 - `src/shared/*` — validation + time helpers shared with the browser
-- `public/` — the web UI (vanilla ES modules)
+- `public/` — the web UI (vanilla ES modules, no build step): `js/app.js` shell + hash router, `js/ui.js` shared components (page headers, tabs, menus, empty states, skeletons), `js/icons.js` inline SVG icons, `js/charts.js` SVG charts, `js/theme.js` pre-paint theme switch; `app.css` holds the design tokens (dark default, `[data-theme="light"]`); `fonts/` bundles Inter and JetBrains Mono (OFL). The CSP forbids inline `style="…"` attributes in HTML strings; set styles through `h(..., { style: {...} })` or `el.style`.
 
 ## Adding a platform
 Implement the provider shape described in `src/providers/index.js`, register it, add rules to `src/shared/validate.js`, a settings schema in `src/api/operations.js`, fake endpoints, and tests for each post type + OAuth + error classification.

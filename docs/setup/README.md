@@ -14,6 +14,9 @@ The credentials are encrypted in postlite's database. You don't need to edit `.e
 | Instagram without a Facebook Page | Meta app with the Instagram product ("API setup with Instagram login") | [instagram-standalone.md](instagram-standalone.md) |
 | YouTube | Google Cloud project + OAuth client (Web application) | [youtube.md](youtube.md) |
 
+**Sign-in:** to protect the web UI with Cloudflare Zero Trust Access (email one-time PIN) instead of the admin
+password, follow [cloudflare-access.md](cloudflare-access.md).
+
 You only need the platforms you actually use. For Instagram, choose **one** of the two options: link
 your Instagram professional account to a Facebook Page and use the Meta app, or use Instagram Login
 without a Page.

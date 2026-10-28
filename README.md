@@ -3,10 +3,13 @@
 **A lightweight, self-hosted social media scheduler for YouTube, Instagram and Facebook Pages.**
 One Node.js process, one SQLite file, zero runtime dependencies, no Docker. Agent-first: everything the web UI does is available through a REST API, an MCP server and a CLI, so you can run your socials from Claude, ChatGPT, Cursor, Hermes or a shell script.
 
-<!-- Screenshots: add docs/screenshots/{calendar,composer,analytics}.png -->
-| Calendar | Composer | Analytics |
+| Dashboard (week) | Posts | Post events |
 |---|---|---|
-| _screenshot placeholder_ | _screenshot placeholder_ | _screenshot placeholder_ |
+| ![Dashboard with week calendar](docs/screenshots/desktop-dashboard-week.png) | ![Posts list](docs/screenshots/desktop-posts.png) | ![Publish event timeline](docs/screenshots/desktop-post-events.png) |
+| **Composer** | **Analytics** | **Mobile** |
+| ![Composer with previews](docs/screenshots/desktop-composer.png) | ![Account analytics](docs/screenshots/desktop-analytics-account.png) | ![Mobile dashboard](docs/screenshots/mobile-dashboard.png) |
+
+More in [`docs/screenshots/`](docs/screenshots/) (dark and light theme, desktop and 390 px mobile).
 
 ## Features
 
@@ -15,11 +18,11 @@ One Node.js process, one SQLite file, zero runtime dependencies, no Docker. Agen
   - **Facebook Pages** — Facebook Login with long-lived token exchange and page tokens; text, link, single/multi-photo, video, Reels and Stories; optional first comment.
   - **Instagram** — both *Instagram via Facebook Page* (Facebook Login) and *Instagram API with Instagram Login* (standalone). Image posts, Reels, carousels (2–10 mixed items), Stories, collaborators, Trial Reels, first comment. Container → status polling → `media_publish`, with Meta's limits validated up front (JPEG only, 4:5–1.91:1, caption/hashtag/mention limits…).
 - **Scheduler** — in-process, restart-safe, never double-posts (atomic job claiming, persisted publish phases, crash recovery that asks the platform whether a post went live), retries with exponential backoff, clear transient/permanent/auth error classification, missed-post grace window.
-- **Web UI** — calendar (week / month / list) with drag-and-drop rescheduling, composer with one global caption + per-account overrides, per-platform settings, drag-and-drop media upload with progress, live validation and previews, history with retry, approvals inbox, analytics, timezone + posting slots. Mobile-friendly, dark mode, no build step, no CDN.
+- **Web UI** — a developer-console style dashboard: dark by default with an optional light theme, left sidebar, breadcrumbs, a **New** menu, and an account menu. It has a calendar (week / month / list) with drag-and-drop rescheduling, a posts table with status dots and filters, and post detail pages with tabs (overview, publish-attempt event timeline, metrics). The composer has one global caption plus per-account overrides, per-platform settings, drag-and-drop media upload with progress, live validation and previews. There's also an approvals inbox, analytics charts, and settings for API keys, webhooks, the audit log and platform apps. Other details: toasts, skeleton loaders, visible keyboard focus, a mobile drawer, and Inter + JetBrains Mono bundled locally (OFL). No build step, no CDN.
 - **Analytics** — periodic sync (default every 6 h) + manual refresh: followers/subscribers over time, views/reach/engagement/profile views, YouTube watch time and average view duration, per-post views/likes/comments/shares/saves/reach, for posts published through postlite *and* recent posts fetched from the accounts. Deprecated metrics and missing permissions show up as "not available" instead of failing. Inline SVG charts, top-posts table, CSV export.
 - **Agent-first API** — versioned REST API (`/api/v1`, OpenAPI 3.1 at `/api/v1/openapi.json`), built-in MCP server (stdio + Streamable HTTP at `/mcp`), CLI. Scoped API keys (read / write / publish / analytics / admin), hashed at rest, per-key rate limits, audit log, and **approval mode** (default on) so agent-created posts wait for a human.
 - **Webhooks** — `post.published`, `post.failed`, `post.pending_approval`, `account.needs_reconnect`, `analytics.synced`, HMAC-SHA256 signed, retried with backoff.
-- **Security** — single admin password (scrypt), HttpOnly/SameSite session cookies, CSRF tokens + Origin checks, OAuth `state` + PKCE (Google), OAuth tokens encrypted at rest (AES-256-GCM), unguessable 256-bit media URLs, strict CSP, SSRF guard for media-from-URL.
+- **Security** — single admin password (scrypt), or **Cloudflare Zero Trust Access** (email one-time PIN; postlite verifies the RS256 JWT itself and enforces its own `ALLOWED_EMAILS`, see [the guide](docs/setup/cloudflare-access.md)), HttpOnly/SameSite session cookies, CSRF tokens + Origin checks, OAuth `state` + PKCE (Google), OAuth tokens encrypted at rest (AES-256-GCM), unguessable 256-bit media URLs, strict CSP, SSRF guard for media-from-URL.
 
 ## Resource usage
 
@@ -42,7 +45,7 @@ git clone <your fork url> postlite && cd postlite
 cp .env.example .env
 node bin/postlite.js gen-secrets          # paste SESSION_SECRET and TOKEN_ENC_KEY into .env
 $EDITOR .env                              # PUBLIC_URL (+ optional app credentials; or paste them in Settings → Platform apps)
-node bin/postlite.js set-password         # admin password for the web UI
+node bin/postlite.js set-password         # admin password for the web UI (or use Cloudflare Access, below)
 node bin/postlite.js start                # http://127.0.0.1:4100
 ```
 
@@ -60,6 +63,22 @@ loginctl enable-linger "$USER"
 ### Reverse proxy
 
 `deploy/Caddyfile` (automatic HTTPS) or `deploy/nginx.conf`. Both raise the upload size limit and disable buffering for uploads and MCP. postlite itself listens on `127.0.0.1` only.
+
+### Sign-in with Cloudflare Zero Trust Access (optional)
+
+Instead of the admin password, you can put the UI behind Cloudflare Access (free plan, email one-time PIN) and allow only specific
+addresses. postlite validates the Access JWT on every request (signature, `aud`, `iss`, `exp`/`nbf`) and checks `ALLOWED_EMAILS`. It
+refuses to start if access mode is half-configured. `/m/*`, `/api/v1/*`, `/mcp` and `/healthz` stay reachable for platforms
+and agents through Access *Bypass* rules, and postlite still protects them with media tokens and API keys.
+
+```sh
+AUTH_MODE=cloudflare-access
+CF_ACCESS_TEAM_DOMAIN=myteam.cloudflareaccess.com
+CF_ACCESS_AUD=<Application Audience (AUD) tag>
+ALLOWED_EMAILS=you@example.com,partner@example.com
+```
+
+The click-by-click dashboard guide is in [docs/setup/cloudflare-access.md](docs/setup/cloudflare-access.md).
 
 ### Backups
 
@@ -79,6 +98,7 @@ If a platform isn't configured, its **Connect** button on the Accounts page link
 - [Facebook Pages + Instagram via Facebook Login (Meta app)](docs/setup/facebook-and-instagram.md)
 - [Instagram without a Facebook Page (Instagram Login)](docs/setup/instagram-standalone.md)
 - [YouTube (Google Cloud project + OAuth client)](docs/setup/youtube.md)
+- [Sign-in with Cloudflare Zero Trust Access (email one-time PIN)](docs/setup/cloudflare-access.md)
 
 Redirect URIs are always `PUBLIC_URL/oauth/<provider>/callback`:
 
@@ -110,7 +130,7 @@ Key gotchas (details in the guides):
 - REST: `https://social.example.com/api/v1/...` — `GET /api/v1/openapi.json` (no auth) for the full spec.
 - MCP: `https://social.example.com/mcp` with `Authorization: Bearer <key>` (Streamable HTTP), or `node bin/postlite.js mcp` (stdio; with `POSTLITE_URL` set it bridges to a remote server and lets the agent upload local files).
 - CLI: `POSTLITE_URL=… POSTLITE_API_KEY=… node bin/postlite.js posts create --content "Hi" --accounts <id> --next-slot`.
-- Docs for agents: [`docs/agent-guide.md`](docs/agent-guide.md) (served at `/AGENTS.md`) and `/llms.txt`. Client configs: [`examples/agents/`](examples/agents/).
+- Docs for agents: [`docs/agent-guide.md`](docs/agent-guide.md) (served at `/AGENTS.md` and `/api/v1/agent-guide.md`) and `/llms.txt` (also `/api/v1/llms.txt`, which stays public behind Cloudflare Access). Client configs: [`examples/agents/`](examples/agents/).
 
 Create keys in **Settings → API keys** or `node bin/postlite.js keys create --name "Claude"`. New keys default to **approval mode**.
 
@@ -133,7 +153,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Facebook *Login for Business* configurations (`config_id`) are not used; postlite uses the classic `scope` dialog like Postiz.
 - Instagram accepts only JPEG images via the API; postlite validates instead of converting.
 - Video posters in the UI need `FFMPEG_PATH`; without it a `<video>` preview is shown.
-- Single admin user; no teams/multi-tenant.
+- Single admin role; with Cloudflare Access several allowed emails share it (no per-user permissions, no multi-tenant).
 - MCP over HTTP returns JSON responses (no server-initiated SSE stream).
 
 ## NOTICE

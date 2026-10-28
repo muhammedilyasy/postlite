@@ -138,6 +138,7 @@ async function main() {
       return start();
     }
     case 'set-password': {
+      if (getConfig().auth.mode === 'cloudflare-access') { console.error('AUTH_MODE=cloudflare-access: password login is disabled; sign-in is handled by Cloudflare Access (ALLOWED_EMAILS). Set AUTH_MODE=password to use a password.'); process.exit(1); }
       const pw = a.password ? String(a.password) : await readSecret('New admin password: ');
       if (!pw || pw.length < 10) { console.error('Password must be at least 10 characters.'); process.exit(1); }
       const c = await core();

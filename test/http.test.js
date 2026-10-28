@@ -34,6 +34,12 @@ test('app shell and API require a session; mutations require CSRF header', async
   const ok = await app.api('PATCH', '/settings', { session: s, body: { timezone: 'Europe/Berlin' } });
   assert.equal(ok.status, 200);
   assert.equal(ok.json.settings.timezone, 'Europe/Berlin');
+  const sess = await app.api('GET', '/session', { session: s });
+  assert.equal(sess.json.auth_mode, 'password');
+  assert.equal(sess.json.logout_url, '/login');
+  assert.equal(sess.json.principal.name, 'admin (web UI)');
+  // password mode ignores Access headers entirely: no session => still redirected to /login
+  assert.equal((await fetch(`${app.base}/`, { redirect: 'manual', headers: { 'cf-access-jwt-assertion': 'x.y.z' } })).status, 303);
   const shell = await fetch(`${app.base}/`, { headers: { cookie: s.cookie } });
   assert.equal(shell.status, 200);
   assert.match(shell.headers.get('content-security-policy'), /default-src 'self'/);

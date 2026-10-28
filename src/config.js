@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizeTeamDomain, parseEmails } from './access.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -72,6 +73,17 @@ export function getConfig(env = process.env) {
       intervalHours: num(env.ANALYTICS_INTERVAL_HOURS, 6),
       backfillDays: num(env.ANALYTICS_BACKFILL_DAYS, 30),
       recentPosts: num(env.ANALYTICS_RECENT_POSTS, 25),
+    },
+    // Web UI login: built-in password (default) or Cloudflare Zero Trust Access (docs/setup/cloudflare-access.md).
+    auth: {
+      mode: String(env.AUTH_MODE || 'password').trim().toLowerCase(),
+      teamDomain: normalizeTeamDomain(env.CF_ACCESS_TEAM_DOMAIN),
+      aud: String(env.CF_ACCESS_AUD || '').trim(),
+      allowedEmails: parseEmails(env.ALLOWED_EMAILS),
+      certsUrl: env.CF_ACCESS_CERTS_URL || '', // testing only; default https://<team>/cdn-cgi/access/certs
+      clockSkewSec: num(env.CF_ACCESS_CLOCK_SKEW_SEC, 60),
+      jwksTimeoutMs: num(env.CF_ACCESS_JWKS_TIMEOUT_MS, 5000),
+      jwksMinRefreshMs: num(env.CF_ACCESS_JWKS_MIN_REFRESH_MS, 10000),
     },
     allowPrivateMediaUrls: env.ALLOW_PRIVATE_MEDIA_URLS === '1',
     webhooks: { backoffMs: num(env.WEBHOOK_BACKOFF_MS, 30000), maxAttempts: num(env.WEBHOOK_MAX_ATTEMPTS, 6) },

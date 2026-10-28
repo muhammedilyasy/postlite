@@ -120,3 +120,24 @@ test('schema validator gives actionable messages', () => {
   assert.ok(errs.some((e) => /Unknown field "scheduled_at"/.test(e)));
   assert.ok(validate(s, { targets: [], publish_atx: 1 }).some((e) => /did you mean "publish_at"/.test(e)));
 });
+
+test('web UI: every ES module parses, imports resolve to shipped files, no inline style attributes (CSP)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const path = await import('node:path');
+  const dir = path.join(import.meta.dirname, '..', 'public', 'js');
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js'));
+  assert.ok(files.length >= 9);
+  for (const f of files) {
+    const file = path.join(dir, f);
+    execFileSync(process.execPath, ['--check', file]); // throws on syntax errors
+    const src = fs.readFileSync(file, 'utf8');
+    for (const [, spec] of src.matchAll(/^import[^'"]*['"]([^'"]+)['"]/gm)) {
+      const target = spec.startsWith('/assets/shared/') ? path.join(import.meta.dirname, '..', 'src', 'shared', path.basename(spec)) : path.join(dir, spec);
+      assert.ok(fs.existsSync(target), `${f} imports missing ${spec}`);
+    }
+    assert.doesNotMatch(src, /style="/, `${f}: inline style="" is blocked by the CSP`);
+  }
+  const css = fs.readFileSync(path.join(import.meta.dirname, '..', 'public', 'app.css'), 'utf8');
+  for (const font of css.matchAll(/url\("\/assets\/(fonts\/[^"]+)"\)/g)) assert.ok(fs.existsSync(path.join(import.meta.dirname, '..', 'public', font[1])), font[1]);
+  assert.match(css, /\[data-theme="light"\]/);
+});

@@ -1,6 +1,7 @@
 # postlite
 
 > Agents: read `/AGENTS.md` (workflows; docs/agent-guide.md in the repo) and `/api/v1/openapi.json` (full API). MCP endpoint: `/mcp` (Streamable HTTP, `Authorization: Bearer <API key>`), or stdio via `node bin/postlite.js mcp`.
+> If the instance sits behind Cloudflare Access, `/AGENTS.md` and `/llms.txt` need a browser login; use the public mirrors `/api/v1/agent-guide.md` and `/api/v1/llms.txt` instead.
 
 postlite is a lightweight, self-hosted social media scheduler for YouTube, Facebook Pages and Instagram (via Facebook Login or Instagram Login). It runs as one Node.js process with SQLite. Everything in the web UI is also available through the REST API, the MCP server and the CLI.
 

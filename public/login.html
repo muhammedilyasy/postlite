@@ -1,23 +1,29 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>postlite · Sign in</title>
+<meta name="color-scheme" content="dark light">
+<title>Sign in · postlite</title>
 <link rel="icon" href="/assets/favicon.svg">
 <link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/js/theme.js"></script>
 </head>
-<body class="center-page">
-  <form class="card narrow login" method="post" action="/login">
-    <div class="brand big"><span class="logo">◆</span> postlite</div>
-    <p class="muted">Lightweight scheduler for YouTube, Instagram &amp; Facebook</p>
+<body class="auth-page">
+<main class="auth-wrap">
+  <a class="auth-brand" href="/"><svg class="logo-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 16.5V7.5h4.6a3 3 0 0 1 0 6H8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>postlite</span></a>
+  <form class="auth-card" method="post" action="/login">
+    <h1>Sign in</h1>
+    <p class="muted">Enter the admin password for this postlite instance.</p>
     {{ERROR}}
     {{SETUP}}
     <input type="hidden" name="csrf" value="{{CSRF}}">
-    <label>Password
-      <input type="password" name="password" autocomplete="current-password" autofocus required>
+    <label class="field"><span>Password</span>
+      <input class="input" type="password" name="password" autocomplete="current-password" autofocus required>
     </label>
     <button class="btn primary block" type="submit">Sign in</button>
   </form>
+  <p class="auth-foot">Self-hosted scheduler for YouTube, Instagram &amp; Facebook</p>
+</main>
 </body>
 </html>

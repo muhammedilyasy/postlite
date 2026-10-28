@@ -209,6 +209,11 @@ const MIGRATIONS = [
   ALTER TABLE groups ADD COLUMN created_by TEXT;
   ALTER TABLE groups ADD COLUMN approval_note TEXT;
   `,
+  `
+  -- Cloudflare Access mode: a session belongs to one verified email.
+  ALTER TABLE sessions ADD COLUMN email TEXT;
+  ALTER TABLE sessions ADD COLUMN access_exp INTEGER;
+  `,
 ];
 
 export function openDb(file) {

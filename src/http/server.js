@@ -12,6 +12,7 @@ import { coerceQuery } from '../api/schema.js';
 import { openapi } from '../api/openapi.js';
 import { createMcp } from '../mcp.js';
 import { SESSION_PRINCIPAL } from '../apikeys.js';
+import { renderMarkdown } from '../markdown.js';
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 const SESSION_DAYS = 14;
@@ -143,6 +144,22 @@ export function createServer(core) {
     send(res, status, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/app.css"><title>${esc(title)}</title><body class="center-page"><div class="card narrow"><h1>${esc(title)}</h1><p>${body}</p><p><a class="btn primary" href="${esc(link)}">Continue</a></p></div></body>`, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP });
   }
 
+  /** Setup guides (docs/setup/*.md) rendered as HTML so they work without GitHub. Public, read-only. */
+  function serveGuide(res, name) {
+    const base = name === '' || name === 'index' || name === 'README' ? 'README' : name;
+    if (!/^[A-Za-z0-9-]+$/.test(base)) return send(res, 404, 'Not found', { 'content-type': 'text/plain' });
+    const file = path.join(ROOT, 'docs', 'setup', `${base}.md`);
+    if (!fs.existsSync(file)) return send(res, 404, 'Not found', { 'content-type': 'text/plain' });
+    const mapLink = (h) => {
+      const m = /^(?:\.\/)?([\w-]+)\.md(#[\w-]*)?$/.exec(h);
+      if (m) return `/docs/setup/${m[1] === 'README' ? '' : m[1]}${m[2] || ''}`;
+      return h;
+    };
+    const { html, title } = renderMarkdown(fs.readFileSync(file, 'utf8'), { mapLink });
+    const page = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/assets/app.css"><link rel="icon" href="/favicon.ico"><title>${esc(title || 'Setup guide')} · postlite</title><body class="doc-page"><nav class="doc-nav"><a href="/">◆ postlite</a> · <a href="/docs/setup/">Setup guides</a> · <a href="/#/settings/apps">Platform apps</a></nav><article class="doc">${html}</article></body></html>`;
+    return send(res, 200, page, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP, 'cache-control': 'no-cache' });
+  }
+
   async function handleApi(req, res, url) {
     const p = url.pathname;
     if (p === '/api/v1/openapi.json' && req.method === 'GET') return send(res, 200, openapi(cfg, VERSION), { 'access-control-allow-origin': '*' });
@@ -253,6 +270,8 @@ export function createServer(core) {
       if (p === '/mcp' || p === '/mcp/') return await handleMcp(req, res);
       if (p === '/llms.txt') return serveFile(res, path.join(ROOT, 'docs', 'llms.txt'), { req });
       if (p === '/AGENTS.md' || p === '/docs/agent-guide.md') return serveFile(res, fs.existsSync(path.join(ROOT, 'AGENTS.md')) ? path.join(ROOT, 'AGENTS.md') : path.join(ROOT, 'docs', 'agent-guide.md'), { req });
+      let gm;
+      if ((gm = /^\/docs\/setup\/?(?:([^/]*?)(?:\.md)?)?$/.exec(p)) && (req.method === 'GET' || req.method === 'HEAD')) return serveGuide(res, gm[1] || '');
       if (p.startsWith('/assets/shared/')) return serveFile(res, path.join(ROOT, 'src', 'shared', path.basename(p)), { req });
       if (p.startsWith('/assets/')) {
         const f = path.join(ROOT, 'public', path.normalize(p.slice('/assets/'.length)).replace(/^(\.\.[/\\])+/, ''));
@@ -292,7 +311,10 @@ export function createServer(core) {
           const r = core.oauth.start(m[1], { reconnectId: url.searchParams.get('reconnect') || null });
           core.audit.record({ principal: SESSION_PRINCIPAL, via: 'ui', operation: 'oauth_start', target: m[1], status: 200 });
           return send(res, 302, '', { location: r.url });
-        } catch (e) { return htmlMessage(res, e.status || 500, 'Cannot connect', esc(e.message), '/#/accounts'); }
+        } catch (e) {
+          if (e.status === 409 && e.extra?.app) return send(res, 302, '', { location: `/#/settings/apps/${e.extra.app}` });
+          return htmlMessage(res, e.status || 500, 'Cannot connect', esc(e.message), '/#/accounts');
+        }
       }
       if ((m = /^\/oauth\/([\w-]+)\/callback$/.exec(p)) && req.method === 'GET') {
         try {

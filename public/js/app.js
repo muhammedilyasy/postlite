@@ -39,7 +39,7 @@ async function route() {
       case 'approvals': return await renderApprovals(view);
       case 'history': return await renderHistory(view, params);
       case 'analytics': return await renderAnalytics(view, params);
-      case 'settings': return await renderSettings(view);
+      case 'settings': return await renderSettings(view, { tab: parts[1] || '', focus: parts[2] || null });
       default: return await renderCalendar(view);
     }
   } catch (e) {

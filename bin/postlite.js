@@ -30,6 +30,8 @@ Server / admin (run on the server, uses .env):
   postlite gen-secrets                   Print fresh SESSION_SECRET and TOKEN_ENC_KEY values
   postlite keys create --name NAME [--scopes read,write,publish,analytics,admin] [--no-approval] [--rate 120]
   postlite keys list | postlite keys revoke <id>
+  postlite apps list | apps set <meta|instagram|google> --id ID   (secret: prompt or stdin)
+  postlite apps clear <app> | apps test <app>   Platform developer-app credentials (Settings → Platform apps)
   postlite mcp                           MCP over stdio (needs POSTLITE_API_KEY; with POSTLITE_URL it bridges to a remote server)
 
 API client (needs POSTLITE_API_KEY, optional POSTLITE_URL, default http://127.0.0.1:4100):
@@ -160,6 +162,24 @@ async function main() {
       } else if (sub === 'list') print(c.apiKeys.list());
       else if (sub === 'revoke') { if (!c.apiKeys.revoke(a._[1])) { console.error('Not found'); process.exitCode = 1; } else console.error('Revoked'); }
       else console.error(HELP);
+      return c.stop();
+    }
+    case 'apps': {
+      const c = await core();
+      const [sub, app] = a._;
+      const audit = (operation, detail) => c.audit.record({ principal: { type: 'cli', name: 'cli' }, via: 'cli', operation, target: app, detail });
+      const view = (s) => ({ app: s.app, status: s.status, client_id: s.client_id, secret: s.secret_hint ? `saved • ${s.secret_hint}` : null, redirect_uris: s.redirect_uris.map((u) => u.uri), last_test: s.last_test });
+      try {
+        if (sub === 'list' || !sub) print(c.apps.list().map(view));
+        else if (sub === 'set') {
+          if (!a.id) throw new Error('Usage: postlite apps set <meta|instagram|google> --id APP_ID   (the secret is read from a prompt or stdin)');
+          const secret = await readSecret(`${app} app secret (leave empty to keep the saved one): `);
+          print(view(c.apps.set(app, { client_id: String(a.id), client_secret: secret || undefined })));
+          audit('set_platform_app', { app, client_id: String(a.id), client_secret: secret ? '[redacted]' : undefined });
+        } else if (sub === 'clear') { print(view(c.apps.clear(app))); audit('clear_platform_app', { app }); }
+        else if (sub === 'test') print(await c.apps.test(app));
+        else console.error(HELP);
+      } catch (e) { console.error(e.message); process.exitCode = 1; }
       return c.stop();
     }
     case 'mcp': {

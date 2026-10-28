@@ -11,6 +11,7 @@ import { createApiKeys, createAudit } from './apikeys.js';
 import { createWebhooks } from './webhooks.js';
 import { isValidTimezone, WEEKDAYS } from './shared/time.js';
 import { createOAuth } from './oauth.js';
+import { createApps } from './apps.js';
 
 export function makeLogger(level = process.env.LOG_LEVEL || 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -24,6 +25,8 @@ export function createCore(cfg, { log = makeLogger() } = {}) {
   fs.mkdirSync(cfg.dataDir, { recursive: true });
   const db = openDb(cfg.dbFile);
   const cipher = makeCipher(cfg.tokenEncKey);
+  // Installs live getters for cfg.meta / cfg.instagram / cfg.google (DB overrides .env, no restart).
+  const apps = createApps({ db, cfg, cipher });
   const webhooks = createWebhooks({ db, cipher, log, ...(cfg.webhooks || {}) });
   const media = createMedia({ db, cfg });
   const integrations = createIntegrations({ db, cfg, cipher, log, onNeedsReconnect: (d) => webhooks.emit('account.needs_reconnect', d) });
@@ -71,7 +74,7 @@ export function createCore(cfg, { log = makeLogger() } = {}) {
   };
 
   const core = {
-    cfg, db, cipher, log, media, integrations, posts, scheduler, analytics, apiKeys, audit, webhooks, settings,
+    cfg, db, cipher, log, apps, media, integrations, posts, scheduler, analytics, apiKeys, audit, webhooks, settings,
     startBackground() {
       const missed = scheduler.boot();
       if (missed) log('warn', `${missed} post(s) missed their schedule while the server was down`);

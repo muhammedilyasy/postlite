@@ -41,7 +41,7 @@ Requirements: **Node.js ≥ 22.13** (uses the built-in `node:sqlite`). Nothing e
 git clone <your fork url> postlite && cd postlite
 cp .env.example .env
 node bin/postlite.js gen-secrets          # paste SESSION_SECRET and TOKEN_ENC_KEY into .env
-$EDITOR .env                              # PUBLIC_URL + app credentials (see below)
+$EDITOR .env                              # PUBLIC_URL (+ optional app credentials; or paste them in Settings → Platform apps)
 node bin/postlite.js set-password         # admin password for the web UI
 node bin/postlite.js start                # http://127.0.0.1:4100
 ```
@@ -67,29 +67,43 @@ Everything lives in `data/`: `data/postlite.sqlite` + `data/uploads/`. Run `depl
 
 ## Platform setup
 
-Redirect URIs are always `PUBLIC_URL/oauth/<provider>/callback`; the Accounts page shows the exact values.
+postlite publishes through **your own developer apps**. Create each app once, then paste its ID and secret into
+**Settings → Platform apps** in the web UI. Secrets are encrypted with `TOKEN_ENC_KEY`, never shown again (only
+`saved • …last4`), and take effect immediately with no restart. Each card shows the exact redirect URI(s) for
+your `PUBLIC_URL` with copy buttons, the scopes, products and APIs to enable, a checklist and a **Test** button.
+If a platform isn't configured, its **Connect** button on the Accounts page links to that card.
 
-### Meta app (Facebook Pages + Instagram)
+**Step-by-step guides** (checked against the official Meta and Google docs on 2026-10-28; also served by your instance at `/docs/setup/`):
 
-1. Go to <https://developers.facebook.com/apps> → **Create app** (type *Business*, or the use cases *Manage everything on your Page* and *Manage messaging & content on Instagram*).
-2. Add **Facebook Login** (or *Facebook Login for Business*). In its settings add these **Valid OAuth Redirect URIs**:
-   - `https://social.example.com/oauth/facebook/callback`
-   - `https://social.example.com/oauth/instagram/callback`
-3. Permissions requested by postlite (same set as Postiz):
-   - Facebook Pages: `pages_show_list`, `business_management`, `pages_manage_posts`, `pages_manage_engagement`, `pages_read_engagement`, `read_insights`
-   - Instagram via Facebook: `instagram_basic`, `pages_show_list`, `pages_read_engagement`, `business_management`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_insights`
-4. Put the app id/secret into `META_APP_ID` / `META_APP_SECRET`. `GRAPH_API_VERSION` defaults to `v25.0`.
-5. **Development mode is enough for your own accounts.** Users with a role on the app (admin/developer/tester) can grant all permissions without App Review. Your Facebook user must manage the Page, and the Instagram account must be a *professional* (Business/Creator) account linked to that Page. App Review (and Business Verification) is only needed if other people will connect their accounts.
-6. **Instagram API with Instagram Login (standalone, no Facebook Page needed):** in the app dashboard open *Instagram → API setup with Instagram business login*, add the redirect URI `https://social.example.com/oauth/instagram-standalone/callback`, and copy the *Instagram app ID/secret* (different from the Meta app id) into `INSTAGRAM_APP_ID` / `INSTAGRAM_APP_SECRET`. Scopes: `instagram_business_basic`, `instagram_business_content_publish`, `instagram_business_manage_comments`, `instagram_business_manage_insights`. In development mode add your Instagram account under *App roles → Instagram testers* and accept the invite in the Instagram app (Settings → Apps and websites). Long-lived tokens (60 days) are refreshed automatically.
+- [Setup index + 10-minute quickstart](docs/setup/README.md)
+- [Facebook Pages + Instagram via Facebook Login (Meta app)](docs/setup/facebook-and-instagram.md)
+- [Instagram without a Facebook Page (Instagram Login)](docs/setup/instagram-standalone.md)
+- [YouTube (Google Cloud project + OAuth client)](docs/setup/youtube.md)
 
-### Google Cloud (YouTube)
+Redirect URIs are always `PUBLIC_URL/oauth/<provider>/callback`:
 
-1. <https://console.cloud.google.com> → create a project → **APIs & Services → Library** → enable **YouTube Data API v3** and **YouTube Analytics API**.
-2. **OAuth consent screen** (Google Auth Platform): user type *External*, app name, support email, and scopes `youtube.upload`, `youtube.readonly`, `yt-analytics.readonly`. Add your Google account as a *test user*.
-3. **Credentials → Create credentials → OAuth client ID → Web application**, authorized redirect URI `https://social.example.com/oauth/youtube/callback`. Copy id/secret to `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`.
-4. **Important:** while the consent screen is in *Testing*, Google expires refresh tokens after 7 days (you would need to reconnect weekly). For personal use, set the publishing status to *In production*; you will see an "unverified app" warning that you can click through for your own account.
-5. **Audit / private uploads:** videos uploaded through API projects that have not passed the *YouTube API Services audit* are locked to **private**. Request the audit at <https://support.google.com/youtube/contact/yt_api_form> to publish public/unlisted videos.
-6. **Quota:** per current Google docs uploads use a separate `videos.insert` bucket (default 100 uploads/day per project); other calls share 10,000 units/day (custom thumbnails cost 50). postlite surfaces quota errors as clear, non-retried failures.
+| App | Redirect URI(s) | Credentials |
+| --- | --- | --- |
+| Meta | `…/oauth/facebook/callback`, `…/oauth/instagram/callback` | App ID / App Secret |
+| Instagram Login | `…/oauth/instagram-standalone/callback` | Instagram app ID / secret (not the Meta App ID) |
+| Google | `…/oauth/youtube/callback` | OAuth Client ID / secret (Web application) |
+
+**`.env` fallback.** You can still set `META_APP_ID`/`META_APP_SECRET`, `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET` and
+`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `.env`. Values saved in the UI override them; **Clear** returns to `.env`.
+Admin API keys can manage credentials with `list_platform_apps`, `set_platform_app`, `clear_platform_app` and `test_platform_app`
+(REST `/api/v1/platform-apps`, MCP, CLI `call`). On the server, use `node bin/postlite.js apps set google --id …`; it reads the secret from
+a prompt or stdin. Approval-mode keys can't change credentials, and the audit log records changes with the secret redacted.
+
+Key gotchas (details in the guides):
+
+- **Meta:** in *Use cases → Customize*, add every optional permission postlite requests, or the login dialog shows "Invalid Scopes".
+  Development mode is enough for accounts whose owners have a role on the app. App Review + Business Verification is needed only
+  when people without a role connect.
+- **Instagram:** the account must be Business/Creator; for the Facebook Login variant it must be linked to a Page you manage.
+- **Google:** in *Testing* status refresh tokens expire after 7 days. For personal use, publish the app (*In production*) and click through the
+  unverified-app screen. Uploads use their own `videos.insert` bucket (default 100/day); other calls share 10,000 units/day.
+  Google's current `videos.insert` reference says uploads from unverified projects are no longer locked to private. If yours are, request the
+  [API audit](https://support.google.com/youtube/contact/yt_api_form).
 
 ## Using it from AI agents
 

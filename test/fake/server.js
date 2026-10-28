@@ -31,6 +31,8 @@ export function createFakeState() {
     published: [],         // {platform, kind, id, data}
     fetchedMedia: [],
     hangOnce: null,        // path regex: drop the connection once (simulates unknown outcome)
+    // Developer-app credentials the fake platforms accept (client_credentials, test exchanges, Google code exchange).
+    apps: { meta: { id: 'meta-app', secret: 'meta-secret' }, instagram: { id: 'ig-app', secret: 'ig-secret' }, google: { id: 'g-client', secret: 'g-secret' } },
   };
 }
 
@@ -78,6 +80,12 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
 
     // OAuth (FB)
     if (path === '/oauth/access_token') {
+      if (q.get('grant_type') === 'client_credentials') {
+        const a = state.apps.meta;
+        if (q.get('client_id') !== a.id) return graphErr(res, 400, 101, 'Error validating application. Invalid application ID.');
+        if (q.get('client_secret') !== a.secret) return graphErr(res, 400, 1, 'Error validating client secret.');
+        return json(res, 200, { access_token: `${a.id}|app-token`, token_type: 'bearer' });
+      }
       if (q.get('grant_type') === 'fb_exchange_token') return json(res, 200, { access_token: 'user-long', token_type: 'bearer', expires_in: 5183944 });
       if (q.get('code') === 'bad') return graphErr(res, 400, 100, 'Invalid verification code format.');
       return json(res, 200, { access_token: 'user-short', token_type: 'bearer', expires_in: 3600 });
@@ -85,6 +93,7 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
     if (prefix === 'ig' && parts[1] === 'access_token') return json(res, 200, { access_token: 'ig-long', token_type: 'bearer', expires_in: 5184000 });
     if (prefix === 'ig' && parts[1] === 'refresh_access_token') return json(res, 200, { access_token: 'ig-long-2', token_type: 'bearer', expires_in: 5184000 });
 
+    if (path === '/app' && tok === `${state.apps.meta.id}|app-token`) return json(res, 200, { id: state.apps.meta.id, name: 'Fake Meta App' });
     if (state.revoked.has(tok)) return graphErr(res, 400, 190, 'Error validating access token: The session has been invalidated because the user changed their password.', 460);
     if (!state.tokens.has(tok) && tok !== 'user-short') return graphErr(res, 400, 190, 'Invalid OAuth access token - Cannot parse access token');
 
@@ -256,6 +265,10 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
     }
     if (seg === 'fb' || seg === 'ig') return graph(req, res, url, q, body, seg);
     if (seg === 'igapi' && url.pathname === '/igapi/oauth/access_token') {
+      const a = state.apps.instagram;
+      if (body.client_id !== a.id) return json(res, 400, { error_type: 'OAuthException', code: 400, error_message: 'Invalid platform app' });
+      if (body.client_secret !== a.secret) return json(res, 400, { error_type: 'OAuthException', code: 400, error_message: 'Error validating client secret.' });
+      if (body.code !== 'fb-code') return json(res, 400, { error_type: 'OAuthException', code: 400, error_message: 'Invalid authorization code' });
       return json(res, 200, { access_token: 'ig-short', user_id: 'igs1', permissions: ['instagram_business_basic', 'instagram_business_content_publish', 'instagram_business_manage_comments', 'instagram_business_manage_insights'] });
     }
     if (seg === 'rupload') {
@@ -267,6 +280,7 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
     }
     if (seg === 'gtoken') {
       if (body.grant_type === 'authorization_code') {
+        if (body.client_id !== state.apps.google.id || body.client_secret !== state.apps.google.secret) return json(res, 401, { error: 'invalid_client', error_description: 'Unauthorized' });
         if (body.code !== 'google-code') return json(res, 400, { error: 'invalid_grant', error_description: 'Bad Request' });
         state.tokens.add('ya29.initial');
         return json(res, 200, { access_token: 'ya29.initial', refresh_token: '1//refresh', expires_in: 3599, token_type: 'Bearer', scope: 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly' });
@@ -361,6 +375,10 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
         env: () => ({
           GRAPH_BASE_URL: `${base}/fb`, FACEBOOK_WWW_URL: `${base}/www`, IG_GRAPH_BASE_URL: `${base}/ig`, IG_API_BASE_URL: `${base}/igapi`, IG_WWW_URL: `${base}/igwww`,
           GOOGLE_AUTH_URL: `${base}/gauth`, GOOGLE_TOKEN_URL: `${base}/gtoken`, YOUTUBE_API_BASE_URL: `${base}/yt`, YOUTUBE_ANALYTICS_BASE_URL: `${base}/yta`,
+          // Credentials the fake accepts (state.apps); real servers use Settings → Platform apps or .env.
+          META_APP_ID: state.apps.meta.id, META_APP_SECRET: state.apps.meta.secret,
+          INSTAGRAM_APP_ID: state.apps.instagram.id, INSTAGRAM_APP_SECRET: state.apps.instagram.secret,
+          GOOGLE_CLIENT_ID: state.apps.google.id, GOOGLE_CLIENT_SECRET: state.apps.google.secret,
         }),
       });
     });

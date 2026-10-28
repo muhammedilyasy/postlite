@@ -23,7 +23,7 @@ Create keys in **Settings → API keys** or `node bin/postlite.js keys create --
 | `write` | create/edit drafts, upload/delete media, duplicate/delete posts |
 | `publish` | schedule, reschedule, post now, retry |
 | `analytics` | analytics reads, CSV export, `sync_analytics` |
-| `admin` | API keys, webhooks, settings, approvals, connect/disconnect accounts, audit log |
+| `admin` | API keys, webhooks, settings, approvals, connect/disconnect accounts, platform app credentials, audit log |
 
 **Approval mode (default ON for new keys):** anything that would publish (`create_post` with mode schedule/now/next_slot, `schedule_post`, `publish_post_now`, `retry_post`, editing a scheduled post) puts the post in `pending_approval`. A human approves under **Approvals** (or a non-approval admin key calls `approve_post`). Rejections come back as drafts with `approval_note` explaining what to change — read it, fix with `update_post`, resubmit. Keys in approval mode can never approve posts or mint keys without approval mode. `reschedule_post` only moves the time and keeps the approval state.
 
@@ -62,6 +62,8 @@ Each key has a rate limit (default 120 req/min → HTTP 429 + `Retry-After`). Ev
 **Upload a video and schedule a Short** — `upload_media_from_url {url}` → confirm `height > width` and `duration ≤ 180` → `validate_post` with YouTube `{title, isShort: true}` (+ Instagram target = Reel) → `create_post {mode: "next_slot"}`. (MCP prompt: `schedule_short`.)
 
 **Recover failures** — `list_posts {status: "failed"}` → `get_post` → read `targets[].error`: content errors → `update_post` then `retry_post`; "reconnect" → `get_connect_url {provider, reconnect_account_id}` and ask the human; "may have been published" → **do not retry**, ask the human to check the platform.
+
+**Platform not configured** — `get_connect_url` returns 409 "not configured" → `list_platform_apps` shows the status, the exact redirect URIs, scopes and the guide link (`/docs/setup/...`). Ask the human to create the developer app and paste the credentials in **Settings → Platform apps**. Don't ask for secrets in chat. `set_platform_app` exists for automation but stores whatever you send, and approval-mode keys can't use it. After saving, `test_platform_app {app}` checks the credentials without a user login (`verified:false` = checked on first connect).
 
 **Weekly analytics report** — `sync_analytics` → `get_analytics_overview {from: "<7 days ago>"}` → `get_top_posts {sort: "views", limit: 5}`. Metrics a platform cannot provide are listed under `sync.unavailable` — report them as "not available". (MCP prompt: `weekly_report`.)
 

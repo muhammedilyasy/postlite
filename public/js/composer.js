@@ -266,7 +266,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
         chk('notifySubscribers', 'Notify subscribers'),
         chk('isShort', 'This is a Short (vertical, ≤ 3 min)'),
         field('Custom thumbnail', h('div', { class: 'row gap' }, thumb ? h('img', { class: 'thumb-prev', src: thumb.url, alt: '' }) : null, h('button', { class: 'btn small', onclick: () => thumbInput.click() }, thumb ? 'Replace' : 'Upload JPEG/PNG'), thumb ? h('button', { class: 'btn small ghost', onclick: () => set(t, 'thumbnail', null, true) }, 'Remove') : null, thumbInput)),
-        h('div', { class: 'notice info small' }, 'Note: videos uploaded through an unverified Google Cloud project stay private until the project passes Google\'s API audit. Uploads use the separate videos.insert quota (default 100 uploads/day per project); custom thumbnails cost 50 of the 10,000 daily units.'));
+        h('div', { class: 'notice info small' }, 'Note: if YouTube locks uploads from your unaudited Google Cloud project as private, request the YouTube API audit (see the setup guide). Uploads use the separate videos.insert quota (default 100 uploads/day per project); custom thumbnails cost 50 of the 10,000 daily units.'));
     }
     if (a.provider === 'facebook') {
       return h('div', { class: 'settings' },

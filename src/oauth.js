@@ -2,6 +2,7 @@
 import { randomToken, pkcePair } from './crypto.js';
 import { getProvider, providers } from './providers/index.js';
 import { HttpError } from './media.js';
+import { appForProvider } from './apps.js';
 
 const STATE_TTL = 30 * 60000;
 
@@ -12,13 +13,13 @@ export function createOAuth(core) {
   return {
     redirectUri,
     available() {
-      return Object.values(providers).map((p) => ({ provider: p.id, label: p.label, configured: p.isConfigured(cfg), scopes: p.scopes, redirect_uri: redirectUri(p.id) }));
+      return Object.values(providers).map((p) => ({ provider: p.id, label: p.label, configured: p.isConfigured(cfg), app: appForProvider(p.id), scopes: p.scopes, redirect_uri: redirectUri(p.id) }));
     },
 
     start(provider, { autoSelect = false, reconnectId = null } = {}) {
       const p = providers[provider];
       if (!p) throw new HttpError(400, `Unknown provider "${provider}". Use one of: ${Object.keys(providers).join(', ')}`);
-      if (!p.isConfigured(cfg)) throw new HttpError(409, `${p.label} is not configured on this server. Set the app ID/secret env vars (see README) and restart.`);
+      if (!p.isConfigured(cfg)) throw new HttpError(409, `${p.label} is not configured on this server. Add the developer-app credentials in Settings → Platform apps (or set_platform_app); no restart needed.`, { app: appForProvider(provider) });
       db.run('DELETE FROM oauth_states WHERE created_at < ?', Date.now() - STATE_TTL);
       const state = randomToken(24);
       const pk = pkcePair();

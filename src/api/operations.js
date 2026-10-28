@@ -11,6 +11,7 @@ import { parseLocal, nextSlots, formatLocal } from '../shared/time.js';
 import { SCOPES, SCOPE_HELP } from '../apikeys.js';
 import { WEBHOOK_EVENTS } from '../webhooks.js';
 import { providers } from '../providers/index.js';
+import { APP_IDS } from '../apps.js';
 
 const DAY = 86400000;
 const S = (o) => ({ type: 'object', additionalProperties: false, ...o });
@@ -23,7 +24,7 @@ export const SETTINGS_SCHEMAS = {
   youtube: S({
     properties: {
       title: str('Video title (2–100 chars, required to publish). No < or >.', { maxLength: 100 }),
-      privacy: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Default public. Unverified Google projects can only upload private videos until audited.' },
+      privacy: { type: 'string', enum: ['public', 'unlisted', 'private'], description: 'Default public. If YouTube locks uploads from an unaudited Google project as private, request the YouTube API audit (docs/setup/youtube.md).' },
       madeForKids: { type: 'string', enum: ['yes', 'no'], description: 'COPPA self-declaration. Default "no".' },
       notifySubscribers: { type: 'boolean', description: 'Send notification to subscribers. Default true.' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Tags; total length ≤ 500 chars (tags with spaces count +2).' },
@@ -222,7 +223,7 @@ function platformInfo(core) {
 }
 
 const RULES = {
-  youtube: ['Exactly one video (MP4/MOV).', 'settings.title is required (2–100 chars).', 'Description = caption, ≤ 5000 chars, no < or >.', 'Shorts: vertical/square and ≤ 3 minutes.', 'Uploads count against YouTube\'s videos.insert quota bucket (default 100 uploads/day per Google Cloud project); thumbnails.set costs 50 of the 10,000 daily units.', 'Unverified Google Cloud projects upload as private until they pass the API audit.'],
+  youtube: ['Exactly one video (MP4/MOV).', 'settings.title is required (2–100 chars).', 'Description = caption, ≤ 5000 chars, no < or >.', 'Shorts: vertical/square and ≤ 3 minutes.', 'Uploads count against YouTube\'s videos.insert quota bucket (default 100 uploads/day per Google Cloud project); thumbnails.set costs 50 of the 10,000 daily units.', 'If YouTube locks uploads from your unaudited Google Cloud project as private, request the YouTube API audit (Google\'s current docs say unverified projects are no longer restricted to private).'],
   facebook: ['Text, link, 1–10 photos, or one video per feed post (no photo+video mix).', 'Reels: one vertical video 3–90 s.', 'Stories: at least one photo/video; caption not shown.', 'Photos ≤ 4 MB.'],
   instagram: ['At least one media item; JPEG images only.', 'Carousel: 2–10 items (images and videos ≤ 60 s).', 'Single video becomes a Reel (3 s–15 min).', 'Feed images aspect ratio 4:5 to 1.91:1.', 'Caption ≤ 2200 chars, ≤ 30 hashtags, ≤ 20 @mentions.', 'Stories: each item becomes its own story (videos ≤ 60 s).', 'Media must be reachable by Meta at PUBLIC_URL over HTTPS.'],
 };
@@ -686,6 +687,41 @@ export const operations = [
       return { deliveries: core.webhooks.deliveries(w.id, 1) };
     },
   },
+  // ---- platform apps (developer-app credentials) ----
+  {
+    name: 'list_platform_apps', method: 'GET', path: '/platform-apps', scope: 'admin', tags: ['platform-apps'], readOnly: true,
+    summary: 'Developer-app credential status per platform (no secrets)',
+    description: 'For each platform app (meta = Facebook Pages + Instagram via Facebook Login, instagram = Instagram Login, google = YouTube): status (not_configured | configured | configured_env), client/app id, last 4 chars of the secret, exact redirect URIs to register, scopes, required products/APIs, setup steps and the last Test result. Secrets are never returned.',
+    input: S({ properties: {} }),
+    handler: (core) => ({ platform_apps: core.apps.list() }),
+  },
+  {
+    name: 'set_platform_app', method: 'POST', path: '/platform-apps/{app}', scope: 'admin', tags: ['platform-apps'],
+    summary: 'Save developer-app credentials for a platform',
+    description: 'Stores the app/client id and secret (encrypted at rest). Overrides .env; takes effect immediately for new connections, token refreshes and publishing. Omit client_secret to change only the id of an app already saved here. Approval-mode keys cannot use this. Prefer the web UI (Settings → Platform apps) so the secret never passes through an agent. Example: {"app":"google","client_id":"123-abc.apps.googleusercontent.com","client_secret":"..."}.',
+    input: S({ required: ['app', 'client_id'], properties: { app: { type: 'string', enum: APP_IDS }, client_id: str('Meta App ID / Instagram App ID / Google OAuth Client ID.'), client_secret: str('App secret / client secret. Write-only; never returned.') } }),
+    handler: (core, i, p) => {
+      if (p.approval) throw new HttpError(403, 'Approval-mode keys cannot change platform app credentials.');
+      return { platform_app: core.apps.set(i.app, i) };
+    },
+  },
+  {
+    name: 'clear_platform_app', method: 'DELETE', path: '/platform-apps/{app}', scope: 'admin', tags: ['platform-apps'], destructive: true,
+    summary: 'Remove saved developer-app credentials',
+    description: 'Deletes the credentials saved in postlite for this app; the .env values (if any) apply again. Connected accounts keep their tokens, but YouTube/Instagram-Login token refresh needs a configured app.',
+    input: S({ required: ['app'], properties: { app: { type: 'string', enum: APP_IDS } } }),
+    handler: (core, i, p) => {
+      if (p.approval) throw new HttpError(403, 'Approval-mode keys cannot change platform app credentials.');
+      return { platform_app: core.apps.clear(i.app) };
+    },
+  },
+  {
+    name: 'test_platform_app', method: 'POST', path: '/platform-apps/{app}/test', scope: 'admin', tags: ['platform-apps'],
+    summary: 'Check developer-app credentials without a user login',
+    description: 'meta: requests an app access token (client_credentials) and reads GET /app. google / instagram: a token exchange with a dummy code tells whether the client id+secret are accepted. Returns { ok, verified, message }; "verified:false" means it will be verified on the first Connect.',
+    input: S({ required: ['app'], properties: { app: { type: 'string', enum: APP_IDS } } }),
+    handler: async (core, i) => ({ result: await core.apps.test(i.app), platform_app: core.apps.status(i.app) }),
+  },
   // ---- API keys & audit ----
   {
     name: 'list_api_keys', method: 'GET', path: '/api-keys', scope: 'admin', tags: ['api-keys'], readOnly: true,
@@ -761,10 +797,10 @@ export async function execute(core, op, input, principal, via) {
   }
 }
 
-const targetOf = (input, result) => input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
+const targetOf = (input, result) => input?.app || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
 function summarize(input) {
   if (!input) return null;
   const out = {};
-  for (const [k, v] of Object.entries(input)) out[k] = k === 'data' ? `<${String(v).length} base64 chars>` : typeof v === 'string' && v.length > 300 ? `${v.slice(0, 300)}…` : v;
+  for (const [k, v] of Object.entries(input)) out[k] = /secret|password/i.test(k) ? (v ? '[redacted]' : v) : k === 'data' ? `<${String(v).length} base64 chars>` : typeof v === 'string' && v.length > 300 ? `${v.slice(0, 300)}…` : v;
   return out;
 }

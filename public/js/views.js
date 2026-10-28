@@ -2,6 +2,7 @@
 import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, fmtNum, refreshCommon, modal } from './core.js';
 import { openComposer, relTime } from './composer.js';
 import { formatLocal } from '/assets/shared/time.js';
+import { renderPlatformApps } from './apps.js';
 
 const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
 
@@ -13,7 +14,7 @@ export async function renderAccounts(root, params = {}) {
     h('div', { class: 'cc-title' }, avatar({ provider: p.provider, name: PROVIDER_META[p.provider].label }, 34), h('strong', {}, p.label)),
     p.configured
       ? h('a', { class: 'btn primary small', href: `/oauth/${p.provider}/start` }, 'Connect')
-      : h('div', { class: 'muted small' }, 'Not configured — set the app credentials in .env (see README).'),
+      : h('div', { class: 'cc-setup' }, h('div', { class: 'muted small' }, 'App not configured yet.'), h('a', { class: 'btn small', href: `#/settings/apps/${p.app}` }, 'Set up app →')),
     h('details', { class: 'small' }, h('summary', {}, 'Redirect URI & scopes'), h('code', { class: 'block' }, p.redirect_uri), h('div', { class: 'muted' }, p.scopes.join(', ')))));
   mount(root, 
     h('div', { class: 'page-head' }, h('h2', {}, 'Accounts')),
@@ -162,7 +163,15 @@ export async function renderAnalytics(root, params = {}) {
 }
 
 // ---------------------------------------------------------------- Settings
-export async function renderSettings(root) {
+const settingsTabs = (tab) => h('div', { class: 'page-head' }, h('h2', {}, 'Settings'),
+  h('div', { class: 'seg' }, [['', 'General & API'], ['apps', 'Platform apps']].map(([v, l]) => h('button', { class: tab === v ? 'on' : '', onclick: () => { location.hash = `#/settings${v ? `/${v}` : ''}`; } }, l))));
+
+export async function renderSettings(root, { tab = '', focus = null } = {}) {
+  if (tab === 'apps') {
+    const body = h('div', {});
+    mount(root, settingsTabs('apps'), body);
+    return renderPlatformApps(body, focus);
+  }
   await refreshCommon();
   const s = state.settings;
   const [keys, hooks, audit] = await Promise.all([api('GET', '/api-keys'), api('GET', '/webhooks'), api('GET', '/audit-log?limit=50')]);
@@ -234,5 +243,5 @@ export async function renderSettings(root) {
     h('div', { class: 'table-wrap' }, h('table', { class: 'table small' }, h('thead', {}, h('tr', {}, ['When', 'Who', 'Via', 'Action', 'Result'].map((x) => h('th', {}, x)))),
       h('tbody', {}, audit.entries.map((e) => h('tr', {}, h('td', { class: 'nowrap' }, fmtTime(e.at)), h('td', {}, e.actor_name || e.actor_type), h('td', {}, e.via), h('td', {}, e.operation, e.target ? h('span', { class: 'muted' }, ` ${String(e.target).slice(0, 8)}`) : null), h('td', { class: e.status >= 400 ? 'err' : 'ok' }, e.status)))))));
 
-  mount(root, h('div', { class: 'page-head' }, h('h2', {}, 'Settings')), h('div', { class: 'settings-grid' }, general, apiKeys, webhooks, auditCard));
+  mount(root, settingsTabs(''), h('div', { class: 'settings-grid' }, general, apiKeys, webhooks, auditCard));
 }

@@ -296,3 +296,32 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   .kpis { grid-template-columns: repeat(2, 1fr); }
   .lrow .lthumb { display: none; }
 }
+
+/* Platform apps */
+.apps-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); align-items: start; }
+.app-card { border-top: 3px solid var(--pc, var(--accent)); scroll-margin-top: 80px; }
+.app-card.focus { box-shadow: 0 0 0 2px var(--pc, var(--accent)); }
+.app-card h3 { margin: 0; font-size: 16px; }
+.app-form { display: grid; gap: 10px; margin-top: 12px; }
+.app-form .field { display: grid; gap: 4px; }
+.app-test { margin-top: 2px; }
+.copy-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.copy-row code.block { flex: 1 1 260px; margin: 4px 0; }
+.app-details { margin-top: 12px; }
+.app-details ol.steps { padding-left: 20px; line-height: 1.5; }
+.app-details ul { padding-left: 20px; margin: 4px 0; }
+.scope-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.scope-chip { background: var(--soft); border-radius: 6px; padding: 2px 6px; font-size: 12px; }
+.cc-setup { display: grid; gap: 6px; justify-items: start; }
+/* In-app docs (docs/setup) */
+body.doc-page { background: var(--bg); color: var(--text); font-family: var(--font); margin: 0; }
+.doc-nav { max-width: 860px; margin: 0 auto; padding: 16px 20px 0; font-size: 14px; }
+.doc { max-width: 860px; margin: 0 auto; padding: 8px 20px 60px; line-height: 1.6; }
+.doc h1 { font-size: 28px; } .doc h2 { margin-top: 32px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.doc code { background: var(--soft); border-radius: 5px; padding: 1px 5px; font: 13px ui-monospace, monospace; }
+.doc pre { background: var(--soft); border-radius: 8px; padding: 12px; overflow-x: auto; }
+.doc pre code { background: none; padding: 0; }
+.doc blockquote { margin: 12px 0; padding: 4px 14px; border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); border-radius: 0 8px 8px 0; }
+.doc table { width: 100%; border-collapse: collapse; } .doc th, .doc td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.doc li { margin: 3px 0; }
+.app-card .status { text-transform: none; white-space: nowrap; }

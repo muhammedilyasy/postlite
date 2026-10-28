@@ -11,6 +11,7 @@ import { SCOPES, SCOPE_HELP } from '../apikeys.js';
 import { WEBHOOK_EVENTS } from '../webhooks.js';
 import { providers } from '../providers/index.js';
 import { APP_IDS } from '../apps.js';
+import { PLATFORM_PROVIDERS, MEDIA_TYPES } from '../posts.js';
 
 const DAY = 86400000;
 const S = (o) => ({ type: 'object', additionalProperties: false, ...o });
@@ -400,16 +401,22 @@ export const operations = [
   // ---- posts ----
   {
     name: 'list_posts', method: 'GET', path: '/posts', scope: 'read', tags: ['posts'], readOnly: true,
-    summary: 'List posts', description: `List posts (each with per-account "targets") filtered by time range, status, provider or account. Times: ${TIME_HELP} Status values: draft, pending_approval, scheduled, publishing, published, failed.`,
+    summary: 'List posts', description: `List posts (each with per-account "targets") with filters. Filters are AND-ed; list filters (comma-separated in a query string) match any of their values. Each post has matched_target_ids: the targets that matched. Times: ${TIME_HELP} from/to apply to the published time, else the scheduled time. Status values: draft, pending_approval, scheduled, publishing, published, failed.`,
     input: S({ properties: {
       from: timeInput('Start of range (inclusive).'), to: timeInput('End of range (exclusive).'),
-      status: { type: 'string', enum: ['draft', 'pending_approval', 'scheduled', 'publishing', 'published', 'failed'] },
-      provider: { type: 'string', enum: Object.keys(PLATFORMS) }, account_id: str('Filter by account.'),
+      status: { type: ['array', 'string'], items: { type: 'string', enum: ['draft', 'pending_approval', 'scheduled', 'publishing', 'published', 'failed'] }, description: 'Target status(es).' },
+      platform: { type: ['array', 'string'], items: { type: 'string', enum: Object.keys(PLATFORM_PROVIDERS) }, description: 'Platform(s); instagram covers both Instagram logins, linkedin covers profiles and Pages.' },
+      provider: { type: ['array', 'string'], items: { type: 'string', enum: Object.keys(PLATFORMS) }, description: 'Exact provider id(s).' },
+      account_id: { type: ['array', 'string'], items: { type: 'string' }, description: 'Account id(s).' },
+      media_type: { type: ['array', 'string'], items: { type: 'string', enum: MEDIA_TYPES }, description: 'What was posted: video, image, text, carousel (2+ items), story, reel, short (YouTube Short), document (LinkedIn PDF), thread (X thread).' },
+      created_by: { type: ['array', 'string'], items: { type: 'string' }, description: '"human" (web UI), "agent" (any API key) or "key:<api key id>".' },
+      q: str('Search captions, YouTube titles and account names.'),
+      sort: { type: 'string', enum: ['asc', 'desc'], description: 'By time; default desc (asc when from is set).' },
       limit: { type: 'integer', minimum: 1, maximum: 500 }, offset: { type: 'integer', minimum: 0 },
     } }),
     handler: async (core, i) => {
       const tz = (await core.settings.get()).timezone;
-      return { posts: await core.posts.listGroups({ from: parseTime(i.from, tz, 'from'), to: parseTime(i.to, tz, 'to'), status: i.status, provider: i.provider, integration_id: i.account_id, limit: i.limit, offset: i.offset }) };
+      return { posts: await core.posts.listGroups({ from: parseTime(i.from, tz, 'from'), to: parseTime(i.to, tz, 'to'), status: i.status, provider: i.provider, platform: i.platform, integration_id: i.account_id, media_type: i.media_type, created_by: i.created_by, q: i.q, sort: i.sort, limit: i.limit, offset: i.offset }) };
     },
   },
   {

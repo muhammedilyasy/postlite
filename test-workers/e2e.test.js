@@ -271,6 +271,12 @@ test('REST parity: OpenAPI, platforms, calendar, base64 cap, audit log', { skip 
   assert.equal(cal.status, 200);
   const list = await w.api('GET', '/posts?limit=50', { key: admin, label: 'REST list_posts (50)' });
   assert.ok(list.json.posts.length >= 10);
+  // filters run on D1 too (json_each / json_extract media-type classification, created_by via api_keys)
+  const filtered = await w.api('GET', '/posts?limit=50&media_type=video,image,text,carousel,story,reel,short&created_by=agent,human&platform=youtube,facebook,instagram&q=%25', { key: admin, label: 'REST list_posts filtered' });
+  assert.equal(filtered.status, 200, filtered.text);
+  assert.ok(filtered.json.posts.every((p) => p.matched_target_ids.length >= 1));
+  const none = await w.api('GET', '/posts?media_type=story&q=no-such-caption-xyz', { key: admin });
+  assert.deepEqual(none.json.posts, []);
   const big = await w.api('POST', '/media/base64', { key: admin, body: { filename: 'x.jpg', data: 'A'.repeat(12 * 1024 * 1024) } });
   assert.equal(big.status, 413);
   const audit = await w.api('GET', '/audit-log?limit=200', { key: admin });

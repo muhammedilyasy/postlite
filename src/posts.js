@@ -29,6 +29,25 @@ async function inChunks(ids, fn) {
 }
 const marks = (n) => Array(n).fill('?').join(',');
 
+/** Platform (what people say) → providers (how accounts are stored). */
+export const PLATFORM_PROVIDERS = { youtube: ['youtube'], facebook: ['facebook'], instagram: ['instagram', 'instagram-standalone'], x: ['x'], linkedin: ['linkedin', 'linkedin-page'] };
+export const MEDIA_TYPES = ['video', 'image', 'text', 'carousel', 'story', 'reel', 'short', 'document', 'thread'];
+
+// What a post is, from its settings and effective media (per target; same rules as describeKind()).
+const EFFECTIVE_MEDIA = "COALESCE(p.media_override, g.media, '[]')";
+const HAS_VIDEO = `EXISTS (SELECT 1 FROM json_each(${EFFECTIVE_MEDIA}) je JOIN media m ON m.id = je.value AND m.workspace_id = p.workspace_id WHERE m.kind = 'video')`;
+export const MEDIA_TYPE_SQL = `(CASE
+  WHEN json_extract(p.settings, '$.post_type') = 'story' THEN 'story'
+  WHEN json_extract(p.settings, '$.post_type') = 'reel' THEN 'reel'
+  WHEN json_extract(p.settings, '$.post_type') = 'document' THEN 'document'
+  WHEN i.provider = 'youtube' AND json_extract(p.settings, '$.isShort') IN (1, 'true') THEN 'short'
+  WHEN json_array_length(COALESCE(json_extract(p.settings, '$.thread'), '[]')) > 0 THEN 'thread'
+  WHEN json_array_length(${EFFECTIVE_MEDIA}) > 1 THEN 'carousel'
+  WHEN i.provider IN ('instagram', 'instagram-standalone') AND ${HAS_VIDEO} THEN 'reel'
+  WHEN ${HAS_VIDEO} THEN 'video'
+  WHEN json_array_length(${EFFECTIVE_MEDIA}) = 1 THEN 'image'
+  ELSE 'text' END)`;
+
 /** Event-log statement for a post id the caller already verified (scheduler / this workspace's posts). */
 export const eventStmt = (postId, level, message) => ['INSERT INTO post_events(post_id, at, level, message) VALUES(?,?,?,?) /* ws:checked */', postId, Date.now(), level, String(message).slice(0, 2000)];
 
@@ -262,17 +281,47 @@ export function createPosts({ db, media, integrations, ws }) {
     },
 
     /** Groups with at least one target matching the filters. */
-    async listGroups({ from = null, to = null, status = null, provider = null, integration_id = null, limit = 50, offset = 0 } = {}) {
+    /**
+     * Groups whose targets match every filter (filters are AND-ed; values inside one filter are OR-ed).
+     * Each group carries matched_target_ids so a list can show only the matching accounts.
+     * platform/provider/status/account/media_type/created_by accept arrays; q searches caption,
+     * title and account name; from/to apply to the published (else scheduled, else updated) time.
+     */
+    async listGroups({ from = null, to = null, status = null, provider = null, platform = null, integration_id = null, media_type = null, created_by = null, q = null, sort = null, limit = 50, offset = 0 } = {}) {
+      const list = (v) => (v === null || v === undefined || v === '' ? [] : (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean));
       const where = ['p.workspace_id = ?'];
       const args = [ws];
+      const anyOf = (expr, vals) => { if (vals.length) { where.push(`${expr} IN (${marks(vals.length)})`); args.push(...vals); } };
       if (from !== null && from !== undefined) { where.push('COALESCE(p.published_at, p.publish_at, p.updated_at) >= ?'); args.push(Number(from)); }
       if (to !== null && to !== undefined) { where.push('COALESCE(p.published_at, p.publish_at, p.updated_at) < ?'); args.push(Number(to)); }
-      if (status) { where.push('p.status = ?'); args.push(status); }
-      if (provider) { where.push('i.provider = ?'); args.push(provider); }
-      if (integration_id) { where.push('p.integration_id = ?'); args.push(integration_id); }
-      const rows = await db.all(`SELECT p.group_id, MIN(COALESCE(p.published_at, p.publish_at, p.updated_at)) AS t FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id
-        WHERE ${where.join(' AND ')} GROUP BY p.group_id ORDER BY t ${from !== null && from !== undefined ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`, ...args, Math.min(Number(limit) || 50, 500), Number(offset) || 0);
-      return loadGroups(rows.map((r) => r.group_id));
+      anyOf('p.status', list(status));
+      const providers = [...list(provider), ...list(platform).flatMap((x) => PLATFORM_PROVIDERS[x] || [x])];
+      anyOf('i.provider', [...new Set(providers)]);
+      anyOf('p.integration_id', list(integration_id));
+      anyOf(MEDIA_TYPE_SQL, list(media_type));
+      const who = list(created_by);
+      if (who.length) {
+        const ors = [];
+        for (const w of who) {
+          if (w === 'human') { ors.push('(g.created_by IS NULL OR g.created_by NOT IN (SELECT name FROM api_keys WHERE workspace_id = ?))'); args.push(ws); }
+          else if (w === 'agent') { ors.push('g.created_by IN (SELECT name FROM api_keys WHERE workspace_id = ?)'); args.push(ws); }
+          else if (w.startsWith('key:')) { ors.push('g.created_by IN (SELECT name FROM api_keys WHERE workspace_id = ? AND id = ?)'); args.push(ws, w.slice(4)); }
+          else throw new HttpError(400, `created_by must be "human", "agent" or "key:<api key id>" (got "${w}").`);
+        }
+        where.push(`(${ors.join(' OR ')})`);
+      }
+      const needle = String(q || '').trim();
+      if (needle) {
+        const like = `%${needle.replace(/[!%_]/g, (c) => `!${c}`)}%`;
+        where.push("(g.content LIKE ? ESCAPE '!' OR COALESCE(p.content_override, '') LIKE ? ESCAPE '!' OR COALESCE(json_extract(p.settings, '$.title'), '') LIKE ? ESCAPE '!' OR i.name LIKE ? ESCAPE '!')");
+        args.push(like, like, like, like);
+      }
+      const dir = sort === 'asc' || sort === 'desc' ? sort.toUpperCase() : from !== null && from !== undefined ? 'ASC' : 'DESC';
+      const rows = await db.all(`SELECT p.group_id, ${dir === 'ASC' ? 'MIN' : 'MAX'}(COALESCE(p.published_at, p.publish_at, p.updated_at)) AS t, GROUP_CONCAT(p.id) AS ids
+        FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id JOIN groups g ON g.id = p.group_id AND g.workspace_id = p.workspace_id
+        WHERE ${where.join(' AND ')} GROUP BY p.group_id ORDER BY t ${dir} LIMIT ? OFFSET ?`, ...args, Math.min(Number(limit) || 50, 500), Number(offset) || 0);
+      const matched = new Map(rows.map((r) => [r.group_id, String(r.ids || '').split(',').filter(Boolean)]));
+      return (await loadGroups(rows.map((r) => r.group_id))).map((g) => ({ ...g, matched_target_ids: matched.get(g.id) || [] }));
     },
 
     async pendingApprovals() {

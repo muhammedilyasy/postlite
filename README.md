@@ -13,7 +13,7 @@ More in [`docs/screenshots/`](docs/screenshots/) (dark and light theme, desktop 
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/muhammedilyasy/postlite)
 
-<!-- Replace YOUR-GITHUB-USER after publishing the repository: Deploy buttons need a public GitHub/GitLab repo. -->
+<!-- The Deploy button only works once the repository is public. -->
 
 ## Features
 

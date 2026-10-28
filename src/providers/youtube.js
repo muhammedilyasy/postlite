@@ -3,6 +3,7 @@
 import { meteredFetch } from '../meter.js';
 import { request, qs, ProviderError, classifyHttp } from './http.js';
 import { shortReason } from './facebook.js';
+import { googleApiDisabled } from '../notices.js';
 
 /** Best snippet.thumbnails URL, else the public hqdefault frame for the video id. */
 export const ytThumb = (t, id) => t?.high?.url || t?.medium?.url || t?.standard?.url || t?.default?.url || (id ? `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg` : '');
@@ -236,13 +237,19 @@ export const youtube = {
   // ---- analytics ------------------------------------------------------------------------
   async accountAnalytics(ctx, { since, until }) {
     const { cfg } = ctx;
-    const out = { daily: [], snapshot: {}, unavailable: {} };
+    const out = { daily: [], snapshot: {}, unavailable: {}, sources: {}, notices: [] };
+    // YouTube Data API v3 (youtube.readonly): channel totals. Stored as daily snapshots so changes chart over time.
     const ch = await request(`${cfg.urls.youtube}/youtube/v3/channels?` + qs({ part: 'statistics', id: ctx.integration.external_id }), { headers: authz(ctx.token), classifier: classifyGoogle });
     const st = ch.items?.[0]?.statistics || {};
     if (st.hiddenSubscriberCount) out.unavailable.followers = 'Subscriber count is hidden on this channel';
     else if (st.subscriberCount !== undefined) out.snapshot.followers = Number(st.subscriberCount);
     if (st.viewCount !== undefined) out.snapshot.total_views = Number(st.viewCount);
     if (st.videoCount !== undefined) out.snapshot.media_count = Number(st.videoCount);
+    for (const k of Object.keys(out.snapshot)) out.sources[k] = 'data_api';
+    // The channel's viewCount lags (often 0 on new channels and Shorts-only channels), so also keep
+    // Σ views of its videos (videos.list statistics, fetched in the posts step) as "video views".
+    out.rollup = { video_views: 'views' };
+    out.sources.video_views = 'data_api';
     const metrics = ['views', 'estimatedMinutesWatched', 'averageViewDuration', 'subscribersGained', 'subscribersLost', 'likes', 'comments', 'shares'];
     const names = { views: 'views', estimatedMinutesWatched: 'watch_minutes', averageViewDuration: 'avg_view_sec', subscribersGained: 'new_followers', subscribersLost: 'lost_followers', likes: 'likes', comments: 'comments', shares: 'shares' };
     try {
@@ -257,7 +264,21 @@ export const youtube = {
       }
     } catch (e) {
       if (e.kind === 'auth' && e.status === 401) throw e;
-      for (const m of metrics) out.unavailable[names[m]] = `YouTube Analytics API: ${shortReason(e)}`;
+      // Fallback: daily views and net subscribers derived from the Data API totals (change between syncs).
+      // Watch time, average view duration and the like/comment/share series need YouTube Analytics.
+      out.flags = { ytAnalyticsOff: true };
+      out.derived = { views: 'video_views', net_followers: 'followers' };
+      out.sources.views = 'data_api';
+      out.sources.net_followers = 'data_api';
+      const missing = ['watch_minutes', 'avg_view_sec', 'new_followers', 'lost_followers', 'likes', 'comments', 'shares'];
+      const off = googleApiDisabled(e);
+      const why = off ? 'Needs YouTube Analytics API (turned off in Google Cloud)' : e.kind === 'auth' || /insufficientPermissions|permission/i.test(e.message) ? 'Needs the yt-analytics.readonly permission' : `Needs YouTube Analytics API: ${shortReason(e)}`;
+      for (const m of missing) out.unavailable[m] = why;
+      out.notices.push(off
+        ? { code: 'api_disabled', api: 'YouTube Analytics API', url: off.url, action: 'open', metrics: missing, text: 'Turn on YouTube Analytics API in Google Cloud to see watch time and average view duration. Views and subscribers below come from the YouTube Data API.' }
+        : why.startsWith('Needs the yt')
+          ? { code: 'missing_permission', action: 'reconnect', metrics: missing, text: 'Reconnect this channel and allow “View YouTube Analytics reports” to see watch time and average view duration. Views and subscribers below come from the YouTube Data API.' }
+          : { code: 'api_error', metrics: missing, text: `YouTube Analytics is not answering (${shortReason(e)}). Views and subscribers below come from the YouTube Data API.` });
     }
     return out;
   },
@@ -292,6 +313,10 @@ export const youtube = {
       if (st.likeCount !== undefined) metrics.likes = Number(st.likeCount); else unavailable.likes = 'Likes are hidden for this video';
       if (st.commentCount !== undefined) metrics.comments = Number(st.commentCount); else unavailable.comments = 'Comments disabled';
     } else unavailable.views = 'Video not found (deleted or private)';
+    if (ctx.flags?.ytAnalyticsOff) {
+      unavailable.watch_minutes = unavailable.avg_view_sec = 'Needs YouTube Analytics API';
+      return { metrics, unavailable, sources: { views: 'data_api', likes: 'data_api', comments: 'data_api' } };
+    }
     try {
       const start = item.published_at ? new Date(item.published_at).toISOString().slice(0, 10) : '2006-01-01';
       const r = await request(`${cfg.urls.ytAnalytics}/v2/reports?` + qs({
@@ -304,7 +329,7 @@ export const youtube = {
       if (row) cols.forEach((c, i) => { if (map[c]) metrics[map[c]] = Number(row[i]) || 0; });
     } catch (e) {
       if (e.kind === 'auth' && e.status === 401) throw e;
-      unavailable.watch_minutes = `YouTube Analytics API: ${shortReason(e)}`;
+      unavailable.watch_minutes = unavailable.avg_view_sec = `Needs YouTube Analytics API: ${shortReason(e)}`;
     }
     return { metrics, unavailable };
   },

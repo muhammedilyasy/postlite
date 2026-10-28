@@ -7,9 +7,10 @@ import { getProvider } from './providers/index.js';
 import { isBudgetError } from './scheduler.js';
 import { HttpError } from './errors.js';
 import { ytThumb } from './providers/youtube.js';
+import { buildNotices } from './notices.js';
 
 const DAY = 86400000;
-export const SNAPSHOT_METRICS = new Set(['followers', 'following', 'media_count', 'total_views', 'page_likes']);
+export const SNAPSHOT_METRICS = new Set(['followers', 'following', 'media_count', 'total_views', 'video_views', 'page_likes']);
 export const AVERAGE_METRICS = new Set(['avg_view_sec', 'avg_watch_ms']);
 const today = () => new Date().toISOString().slice(0, 10);
 const STEP_COST = { fetches: 12, queries: 10 };
@@ -52,11 +53,11 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
 
   const saveRun = (r) => db.run('UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=? /* ws:checked */', r.phase, r.cursor, JSON.stringify(r.data), Date.now(), r.integration_id);
 
-  async function startRun(id) {
+  async function startRun(id, { backfill = false } = {}) {
     const status = await db.get('SELECT * FROM analytics_status WHERE integration_id = ? /* ws:checked */', id);
     const t = Date.now();
-    const since = Math.max(status?.last_sync_at ? status.last_sync_at - 2 * DAY : 0, t - A.backfillDays * DAY);
-    const data = { unavailable: { account: {}, posts: {} }, daily: 0, postMetrics: 0, items: [], prevSync: status?.last_sync_at || null };
+    const since = Math.max(status?.last_sync_at && !backfill ? status.last_sync_at - 2 * DAY : 0, t - A.backfillDays * DAY);
+    const data = { unavailable: { account: {}, posts: {}, sources: {}, notices: [] }, flags: {}, daily: 0, postMetrics: 0, items: [], prevSync: status?.last_sync_at || null };
     await db.run(`INSERT INTO analytics_runs(integration_id, phase, cursor, until_ms, since_ms, data, started_at, updated_at) VALUES(?,?,?,?,?,?,?,?)
       ON CONFLICT(integration_id) DO UPDATE SET phase=excluded.phase, cursor=excluded.cursor, until_ms=excluded.until_ms, since_ms=excluded.since_ms, data=excluded.data, started_at=excluded.started_at, updated_at=excluded.updated_at /* ws:checked */`,
     id, 'account', since, t, since, JSON.stringify(data), t, t);
@@ -72,10 +73,17 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
       const end = A.windowDays > 0 ? Math.min(run.cursor + A.windowDays * DAY, t) : t;
       const acc = await withAuthRetry(id, (integ) => provider.accountAnalytics({ cfg, integration: integ, token: integ.access_token }, { since: run.cursor, until: end }));
       Object.assign(un.account, acc.unavailable || {});
+      Object.assign((un.sources ||= {}), acc.sources || {});
+      un.notices ||= [];
+      for (const n of acc.notices || []) if (!un.notices.some((x) => x.code === n.code)) un.notices.push(n);
+      Object.assign((run.data.flags ||= {}), acc.flags || {});
       const daily = (acc.daily || []).filter((d) => d.day);
       run.data.daily += (acc.daily || []).length;
       const rows = [...daily.map((d) => [id, d.metric, d.day, d.value, t]), ...Object.entries(acc.snapshot || {}).map(([k, v]) => [id, k, today(), v, t])];
       run.cursor = end;
+      Object.assign((run.data.derived ||= {}), acc.derived || {});
+      Object.assign((run.data.rollup ||= {}), acc.rollup || {});
+      Object.assign((run.data.snap ||= {}), acc.snapshot || {});
       if (end >= t) { run.phase = 'list'; run.cursor = 0; }
       await db.batch([
         ...multiRow('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at)', 5, rows, 'ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at /* ws:checked */'),
@@ -113,12 +121,13 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
       const metricRows = [];
       if (provider.postAnalytics && slice.length) {
         await withAuthRetry(id, async (integ) => {
-          const ctx = { cfg, integration: integ, token: integ.access_token };
+          const ctx = { cfg, integration: integ, token: integ.access_token, flags: run.data.flags || {} };
           for (const it of slice) {
             try {
               const r = await provider.postAnalytics(ctx, it);
               for (const [k, v] of Object.entries(r.metrics || {})) metricRows.push([id, it.external_id, k, t, Number(v) || 0]);
               for (const [k, v] of Object.entries(r.unavailable || {})) un.posts[k] ||= v;
+              for (const [k, v] of Object.entries(r.sources || {})) (un.sources ||= {})[`post_${k}`] ||= v;
             } catch (e) {
               if (e.kind === 'auth' || isBudgetError(e)) throw e;
               un.posts._errors ||= e.message;
@@ -154,8 +163,26 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
       return null;
     }
     // finish
+    un.notices = buildNotices(un, { provider: row.provider, label: { youtube: 'channel', facebook: 'Page' }[row.provider] || 'account' });
+    const extra = [];
+    // Roll-ups: an account snapshot summed from this run's post metrics (e.g. YouTube "video views" = Σ views of its videos).
+    const snap = { ...(run.data.snap || {}) };
+    for (const [metric, postMetric] of Object.entries(run.data.rollup || {})) {
+      const r = await db.get('SELECT COUNT(*) AS n, SUM(value) AS v FROM post_metrics WHERE integration_id = ? AND metric = ? AND captured_at = ? /* ws:checked */', id, postMetric, t);
+      if (r?.n) { snap[metric] = Number(r.v) || 0; extra.push([id, metric, today(), snap[metric], t]); }
+    }
+    // Fallback daily series derived from snapshots (YouTube without the Analytics API): today's value = current
+    // total − the last total stored before today, i.e. the change since the previous sync day.
+    for (const [metric, base] of Object.entries(run.data.derived || {})) {
+      if (snap[base] === undefined) continue;
+      const prev = await db.get('SELECT value FROM account_metrics WHERE integration_id = ? AND metric = ? AND day < ? ORDER BY day DESC LIMIT 1 /* ws:checked */', id, base, today());
+      if (prev) extra.push([id, metric, today(), metric === 'views' ? Math.max(0, snap[base] - prev.value) : snap[base] - prev.value, t]);
+    }
     await db.batch([
+      ...multiRow('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at)', 5, extra, 'ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at /* ws:checked */'),
       ['DELETE FROM post_metrics WHERE integration_id = ? AND captured_at < ? /* ws:checked */', id, t - 365 * DAY],
+      // days after today can only come from a mis-dated period (Meta's end_time); never keep them
+      ['DELETE FROM account_metrics WHERE integration_id = ? AND day > ? /* ws:checked */', id, dayStr(t)],
       [`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,NULL,?)
         ON CONFLICT(integration_id) DO UPDATE SET last_sync_at=excluded.last_sync_at, last_error=NULL, unavailable=excluded.unavailable /* ws:checked */`, id, t, JSON.stringify(un)],
       ['DELETE FROM analytics_runs WHERE integration_id = ? /* ws:checked */', id],
@@ -167,14 +194,14 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
    * Sync one account (start or resume its run). Without a budget it runs to completion.
    * With a budget (Workers) it may return { ok: true, pending: true } and continue on the next call.
    */
-  async function syncIntegration(id, { budget = null, restart = false } = {}) {
+  async function syncIntegration(id, { budget = null, restart = false, backfill = false } = {}) {
     const row = await integrations.rawGet(id);
     if (!row) throw new Error('Unknown integration');
     const provider = getProvider(row.provider);
     if (!provider.accountAnalytics) return { skipped: true };
     let run = restart ? null : await db.get('SELECT * FROM analytics_runs WHERE integration_id = ? /* ws:checked */', id);
     if (run) run = { ...run, data: JSON.parse(run.data || '{}') };
-    else run = await startRun(id);
+    else run = await startRun(id, { backfill });
     try {
       for (;;) {
         if (budget && !budget.has(STEP_COST)) return { ok: true, pending: true, phase: run.phase };

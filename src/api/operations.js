@@ -629,7 +629,7 @@ export const operations = [
   // ---- analytics ----
   {
     name: 'get_analytics_overview', method: 'GET', path: '/analytics/overview', scope: 'analytics', tags: ['analytics'], readOnly: true,
-    summary: 'Analytics summary for all accounts', description: 'Per-account totals for the range (followers + change, views, reach, engagement, watch time...) and which metrics are not available (permissions/deprecations). Default range: last 30 days.',
+    summary: 'Analytics summary for all accounts', description: 'Per-account totals for the range (followers + change, views, reach, engagement, watch time...) and which metrics are not available (permissions/deprecations). sync.unavailable.notices holds at most a few actionable fixes per account ({code: api_disabled|missing_permission, text, url?, action: open|reconnect, metrics}); sync.unavailable.sources marks metrics that come from a fallback API (data_api = YouTube Data API v3). Default range: last 30 days.',
     input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.') } }),
     handler: async (core, i) => {
       const { from, to } = range(i, (await core.settings.get()).timezone);
@@ -678,12 +678,12 @@ export const operations = [
   {
     name: 'sync_analytics', method: 'POST', path: '/analytics/sync', scope: 'analytics', tags: ['analytics'],
     summary: 'Sync analytics now', description: 'Fetches fresh account and post metrics from the platforms (all accounts or one). Can take a while for many accounts. On Cloudflare Workers a large sync continues in the background (result has "pending": true); the cron finishes it within minutes.',
-    input: S({ properties: { account_id: str('Only this account.') } }),
+    input: S({ properties: { account_id: str('Only this account.'), backfill: { type: 'boolean', description: 'Re-fetch the whole backfill window (ANALYTICS_BACKFILL_DAYS) instead of only the days since the last sync. Needs account_id.' } } }),
     handler: async (core, i) => {
       const budget = core.cfg.platform === 'workers' ? meter.current : null;
       if (i.account_id) {
         if (!(await core.integrations.get(i.account_id))) throw new HttpError(404, 'Account not found.');
-        const r = await core.analytics.syncIntegration(i.account_id, { budget, restart: !budget });
+        const r = await core.analytics.syncIntegration(i.account_id, { budget, restart: !budget, backfill: !!i.backfill });
         if (!r.pending) await core.webhooks.emit('analytics.synced', { accounts: { [i.account_id]: r } });
         return { results: { [i.account_id]: r } };
       }

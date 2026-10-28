@@ -233,7 +233,7 @@ export const facebook = {
     }
     const metrics = { page_media_view: 'views', page_total_media_view_unique: 'reach', page_post_engagements: 'engagements', page_daily_follows_unique: 'new_followers', page_views_total: 'profile_views' };
     await insightsWithFallback(ctx, page, Object.keys(metrics), { period: 'day', since: Math.floor(since / 1000), until: Math.floor(until / 1000) }, (name, values) => {
-      for (const v of values || []) out.daily.push({ metric: metrics[name], day: String(v.end_time || '').slice(0, 10), value: Number(typeof v.value === 'object' ? sumObj(v.value) : v.value) || 0 });
+      for (const v of values || []) if (v.end_time) out.daily.push({ metric: metrics[name], day: periodDay(v.end_time), value: Number(typeof v.value === 'object' ? sumObj(v.value) : v.value) || 0 });
     }, (name, why) => { out.unavailable[metrics[name]] = why; });
     return out;
   },
@@ -311,5 +311,11 @@ export async function insightsWithFallback(ctx, objectId, metricNames, params, o
     }
   }
 }
+
+/**
+ * Day a period=day insights value belongs to. Meta stamps each value with the END of its period
+ * (e.g. 2026-10-29T07:00:00+0000 for Oct 28, Pacific), so the day is end_time minus one day.
+ */
+export const periodDay = (endTime) => new Date(Date.parse(String(endTime).replace(/\+0000$/, 'Z')) - 86400000).toISOString().slice(0, 10);
 
 export const shortReason = (e) => String(e?.message || 'Not available').slice(0, 200);

@@ -408,6 +408,8 @@ code.url { word-break: break-all; }
 .kpi-grid.single { grid-template-columns: minmax(0, 1fr); }
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin-bottom: 16px; }
 .acc-kpi { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.acc-kpi .an-notice { margin: 0; }
+.an-notice a { white-space: nowrap; }
 .ak-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .ak-head a { margin-left: auto; font-size: 12.5px; flex: none; }
 .ak-foot { color: var(--text-3); }

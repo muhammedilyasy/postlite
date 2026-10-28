@@ -86,5 +86,55 @@ test('missing analytics permission degrades gracefully (YouTube Analytics 403)',
   const r = await app.core.analytics.syncIntegration(yt);
   delete app.fake.state.failNext['^/yta/'];
   assert.equal(r.ok, true);
-  assert.match(r.unavailable.account.watch_minutes, /YouTube Analytics API/);
+  assert.match(r.unavailable.account.watch_minutes, /yt-analytics\.readonly/);
+  assert.equal(r.unavailable.notices[0].code, 'missing_permission');
+  assert.equal(r.unavailable.notices[0].action, 'reconnect');
+});
+
+test('YouTube Analytics API disabled: Data API fallback, one actionable notice, derived daily views', async () => {
+  const body = { error: { code: 403, message: 'YouTube Analytics API has not been used in project 123456789012 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=123456789012 then retry.', errors: [{ message: 'disabled', domain: 'usageLimits', reason: 'accessNotConfigured' }], status: 'PERMISSION_DENIED' } };
+  app.fake.state.failNext['^/yta/'] = { status: 403, body, times: 100 };
+  // a total-views snapshot from an earlier day: today's daily views = current total − that
+  const y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  await app.core.db.run('INSERT OR REPLACE INTO account_metrics(integration_id, metric, day, value, fetched_at) VALUES(?,?,?,?,?) /* ws:system */', yt, 'video_views', y, 600, Date.now());
+  await app.core.db.run('INSERT OR REPLACE INTO account_metrics(integration_id, metric, day, value, fetched_at) VALUES(?,?,?,?,?) /* ws:system */', yt, 'followers', y, 90, Date.now());
+  const before = app.fake.state.calls.filter((c) => c.path.startsWith('/yta/')).length;
+  const r = await app.core.analytics.syncIntegration(yt, { restart: true });
+  const ytaCalls = app.fake.state.calls.filter((c) => c.path.startsWith('/yta/')).length - before;
+  delete app.fake.state.failNext['^/yta/'];
+  assert.equal(r.ok, true, r.error);
+  assert.equal(ytaCalls, 1, 'post metrics skip the disabled Analytics API');
+  const st = await app.core.analytics.status(yt);
+  assert.equal(st.unavailable.notices.length, 1);
+  const n = st.unavailable.notices[0];
+  assert.equal(n.code, 'api_disabled');
+  assert.equal(n.url, 'https://console.developers.google.com/apis/api/youtubeanalytics.googleapis.com/overview?project=123456789012');
+  assert.match(n.text, /Turn on YouTube Analytics API in Google Cloud to see watch time/);
+  assert.match(st.unavailable.account.watch_minutes, /Needs YouTube Analytics API/);
+  assert.equal(st.unavailable.sources.total_views, 'data_api');
+  assert.equal(st.unavailable.sources.views, 'data_api');
+  const to = Date.now();
+  const sum = await app.core.analytics.summary(yt, to - 3 * 86400000, to);
+  assert.equal(sum.total_views.value, 5000);
+  assert.equal(sum.followers.value, 100);
+  const series = await app.core.analytics.series(yt, to - 3 * 86400000, to);
+  const today = new Date().toISOString().slice(0, 10);
+  const vids = (await app.core.analytics.topPosts({ integrationId: yt, from: 0, to: Date.now() + 1000 })).length;
+  assert.equal(sum.video_views.value, 321 * vids, 'Σ video views from videos.list');
+  assert.equal(series.views.find((p) => p.day === today)?.value, 321 * vids - 600, 'views since the previous snapshot');
+  assert.equal(series.net_followers.find((p) => p.day === today)?.value, 10);
+  const top = await app.core.analytics.topPosts({ integrationId: yt, from: 0, to: to + 1000 });
+  assert.ok(top.every((p) => p.metrics.views === 321 && p.metrics.likes === 12 && p.metrics.comments === 3));
+  // the REST overview carries the notice for the UI
+  const ov = await app.api('GET', '/analytics/overview', { key });
+  assert.equal(ov.json.accounts.find((a) => a.account_id === yt).sync.unavailable.notices[0].code, 'api_disabled');
+});
+
+test('Meta daily insights are dated by period start (end_time − 1 day); no future days are kept', async () => {
+  await app.core.db.run('INSERT OR REPLACE INTO account_metrics(integration_id, metric, day, value, fetched_at) VALUES(?,?,?,?,?) /* ws:system */', fb, 'views', '2999-01-01', 1, Date.now());
+  const r = await app.core.analytics.syncIntegration(fb, { restart: true, backfill: true });
+  assert.equal(r.ok, true, r.error);
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = await app.core.db.all('SELECT day FROM account_metrics WHERE integration_id = ? AND day > ? /* ws:system */', fb, today);
+  assert.deepEqual(rows, []);
 });

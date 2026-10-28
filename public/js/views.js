@@ -112,7 +112,16 @@ export async function renderApprovals(root) {
 }
 
 // ---------------------------------------------------------------- Analytics
-const METRIC_LABELS = { followers: 'Followers', views: 'Views', reach: 'Reach', engagements: 'Engagements', new_followers: 'New followers', lost_followers: 'Lost followers', profile_views: 'Profile views', watch_minutes: 'Watch time (min)', avg_view_sec: 'Avg view (s)', likes: 'Likes', comments: 'Comments', shares: 'Shares', saves: 'Saves', interactions: 'Interactions', accounts_engaged: 'Accounts engaged', total_views: 'Total views', media_count: 'Posts', page_likes: 'Page likes', following: 'Following', plays: 'Plays', clicks: 'Clicks', avg_watch_ms: 'Avg watch (ms)', watch_time_ms: 'Watch time (ms)', replies: 'Replies' };
+const METRIC_LABELS = { followers: 'Followers', views: 'Views', reach: 'Reach', engagements: 'Engagements', new_followers: 'New followers', lost_followers: 'Lost followers', profile_views: 'Profile views', watch_minutes: 'Watch time (min)', avg_view_sec: 'Avg view (s)', likes: 'Likes', comments: 'Comments', shares: 'Shares', saves: 'Saves', interactions: 'Interactions', accounts_engaged: 'Accounts engaged', total_views: 'Total views', media_count: 'Posts', page_likes: 'Page likes', following: 'Following', plays: 'Plays', clicks: 'Clicks', avg_watch_ms: 'Avg watch (ms)', watch_time_ms: 'Watch time (ms)', replies: 'Replies', net_followers: 'Net followers', video_views: 'Video views', impressions: 'Impressions', reposts: 'Reposts', quotes: 'Quotes', bookmarks: 'Bookmarks', clicks_url: 'Link clicks' };
+
+/** One actionable line per account when metrics are missing for a fixable reason (API off, permission not granted). */
+function analyticsNotice(a, accountId) {
+  const n = (a.sync?.unavailable?.notices || []).find((x) => x.action) || (a.sync?.unavailable?.notices || [])[0];
+  if (!n) return null;
+  const link = n.action === 'open' && n.url ? h('a', { href: n.url, target: '_blank', rel: 'noopener' }, n.api ? `Turn on ${n.api}` : 'Open console')
+    : n.action === 'reconnect' ? h('a', { href: `/oauth/${a.provider}/start?reconnect=${accountId}` }, 'Reconnect') : null;
+  return h('div', { class: 'notice warn small an-notice' }, icon('alert', 14), h('span', {}, n.text, link ? [' ', link] : null));
+}
 const label = (m) => METRIC_LABELS[m] || m;
 
 export async function renderAnalytics(root, params = {}) {
@@ -141,18 +150,19 @@ export async function renderAnalytics(root, params = {}) {
   const list = acc ? ov.accounts.filter((a) => a.account_id === acc) : ov.accounts;
   const cards = list.map((a) => {
     const s = a.summary;
-    const keys = ['followers', 'views', 'reach', 'watch_minutes', 'engagements', 'interactions', 'profile_views', 'new_followers'].filter((k) => s[k]);
+    const keys = ['followers', 'views', 'video_views', 'total_views', 'reach', 'watch_minutes', 'impressions', 'engagements', 'interactions', 'profile_views', 'new_followers', 'media_count'].filter((k) => s[k]);
     return h('div', { class: 'card acc-kpi', style: { '--pc': PROVIDER_META[a.provider].color } },
       h('div', { class: 'ak-head' }, avatar({ provider: a.provider, name: a.name, picture: state.accounts.find((x) => x.id === a.account_id)?.picture }, 26), h('strong', { class: 'ellipsis' }, a.name), acc ? null : h('a', { class: 'small', href: `#/analytics?days=${days}&account=${a.account_id}` }, 'Details')),
       keys.length ? h('div', { class: 'kpis' }, keys.slice(0, 6).map((k) => h('div', { class: 'kpi' }, h('div', { class: 'kl' }, label(k)), h('div', { class: 'kv' }, fmtNum(s[k].value)), s[k].change ? h('div', { class: `kc mono ${s[k].change > 0 ? 'up' : 'down'}` }, `${s[k].change > 0 ? '↑ ' : '↓ '}${fmtNum(Math.abs(s[k].change))}`) : null))) : h('p', { class: 'muted small' }, a.sync?.last_sync_at ? 'No metrics in this range.' : 'Not synced yet — click “Sync now”.'),
-      a.sync?.last_error ? h('div', { class: 'notice error small' }, a.sync.last_error) : null,
+      a.sync?.last_error ? h('div', { class: 'notice error small' }, a.sync.last_error) : analyticsNotice(a, a.account_id),
       a.sync?.last_sync_at ? h('div', { class: 'muted small ak-foot mono' }, `synced ${relTime(a.sync.last_sync_at)}`) : null);
   });
 
   let charts = null;
   if (accData) {
     const un = accData.sync?.unavailable || {};
-    const unav = Object.entries({ ...(un.account || {}) });
+    const covered = new Set((un.notices || []).flatMap((n) => n.metrics || []));
+    const unav = Object.entries({ ...(un.account || {}) }).filter(([k]) => !covered.has(k));
     charts = h('div', { class: 'stack' },
       h('div', { class: 'chart-grid' }, Object.entries(accData.series).map(([metric, pts]) => h('div', { class: 'card chart-card' }, h('div', { class: 'cc-head' }, h('strong', {}, label(metric)), h('span', { class: 'cc-val' }, fmtNum(accData.summary[metric]?.value))), lineChart(pts, { color: 'var(--accent)', label: label(metric) })))),
       unav.length ? h('details', { class: 'card small pad' }, h('summary', {}, `${unav.length} metric(s) not available for this account`), h('ul', {}, unav.map(([k, v]) => h('li', {}, h('strong', {}, label(k)), ': ', v)))) : null);

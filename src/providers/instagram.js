@@ -5,7 +5,7 @@
 // Modeled on Postiz's public Instagram integrations and Meta's Content Publishing docs.
 import { request, qs, ProviderError } from './http.js';
 import { classifyInstagram } from './meta-errors.js';
-import { metaOAuth, insightsWithFallback, shortReason } from './facebook.js';
+import { metaOAuth, insightsWithFallback, shortReason, periodDay } from './facebook.js';
 
 export const INSTAGRAM_FB_SCOPES = [
   'instagram_basic',
@@ -243,8 +243,8 @@ function makeInstagram(variant) {
       const ts = { reach: 'reach', follower_count: 'new_followers' };
       const s30 = Math.max(since, Date.now() - 29 * DAY);
       await insightsWithFallback(actx, ig, Object.keys(ts), { period: 'day', since: Math.floor(s30 / 1000), until: Math.floor(until / 1000) }, (n, values) => {
-        for (const v of values || []) if (v.end_time) out.daily.push({ metric: ts[n], day: String(v.end_time).slice(0, 10), value: Number(v.value) || 0 });
-      }, (n, why) => { out.unavailable[ts[n]] = why; });
+        for (const v of values || []) if (v.end_time) out.daily.push({ metric: ts[n], day: periodDay(v.end_time), value: Number(v.value) || 0 });
+      }, (n, why) => { out.unavailable[ts[n]] = n === 'follower_count' && /Not returned/.test(why) ? 'Instagram reports new followers only for accounts with at least 100 followers' : why; });
       // total_value metrics, fetched per day so we can build a daily series
       const tv = { views: 'views', profile_views: 'profile_views', accounts_engaged: 'accounts_engaged', total_interactions: 'interactions', likes: 'likes', comments: 'comments', shares: 'shares', saves: 'saves' };
       const dayStart = (t) => Math.floor(t / DAY) * DAY;

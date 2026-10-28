@@ -1,14 +1,32 @@
-// Analytics: periodic sync of account + post metrics into time-series tables, and queries for the UI/CSV.
+// Analytics: sync of account + post metrics into time-series tables, and queries for the UI/CSV.
+// A sync of one account is a resumable state machine stored in `analytics_runs`
+// (account metrics in date windows → list posts → post metrics in batches → finish), so on
+// Cloudflare Workers it can be spread over several short cron invocations. On Node it runs to the
+// end in one go (no windows/batches), which keeps the old behaviour.
 import { getProvider } from './providers/index.js';
+import { isBudgetError } from './scheduler.js';
 
 const DAY = 86400000;
 export const SNAPSHOT_METRICS = new Set(['followers', 'following', 'media_count', 'total_views', 'page_likes']);
 export const AVERAGE_METRICS = new Set(['avg_view_sec', 'avg_watch_ms']);
 const today = () => new Date().toISOString().slice(0, 10);
+const STEP_COST = { fetches: 12, queries: 10 };
+
+/** Multi-row statements, chunked to stay under D1's 100 bound parameters per query. */
+function multiRow(head, cols, rows, tail = '') {
+  const per = Math.max(1, Math.floor(99 / cols));
+  const out = [];
+  for (let i = 0; i < rows.length; i += per) {
+    const part = rows.slice(i, i + per);
+    out.push([`${head} VALUES ${part.map(() => `(${Array(cols).fill('?').join(',')})`).join(',')} ${tail}`, ...part.flat()]);
+  }
+  return out;
+}
 
 export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynced = () => {} }) {
   let running = null;
   let timer = null;
+  const A = cfg.analytics;
 
   async function withAuthRetry(id, fn) {
     let integ = await integrations.fresh(id);
@@ -24,78 +42,137 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     }
   }
 
-  async function syncIntegration(id) {
-    const row = integrations.rawGet(id);
+  const saveRun = (r) => db.run('UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=?', r.phase, r.cursor, JSON.stringify(r.data), Date.now(), r.integration_id);
+
+  async function startRun(id) {
+    const status = await db.get('SELECT * FROM analytics_status WHERE integration_id = ?', id);
+    const t = Date.now();
+    const since = Math.max(status?.last_sync_at ? status.last_sync_at - 2 * DAY : 0, t - A.backfillDays * DAY);
+    const data = { unavailable: { account: {}, posts: {} }, daily: 0, postMetrics: 0, items: [], prevSync: status?.last_sync_at || null };
+    await db.run(`INSERT INTO analytics_runs(integration_id, phase, cursor, until_ms, since_ms, data, started_at, updated_at) VALUES(?,?,?,?,?,?,?,?)
+      ON CONFLICT(integration_id) DO UPDATE SET phase=excluded.phase, cursor=excluded.cursor, until_ms=excluded.until_ms, since_ms=excluded.since_ms, data=excluded.data, started_at=excluded.started_at, updated_at=excluded.updated_at`,
+    id, 'account', since, t, since, JSON.stringify(data), t, t);
+    return { integration_id: id, phase: 'account', cursor: since, until_ms: t, since_ms: since, data, started_at: t };
+  }
+
+  /** Run one step of a sync. Returns the final result when the run finished, else null. */
+  async function step(run, row, provider) {
+    const id = run.integration_id;
+    const t = run.until_ms;
+    const un = run.data.unavailable;
+    if (run.phase === 'account') {
+      const end = A.windowDays > 0 ? Math.min(run.cursor + A.windowDays * DAY, t) : t;
+      const acc = await withAuthRetry(id, (integ) => provider.accountAnalytics({ cfg, integration: integ, token: integ.access_token }, { since: run.cursor, until: end }));
+      Object.assign(un.account, acc.unavailable || {});
+      const daily = (acc.daily || []).filter((d) => d.day);
+      run.data.daily += (acc.daily || []).length;
+      const rows = [...daily.map((d) => [id, d.metric, d.day, d.value, t]), ...Object.entries(acc.snapshot || {}).map(([k, v]) => [id, k, today(), v, t])];
+      run.cursor = end;
+      if (end >= t) { run.phase = 'list'; run.cursor = 0; }
+      await db.batch([
+        ...multiRow('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at)', 5, rows, 'ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at'),
+        ['UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=?', run.phase, run.cursor, JSON.stringify(run.data), Date.now(), id],
+      ]);
+      return null;
+    }
+    if (run.phase === 'list') {
+      let recent = [];
+      try {
+        recent = provider.recentPosts ? await withAuthRetry(id, (integ) => provider.recentPosts({ cfg, integration: integ, token: integ.access_token }, A.recentPosts)) : [];
+      } catch (e) {
+        if (e.kind === 'auth' || isBudgetError(e)) throw e;
+        un.account.recent_posts = e.message;
+      }
+      // Posts we published that are not in the "recent" window still get tracked.
+      const ours = await db.all("SELECT p.id, p.external_id, p.published_at, p.published_url, p.settings, COALESCE(p.content_override, g.content) AS caption FROM posts p JOIN groups g ON g.id = p.group_id WHERE p.integration_id = ? AND p.status = 'published' AND p.external_id IS NOT NULL AND p.published_at > ? ORDER BY p.published_at DESC LIMIT 100", id, t - 90 * DAY);
+      const items = new Map(recent.map((r) => [r.external_id, r]));
+      for (const o of ours) {
+        if (!items.has(o.external_id)) {
+          const s = JSON.parse(o.settings || '{}');
+          items.set(o.external_id, { external_id: o.external_id, permalink: o.published_url, published_at: o.published_at, kind: s.post_type === 'story' ? 'story' : row.provider === 'youtube' ? 'video' : 'post', caption: row.provider === 'youtube' && s.title ? s.title : String(o.caption || '').slice(0, 500) });
+        }
+      }
+      run.data.items = [...items.values()];
+      run.phase = 'posts';
+      run.cursor = 0;
+      await saveRun(run);
+      return null;
+    }
+    if (run.phase === 'posts') {
+      const items = run.data.items;
+      const n = A.postsPerStep > 0 ? A.postsPerStep : items.length;
+      const slice = items.slice(run.cursor, run.cursor + n);
+      const metricRows = [];
+      if (provider.postAnalytics && slice.length) {
+        await withAuthRetry(id, async (integ) => {
+          const ctx = { cfg, integration: integ, token: integ.access_token };
+          for (const it of slice) {
+            try {
+              const r = await provider.postAnalytics(ctx, it);
+              for (const [k, v] of Object.entries(r.metrics || {})) metricRows.push([id, it.external_id, k, t, Number(v) || 0]);
+              for (const [k, v] of Object.entries(r.unavailable || {})) un.posts[k] ||= v;
+            } catch (e) {
+              if (e.kind === 'auth' || isBudgetError(e)) throw e;
+              un.posts._errors ||= e.message;
+            }
+          }
+        });
+      }
+      const links = slice.length ? await db.all(`SELECT id, external_id FROM posts WHERE integration_id = ? AND external_id IN (${slice.map(() => '?').join(',')})`, id, ...slice.map((i) => i.external_id)) : [];
+      const linkBy = new Map(links.map((l) => [l.external_id, l.id]));
+      const remote = slice.map((it) => [id, it.external_id, linkBy.get(it.external_id) || null, it.kind || null, it.caption || '', it.permalink || null, it.thumbnail || '', it.published_at || null, t]);
+      run.data.postMetrics += metricRows.length;
+      run.cursor += slice.length;
+      if (run.cursor >= items.length) run.phase = 'finish';
+      await db.batch([
+        ...multiRow('INSERT INTO remote_posts(integration_id, external_id, post_id, kind, caption, permalink, thumbnail, published_at, updated_at)', 9, remote,
+          `ON CONFLICT(integration_id, external_id) DO UPDATE SET post_id=COALESCE(excluded.post_id, remote_posts.post_id), kind=COALESCE(excluded.kind, remote_posts.kind),
+           caption=CASE WHEN excluded.caption <> '' THEN excluded.caption ELSE remote_posts.caption END, permalink=COALESCE(excluded.permalink, remote_posts.permalink),
+           thumbnail=CASE WHEN excluded.thumbnail <> '' THEN excluded.thumbnail ELSE remote_posts.thumbnail END, published_at=COALESCE(excluded.published_at, remote_posts.published_at), updated_at=excluded.updated_at`),
+        ...multiRow('INSERT OR REPLACE INTO post_metrics(integration_id, external_id, metric, captured_at, value)', 5, metricRows),
+        ['UPDATE analytics_runs SET phase=?, cursor=?, data=?, updated_at=? WHERE integration_id=?', run.phase, run.cursor, JSON.stringify(run.data), Date.now(), id],
+      ]);
+      return null;
+    }
+    // finish
+    await db.batch([
+      ['DELETE FROM post_metrics WHERE integration_id = ? AND captured_at < ?', id, t - 365 * DAY],
+      [`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,NULL,?)
+        ON CONFLICT(integration_id) DO UPDATE SET last_sync_at=excluded.last_sync_at, last_error=NULL, unavailable=excluded.unavailable`, id, t, JSON.stringify(un)],
+      ['DELETE FROM analytics_runs WHERE integration_id = ?', id],
+    ]);
+    return { ok: true, daily: run.data.daily, posts: run.data.items.length, postMetrics: run.data.postMetrics, unavailable: un };
+  }
+
+  /**
+   * Sync one account (start or resume its run). Without a budget it runs to completion.
+   * With a budget (Workers) it may return { ok: true, pending: true } and continue on the next call.
+   */
+  async function syncIntegration(id, { budget = null, restart = false } = {}) {
+    const row = await integrations.rawGet(id);
     if (!row) throw new Error('Unknown integration');
     const provider = getProvider(row.provider);
     if (!provider.accountAnalytics) return { skipped: true };
-    const status = db.get('SELECT * FROM analytics_status WHERE integration_id = ?', id);
-    const t = Date.now();
-    const since = Math.max(status?.last_sync_at ? status.last_sync_at - 2 * DAY : 0, t - cfg.analytics.backfillDays * DAY);
-    const unavailable = { account: {}, posts: {} };
+    let run = restart ? null : await db.get('SELECT * FROM analytics_runs WHERE integration_id = ?', id);
+    if (run) run = { ...run, data: JSON.parse(run.data || '{}') };
+    else run = await startRun(id);
     try {
-      const counts = await withAuthRetry(id, async (integ) => {
-        const ctx = { cfg, integration: integ, token: integ.access_token };
-        const acc = await provider.accountAnalytics(ctx, { since, until: t });
-        Object.assign(unavailable.account, acc.unavailable || {});
-        let recent = [];
-        try {
-          recent = provider.recentPosts ? await provider.recentPosts(ctx, cfg.analytics.recentPosts) : [];
-        } catch (e) {
-          if (e.kind === 'auth') throw e;
-          unavailable.account.recent_posts = e.message;
-        }
-        // Posts we published that are not in the "recent" window still get tracked.
-        const ours = db.all("SELECT p.id, p.external_id, p.published_at, p.published_url, p.settings, COALESCE(p.content_override, g.content) AS caption FROM posts p JOIN groups g ON g.id = p.group_id WHERE p.integration_id = ? AND p.status = 'published' AND p.external_id IS NOT NULL AND p.published_at > ? ORDER BY p.published_at DESC LIMIT 100", id, t - 90 * DAY);
-        const items = new Map(recent.map((r) => [r.external_id, r]));
-        for (const o of ours) {
-          if (!items.has(o.external_id)) {
-            const s = JSON.parse(o.settings || '{}');
-            items.set(o.external_id, { external_id: o.external_id, permalink: o.published_url, published_at: o.published_at, kind: s.post_type === 'story' ? 'story' : row.provider === 'youtube' ? 'video' : 'post', caption: row.provider === 'youtube' && s.title ? s.title : String(o.caption || '').slice(0, 500) });
-          }
-        }
-        const metricRows = [];
-        for (const it of items.values()) {
-          if (!provider.postAnalytics) break;
-          try {
-            const r = await provider.postAnalytics(ctx, it);
-            for (const [k, v] of Object.entries(r.metrics || {})) metricRows.push([it.external_id, k, v]);
-            for (const [k, v] of Object.entries(r.unavailable || {})) unavailable.posts[k] ||= v;
-          } catch (e) {
-            if (e.kind === 'auth') throw e;
-            unavailable.posts._errors ||= e.message;
-          }
-        }
-        db.tx(() => {
-          for (const d of acc.daily || []) {
-            if (!d.day) continue;
-            db.run('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at) VALUES(?,?,?,?,?) ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at', id, d.metric, d.day, d.value, t);
-          }
-          for (const [k, v] of Object.entries(acc.snapshot || {})) {
-            db.run('INSERT INTO account_metrics(integration_id, metric, day, value, fetched_at) VALUES(?,?,?,?,?) ON CONFLICT(integration_id, metric, day) DO UPDATE SET value=excluded.value, fetched_at=excluded.fetched_at', id, k, today(), v, t);
-          }
-          for (const it of items.values()) {
-            const link = db.get('SELECT id FROM posts WHERE integration_id = ? AND external_id = ?', id, it.external_id);
-            db.run(`INSERT INTO remote_posts(integration_id, external_id, post_id, kind, caption, permalink, thumbnail, published_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(integration_id, external_id) DO UPDATE SET post_id=COALESCE(excluded.post_id, remote_posts.post_id), kind=COALESCE(excluded.kind, remote_posts.kind),
-                    caption=CASE WHEN excluded.caption <> '' THEN excluded.caption ELSE remote_posts.caption END, permalink=COALESCE(excluded.permalink, remote_posts.permalink),
-                    thumbnail=CASE WHEN excluded.thumbnail <> '' THEN excluded.thumbnail ELSE remote_posts.thumbnail END, published_at=COALESCE(excluded.published_at, remote_posts.published_at), updated_at=excluded.updated_at`,
-              id, it.external_id, link?.id || null, it.kind || null, it.caption || '', it.permalink || null, it.thumbnail || '', it.published_at || null, t);
-          }
-          for (const [ext, metric, value] of metricRows) {
-            db.run('INSERT OR REPLACE INTO post_metrics(integration_id, external_id, metric, captured_at, value) VALUES(?,?,?,?,?)', id, ext, metric, t, Number(value) || 0);
-          }
-          db.run('DELETE FROM post_metrics WHERE integration_id = ? AND captured_at < ?', id, t - 365 * DAY);
-          db.run(`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,NULL,?)
-                  ON CONFLICT(integration_id) DO UPDATE SET last_sync_at=excluded.last_sync_at, last_error=NULL, unavailable=excluded.unavailable`, id, t, JSON.stringify(unavailable));
-        });
-        return { daily: (acc.daily || []).length, posts: items.size, postMetrics: metricRows.length };
-      });
-      return { ok: true, ...counts, unavailable };
+      for (;;) {
+        if (budget && !budget.has(STEP_COST)) return { ok: true, pending: true, phase: run.phase };
+        const done = await step(run, row, provider);
+        if (done) return done;
+      }
     } catch (e) {
-      db.run(`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,?, '{}')
-              ON CONFLICT(integration_id) DO UPDATE SET last_error=excluded.last_error`, id, status?.last_sync_at || null, e.message);
-      if (e.kind === 'auth' || e.kind === 'disconnect') integrations.markNeedsReconnect(id, e.message);
+      if (isBudgetError(e)) {
+        log('warn', `analytics sync ${id}: invocation budget exhausted in phase ${run.phase}; resuming next tick`);
+        return { ok: true, pending: true, phase: run.phase };
+      }
+      await db.batch([
+        [`INSERT INTO analytics_status(integration_id, last_sync_at, last_error, unavailable) VALUES(?,?,?, '{}')
+          ON CONFLICT(integration_id) DO UPDATE SET last_error=excluded.last_error`, id, run.data.prevSync || null, e.message],
+        ['DELETE FROM analytics_runs WHERE integration_id = ?', id],
+      ]);
+      if (e.kind === 'auth' || e.kind === 'disconnect') await integrations.markNeedsReconnect(id, e.message);
       log('warn', `analytics sync ${id}: ${e.message}`);
       return { ok: false, error: e.message };
     }
@@ -105,24 +182,45 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     if (running) return running;
     running = (async () => {
       const out = {};
-      for (const r of db.all("SELECT id FROM integrations WHERE status = 'active'")) out[r.id] = await syncIntegration(r.id);
-      try { onSynced(out); } catch {}
+      for (const r of await db.all("SELECT id FROM integrations WHERE status = 'active'")) out[r.id] = await syncIntegration(r.id, { restart: true });
+      try { await onSynced(out); } catch {}
       return out;
     })().finally(() => { running = null; });
     return running;
   }
 
+  /**
+   * Workers cron: continue unfinished runs, then start runs for accounts whose last sync is older
+   * than ANALYTICS_INTERVAL_HOURS, while the budget lasts. Emits analytics.synced per finished account.
+   */
+  async function syncDue({ budget = null, force = false } = {}) {
+    const ms = A.intervalHours * 3600000;
+    if (!ms && !force) return {};
+    const due = await db.all(`SELECT i.id, r.integration_id AS running FROM integrations i
+      LEFT JOIN analytics_status s ON s.integration_id = i.id LEFT JOIN analytics_runs r ON r.integration_id = i.id
+      WHERE i.status = 'active' AND (r.integration_id IS NOT NULL OR s.last_sync_at IS NULL OR s.last_sync_at < ?)
+      ORDER BY (r.integration_id IS NULL), COALESCE(s.last_sync_at, 0) LIMIT 10`, Date.now() - (force ? 0 : ms));
+    const out = {};
+    for (const d of due) {
+      if (budget && !budget.has(STEP_COST)) break;
+      const r = await syncIntegration(d.id, { budget });
+      out[d.id] = r;
+      if (!r.pending) { try { await onSynced({ [d.id]: r }); } catch {} }
+      if (r.pending) break;
+    }
+    return out;
+  }
+
   const dayStr = (ms) => new Date(ms).toISOString().slice(0, 10);
 
-  function series(integrationId, from, to) {
-    const rows = db.all('SELECT metric, day, value FROM account_metrics WHERE integration_id = ? AND day >= ? AND day <= ? ORDER BY day', integrationId, dayStr(from), dayStr(to));
+  async function series(integrationId, from, to) {
+    const rows = await db.all('SELECT metric, day, value FROM account_metrics WHERE integration_id = ? AND day >= ? AND day <= ? ORDER BY day', integrationId, dayStr(from), dayStr(to));
     const out = {};
     for (const r of rows) (out[r.metric] ||= []).push({ day: r.day, value: r.value });
     return out;
   }
 
-  function summary(integrationId, from, to) {
-    const s = series(integrationId, from, to);
+  const summarize = (s) => {
     const out = {};
     for (const [m, pts] of Object.entries(s)) {
       if (SNAPSHOT_METRICS.has(m)) {
@@ -135,10 +233,11 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
       }
     }
     return out;
-  }
+  };
+  const summary = async (integrationId, from, to) => summarize(await series(integrationId, from, to));
 
-  function latestPostMetrics(integrationId) {
-    const rows = db.all(`SELECT pm.external_id, pm.metric, pm.value FROM post_metrics pm
+  async function latestPostMetrics(integrationId) {
+    const rows = await db.all(`SELECT pm.external_id, pm.metric, pm.value FROM post_metrics pm
       JOIN (SELECT external_id, metric, MAX(captured_at) AS mc FROM post_metrics WHERE integration_id = ? GROUP BY external_id, metric) l
       ON l.external_id = pm.external_id AND l.metric = pm.metric AND l.mc = pm.captured_at WHERE pm.integration_id = ?`, integrationId, integrationId);
     const map = {};
@@ -146,14 +245,13 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     return map;
   }
 
-  function topPosts({ integrationId = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
-    const ids = integrationId ? [integrationId] : db.all('SELECT id FROM integrations').map((r) => r.id);
+  async function topPosts({ integrationId = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
+    const integs = integrationId ? [await integrations.rawGet(integrationId)].filter(Boolean) : await db.all('SELECT * FROM integrations');
     const out = [];
-    for (const id of ids) {
-      const integ = integrations.rawGet(id);
-      if (!integ) continue;
-      const metrics = latestPostMetrics(id);
-      const rows = db.all('SELECT * FROM remote_posts WHERE integration_id = ? AND (published_at IS NULL OR (published_at >= ? AND published_at <= ?))', id, from, to);
+    for (const integ of integs) {
+      const id = integ.id;
+      const metrics = await latestPostMetrics(id);
+      const rows = await db.all('SELECT * FROM remote_posts WHERE integration_id = ? AND (published_at IS NULL OR (published_at >= ? AND published_at <= ?))', id, from, to);
       for (const r of rows) {
         out.push({ integration_id: id, provider: integ.provider, account: integ.name, external_id: r.external_id, post_id: r.post_id, kind: r.kind, caption: r.caption, permalink: r.permalink, thumbnail: r.thumbnail, published_at: r.published_at, via_postlite: !!r.post_id, metrics: metrics[r.external_id] || {} });
       }
@@ -162,8 +260,8 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     return out.slice(0, limit);
   }
 
-  function postSeries(integrationId, externalId) {
-    const rows = db.all('SELECT metric, captured_at, value FROM post_metrics WHERE integration_id = ? AND external_id = ? ORDER BY captured_at', integrationId, externalId);
+  async function postSeries(integrationId, externalId) {
+    const rows = await db.all('SELECT metric, captured_at, value FROM post_metrics WHERE integration_id = ? AND external_id = ? ORDER BY captured_at', integrationId, externalId);
     const out = {};
     for (const r of rows) (out[r.metric] ||= []).push({ t: r.captured_at, value: r.value });
     return out;
@@ -175,42 +273,49 @@ export function createAnalytics({ db, cfg, integrations, log = () => {}, onSynce
     return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
   };
 
-  function csvAccount(integrationId, from, to) {
-    const integ = integrations.rawGet(integrationId);
-    const rows = db.all('SELECT day, metric, value FROM account_metrics WHERE integration_id = ? AND day >= ? AND day <= ? ORDER BY day, metric', integrationId, dayStr(from), dayStr(to));
+  async function csvAccount(integrationId, from, to) {
+    const integ = await integrations.rawGet(integrationId);
+    const rows = await db.all('SELECT day, metric, value FROM account_metrics WHERE integration_id = ? AND day >= ? AND day <= ? ORDER BY day, metric', integrationId, dayStr(from), dayStr(to));
     return ['account,provider,day,metric,value', ...rows.map((r) => [integ?.name, integ?.provider, r.day, r.metric, r.value].map(csvCell).join(','))].join('\n') + '\n';
   }
 
-  function csvPosts(opts) {
-    const posts = topPosts({ ...opts, limit: 10000 });
+  async function csvPosts(opts) {
+    const posts = await topPosts({ ...opts, limit: 10000 });
     const metrics = [...new Set(posts.flatMap((p) => Object.keys(p.metrics)))].sort();
     const head = ['account', 'provider', 'external_id', 'published_at', 'kind', 'via_postlite', 'permalink', 'caption', ...metrics];
     const lines = posts.map((p) => [p.account, p.provider, p.external_id, p.published_at ? new Date(p.published_at).toISOString() : '', p.kind, p.via_postlite ? 'yes' : 'no', p.permalink, (p.caption || '').slice(0, 300), ...metrics.map((m) => p.metrics[m] ?? '')].map(csvCell).join(','));
     return [head.join(','), ...lines].join('\n') + '\n';
   }
 
+  const statusView = (r) => (r ? { last_sync_at: r.last_sync_at, last_error: r.last_error, unavailable: JSON.parse(r.unavailable || '{}') } : null);
+
   return {
     syncIntegration,
     syncAll,
+    syncDue,
     series,
     summary,
     topPosts,
     postSeries,
     csvAccount,
     csvPosts,
-    status: (id) => {
-      const r = db.get('SELECT * FROM analytics_status WHERE integration_id = ?', id);
-      return r ? { last_sync_at: r.last_sync_at, last_error: r.last_error, unavailable: JSON.parse(r.unavailable || '{}') } : null;
+    status: async (id) => statusView(await db.get('SELECT * FROM analytics_status WHERE integration_id = ?', id)),
+    /** status for many accounts in one query: Map id → status */
+    async statusMany(ids) {
+      if (!ids.length) return new Map();
+      const rows = await db.all(`SELECT * FROM analytics_status WHERE integration_id IN (${ids.map(() => '?').join(',')})`, ...ids);
+      return new Map(rows.map((r) => [r.integration_id, statusView(r)]));
     },
     isRunning: () => !!running,
     start() {
-      const ms = cfg.analytics.intervalHours * 3600000;
+      const ms = A.intervalHours * 3600000;
       if (!ms || timer) return;
       timer = setInterval(() => syncAll().catch((e) => log('error', `analytics: ${e.message}`)), ms);
       timer.unref?.();
       // first sync shortly after boot if never synced or stale
-      const last = db.get('SELECT MIN(COALESCE(last_sync_at, 0)) AS t FROM analytics_status')?.t || 0;
-      if (Date.now() - last > ms) setTimeout(() => syncAll().catch(() => {}), 60000).unref?.();
+      db.get('SELECT MIN(COALESCE(last_sync_at, 0)) AS t FROM analytics_status').then((r) => {
+        if (Date.now() - (r?.t || 0) > ms) setTimeout(() => syncAll().catch(() => {}), 60000).unref?.();
+      }).catch(() => {});
     },
     stop() { if (timer) clearInterval(timer); timer = null; },
   };

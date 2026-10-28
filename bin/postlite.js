@@ -3,10 +3,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { loadDotEnv, getConfig, ROOT } from '../src/config.js';
+import { loadDotEnv, getConfig, ROOT } from '../src/node/config.js';
 
 loadDotEnv();
-const [, , cmd, ...rest] = process.argv;
+const [, , cmd, ...restRaw] = process.argv;
+// Global remote flags (any position): --url https://postlite.example.com --key pl_...
+// They target a remote instance (Node or Cloudflare Workers) over the REST API.
+const rest = [];
+for (let i = 0; i < restRaw.length; i++) {
+  const a = restRaw[i];
+  const m = /^--(url|key)(?:=(.*))?$/.exec(a);
+  if (!m) { rest.push(a); continue; }
+  const v = m[2] !== undefined ? m[2] : restRaw[++i];
+  if (m[1] === 'url') process.env.POSTLITE_URL = v;
+  else process.env.POSTLITE_API_KEY = v;
+}
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -28,17 +39,19 @@ Server / admin (run on the server, uses .env):
   postlite start                         Start the web server + scheduler
   postlite set-password                  Set the admin password (prompt, or pipe via stdin)
   postlite gen-secrets                   Print fresh SESSION_SECRET and TOKEN_ENC_KEY values
+  postlite hash-password                 Print a portable (PBKDF2) password hash for ADMIN_PASSWORD_HASH (Cloudflare Workers)
   postlite keys create --name NAME [--scopes read,write,publish,analytics,admin] [--no-approval] [--rate 120]
   postlite keys list | postlite keys revoke <id>
   postlite apps list | apps set <meta|instagram|google> --id ID   (secret: prompt or stdin)
   postlite apps clear <app> | apps test <app>   Platform developer-app credentials (Settings → Platform apps)
   postlite mcp                           MCP over stdio (needs POSTLITE_API_KEY; with POSTLITE_URL it bridges to a remote server)
 
-API client (needs POSTLITE_API_KEY, optional POSTLITE_URL, default http://127.0.0.1:4100):
+API client — local or remote instance, Node or Cloudflare Workers
+(needs POSTLITE_API_KEY or --key; POSTLITE_URL or --url, default http://127.0.0.1:4100):
   postlite tools                         List all operations / MCP tools
   postlite call <tool> [--json '{...}'] [--field value ...]
   postlite accounts list
-  postlite media upload <file>
+  postlite media upload <file>          (resumable multipart upload; works for multi-GB videos on Workers)
   postlite posts list [--status scheduled] [--from 2026-11-01 --to 2026-11-08]
   postlite posts create --content "text" --accounts id1,id2 [--media m1,m2] [--at "2026-11-02T18:00" | --next-slot | --now] [--settings '{"title":"..."}']
   postlite posts schedule <post_id> --at TIME | --next-slot
@@ -48,8 +61,10 @@ API client (needs POSTLITE_API_KEY, optional POSTLITE_URL, default http://127.0.
 `;
 
 async function core() {
-  const { createCore, makeLogger } = await import('../src/core.js');
-  return createCore(getConfig(), { log: makeLogger(process.env.LOG_LEVEL || 'warn') });
+  const { createNodeCore, makeLogger } = await import('../src/node/core.js');
+  const c = createNodeCore(getConfig(), { log: makeLogger(process.env.LOG_LEVEL || 'warn') });
+  await c.prepare();
+  return c;
 }
 
 async function readSecret(prompt) {
@@ -142,11 +157,19 @@ async function main() {
       const pw = a.password ? String(a.password) : await readSecret('New admin password: ');
       if (!pw || pw.length < 10) { console.error('Password must be at least 10 characters.'); process.exit(1); }
       const c = await core();
-      const { hashPassword } = await import('../src/crypto.js');
-      c.db.setSetting('admin_password', hashPassword(pw));
-      c.db.run('DELETE FROM sessions');
+      const { hashPassword } = await import('../src/node/core.js');
+      await c.db.setSetting('admin_password', hashPassword(pw));
+      await c.db.run('DELETE FROM sessions');
       console.error('Admin password updated (all sessions logged out).');
       return c.stop();
+    }
+    case 'hash-password': {
+      const pw = a.password ? String(a.password) : await readSecret('Admin password to hash: ');
+      if (!pw || pw.length < 10) { console.error('Password must be at least 10 characters.'); process.exit(1); }
+      const { hashPasswordPbkdf2 } = await import('../src/crypto.js');
+      console.error('Store this as the Worker secret ADMIN_PASSWORD_HASH (wrangler secret put ADMIN_PASSWORD_HASH):');
+      console.log(await hashPasswordPbkdf2(pw));
+      return;
     }
     case 'gen-secrets':
       console.log(`SESSION_SECRET=${crypto.randomBytes(32).toString('base64url')}`);
@@ -156,12 +179,12 @@ async function main() {
       const c = await core();
       const sub = a._[0];
       if (sub === 'create') {
-        const k = c.apiKeys.create({ name: a.name || 'agent', scopes: a.scopes ? String(a.scopes).split(',') : undefined, approval_mode: !a['no-approval'], rate_limit_per_min: a.rate ? Number(a.rate) : undefined });
-        c.audit.record({ principal: { type: 'cli', name: 'cli' }, via: 'cli', operation: 'create_api_key', target: k.id, detail: { name: k.name, scopes: k.scopes, approval_mode: k.approval_mode } });
+        const k = await c.apiKeys.create({ name: a.name || 'agent', scopes: a.scopes ? String(a.scopes).split(',') : undefined, approval_mode: !a['no-approval'], rate_limit_per_min: a.rate ? Number(a.rate) : undefined });
+        await c.audit.record({ principal: { type: 'cli', name: 'cli' }, via: 'cli', operation: 'create_api_key', target: k.id, detail: { name: k.name, scopes: k.scopes, approval_mode: k.approval_mode } });
         console.error(`Created key "${k.name}" scopes=${k.scopes.join(',')} approval_mode=${k.approval_mode}. Store it now; it is not shown again:`);
         console.log(k.key);
-      } else if (sub === 'list') print(c.apiKeys.list());
-      else if (sub === 'revoke') { if (!c.apiKeys.revoke(a._[1])) { console.error('Not found'); process.exitCode = 1; } else console.error('Revoked'); }
+      } else if (sub === 'list') print(await c.apiKeys.list());
+      else if (sub === 'revoke') { if (!(await c.apiKeys.revoke(a._[1]))) { console.error('Not found'); process.exitCode = 1; } else console.error('Revoked'); }
       else console.error(HELP);
       return c.stop();
     }
@@ -175,9 +198,9 @@ async function main() {
         else if (sub === 'set') {
           if (!a.id) throw new Error('Usage: postlite apps set <meta|instagram|google> --id APP_ID   (the secret is read from a prompt or stdin)');
           const secret = await readSecret(`${app} app secret (leave empty to keep the saved one): `);
-          print(view(c.apps.set(app, { client_id: String(a.id), client_secret: secret || undefined })));
-          audit('set_platform_app', { app, client_id: String(a.id), client_secret: secret ? '[redacted]' : undefined });
-        } else if (sub === 'clear') { print(view(c.apps.clear(app))); audit('clear_platform_app', { app }); }
+          print(view(await c.apps.set(app, { client_id: String(a.id), client_secret: secret || undefined })));
+          await audit('set_platform_app', { app, client_id: String(a.id), client_secret: secret ? '[redacted]' : undefined });
+        } else if (sub === 'clear') { print(view(await c.apps.clear(app))); await audit('clear_platform_app', { app }); }
         else if (sub === 'test') print(await c.apps.test(app));
         else console.error(HELP);
       } catch (e) { console.error(e.message); process.exitCode = 1; }
@@ -186,10 +209,10 @@ async function main() {
     case 'mcp': {
       const key = process.env.POSTLITE_API_KEY;
       if (!key) { console.error('Set POSTLITE_API_KEY to an API key (postlite keys create --name "my agent").'); process.exit(1); }
-      const { runStdio, runBridge } = await import('../src/mcp.js');
+      const { runStdio, runBridge } = await import('../src/node/mcp-stdio.js');
       if (process.env.POSTLITE_URL) return runBridge({ url: process.env.POSTLITE_URL, key });
       const c = await core();
-      const principal = c.apiKeys.authenticate(key);
+      const principal = await c.apiKeys.authenticate(key);
       if (!principal) { console.error('Invalid or revoked POSTLITE_API_KEY'); process.exit(1); }
       const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
       await runStdio(c, principal, { version });
@@ -211,10 +234,12 @@ async function main() {
       if (a._[0] !== 'upload' || !a._[1]) throw new Error('Usage: postlite media upload <file>');
       const file = a._[1];
       const key = process.env.POSTLITE_API_KEY;
-      if (!key) throw new Error('Set POSTLITE_API_KEY');
-      const res = await fetch(`${API_URL}/api/v1/media?filename=${encodeURIComponent(path.basename(file))}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/octet-stream' }, body: fs.createReadStream(file), duplex: 'half' });
-      const j = await res.json();
-      if (!res.ok) throw Object.assign(new Error(j.error?.message || res.status), { json: j });
+      if (!key) throw new Error('Set POSTLITE_API_KEY (or pass --key)');
+      if (!fs.existsSync(file)) throw new Error(`File not found: ${file}`);
+      const { uploadFileRemote } = await import('../src/node/remote.js');
+      const tty = process.stderr.isTTY;
+      const j = await uploadFileRemote({ url: API_URL, key, file, filename: a.filename ? String(a.filename) : path.basename(file), onProgress: tty ? (p) => process.stderr.write(`\ruploading ${Math.round(p * 100)}%`) : null });
+      if (tty) process.stderr.write('\n');
       return print(j);
     }
     case 'posts': {

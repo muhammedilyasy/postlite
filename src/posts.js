@@ -1,11 +1,14 @@
 // Posts & groups service. A "group" is what the composer edits (global caption + media);
 // it has one post per selected account, each with optional overrides and platform settings.
+// All reads are batch-loaded (few queries per request: Cloudflare D1 allows 50 per invocation on
+// the Free plan) and multi-row writes go through db.batch() (atomic on node:sqlite and D1).
 import { uid } from './crypto.js';
-import { HttpError } from './media.js';
+import { HttpError } from './errors.js';
 import { validatePost, defaultSettings } from './shared/validate.js';
 
 const parse = (s, d) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 const LOCKED = new Set(['published', 'publishing']);
+const CHUNK = 90; // D1: max 100 bound parameters per query
 
 export function aggregateStatus(targets) {
   const st = targets.map((t) => t.status);
@@ -18,17 +21,42 @@ export function aggregateStatus(targets) {
   return 'draft';
 }
 
-export function createPosts({ db, media, integrations }) {
-  const event = (postId, level, message) => db.run('INSERT INTO post_events(post_id, at, level, message) VALUES(?,?,?,?)', postId, Date.now(), level, String(message).slice(0, 2000));
+async function inChunks(ids, fn) {
+  const out = [];
+  const list = [...new Set(ids.filter((x) => x !== null && x !== undefined).map(String))];
+  for (let i = 0; i < list.length; i += CHUNK) out.push(...(await fn(list.slice(i, i + CHUNK))));
+  return out;
+}
+const marks = (n) => Array(n).fill('?').join(',');
 
-  function composed(post, group) {
-    const g = group || db.get('SELECT * FROM groups WHERE id = ?', post.group_id);
+export function createPosts({ db, media, integrations }) {
+  const eventStmt = (postId, level, message) => ['INSERT INTO post_events(post_id, at, level, message) VALUES(?,?,?,?)', postId, Date.now(), level, String(message).slice(0, 2000)];
+  const event = (postId, level, message) => db.run(...eventStmt(postId, level, message));
+
+  const SELECT = `SELECT p.*, i.provider, i.name, i.picture, i.status AS istatus, j.state AS job_state, j.run_at
+                  FROM posts p JOIN integrations i ON i.id = p.integration_id LEFT JOIN jobs j ON j.post_id = p.id`;
+
+  const mediaIdsOf = (post, group) => {
+    const settings = parse(post.settings, {});
+    const ids = post.media_override !== null && post.media_override !== undefined ? parse(post.media_override, []) : parse(group?.media, []);
+    return settings.thumbnail ? [...ids, settings.thumbnail] : ids;
+  };
+  const loadMedia = async (ids) => new Map((await inChunks(ids, (c) => db.all(`SELECT * FROM media WHERE id IN (${marks(c.length)})`, ...c))).map((m) => [m.id, m]));
+  const loadGroupsRaw = async (ids) => new Map((await inChunks(ids, (c) => db.all(`SELECT * FROM groups WHERE id IN (${marks(c.length)})`, ...c))).map((g) => [g.id, g]));
+
+  function composeWith(post, g, mediaMap) {
     const settings = { ...defaultSettings(post.provider), ...parse(post.settings, {}) };
     const mediaIds = post.media_override !== null && post.media_override !== undefined ? parse(post.media_override, []) : parse(g.media, []);
     const caption = post.content_override !== null && post.content_override !== undefined ? post.content_override : g.content;
-    const mediaRows = media.getMany(mediaIds);
-    const thumbnail = settings.thumbnail ? media.get(settings.thumbnail) : null;
+    const mediaRows = mediaIds.map((id) => mediaMap.get(String(id))).filter(Boolean);
+    const thumbnail = settings.thumbnail ? mediaMap.get(String(settings.thumbnail)) || null : null;
     return { caption, settings, media: mediaRows, thumbnail };
+  }
+
+  /** Effective caption/media/settings of a post (loads its group and media). */
+  async function composed(post, group) {
+    const g = group || (await db.get('SELECT * FROM groups WHERE id = ?', post.group_id));
+    return composeWith(post, g, await loadMedia(mediaIdsOf(post, g)));
   }
 
   function validateComposed(provider, c) {
@@ -36,9 +64,8 @@ export function createPosts({ db, media, integrations }) {
     return validatePost(provider, { caption: c.caption, media: c.media.map(toInfo), settings: c.settings, thumbnail: c.thumbnail ? toInfo(c.thumbnail) : null });
   }
 
-  const postView = (p) => {
-    const g = db.get('SELECT * FROM groups WHERE id = ?', p.group_id);
-    const c = composed(p, g);
+  const postViewWith = (p, g, mediaMap) => {
+    const c = composeWith(p, g, mediaMap);
     return {
       id: p.id, group_id: p.group_id, integration_id: p.integration_id, account_id: p.integration_id, provider: p.provider, account_name: p.name, account_picture: p.picture, account_status: p.istatus,
       content_override: p.content_override, media_override: parse(p.media_override, null), settings: c.settings,
@@ -48,158 +75,189 @@ export function createPosts({ db, media, integrations }) {
     };
   };
 
-  const SELECT = `SELECT p.*, i.provider, i.name, i.picture, i.status AS istatus, j.state AS job_state, j.run_at
-                  FROM posts p JOIN integrations i ON i.id = p.integration_id LEFT JOIN jobs j ON j.post_id = p.id`;
-
-  function upsertJob(postId, runAt) {
-    db.run(`INSERT INTO jobs(post_id, state, run_at, phase, attempts, created_at, updated_at) VALUES(?, 'queued', ?, 'start', 0, ?, ?)
-            ON CONFLICT(post_id) DO UPDATE SET state='queued', run_at=excluded.run_at, phase='start', pending_data=NULL, pending_since=NULL, attempts=0,
-            locked_by=NULL, locked_until=NULL, inflight=NULL, last_error=NULL, updated_at=excluded.updated_at`, postId, runAt, Date.now(), Date.now());
+  /** Views for post rows (from SELECT) with 2–3 queries total. */
+  async function postViews(rows) {
+    if (!rows.length) return [];
+    const groups = await loadGroupsRaw(rows.map((r) => r.group_id));
+    const mediaMap = await loadMedia(rows.flatMap((r) => mediaIdsOf(r, groups.get(r.group_id))));
+    return rows.filter((r) => groups.has(r.group_id)).map((r) => postViewWith(r, groups.get(r.group_id), mediaMap));
   }
 
-  function assertNotRunning(postIds) {
-    for (const id of postIds) {
-      const j = db.get("SELECT state FROM jobs WHERE post_id = ? AND state = 'running'", id);
-      if (j) throw new HttpError(409, 'This post is being published right now; try again in a moment.');
+  /** Full group views for ids (order preserved, missing skipped) with ~4 queries total. */
+  async function loadGroups(ids) {
+    const list = [...new Set((ids || []).map(String))];
+    if (!list.length) return [];
+    const groups = await loadGroupsRaw(list);
+    const targets = await inChunks(list, (c) => db.all(`${SELECT} WHERE p.group_id IN (${marks(c.length)}) ORDER BY i.provider, p.created_at, p.id`, ...c));
+    const mediaIds = [...[...groups.values()].flatMap((g) => parse(g.media, [])), ...targets.flatMap((t) => mediaIdsOf(t, groups.get(t.group_id)))];
+    const mediaMap = await loadMedia(mediaIds);
+    const byGroup = new Map();
+    for (const t of targets) {
+      const g = groups.get(t.group_id);
+      if (g) (byGroup.get(g.id) || byGroup.set(g.id, []).get(g.id)).push(postViewWith(t, g, mediaMap));
     }
+    return list.filter((id) => groups.has(id)).map((id) => {
+      const g = groups.get(id);
+      const tv = byGroup.get(id) || [];
+      return {
+        id: g.id, content: g.content, media: parse(g.media, []).map((m) => mediaMap.get(String(m))).filter(Boolean).map(media.view), publish_at: g.publish_at, status: aggregateStatus(tv),
+        created_by: g.created_by, approval_note: g.approval_note, created_at: g.created_at, updated_at: g.updated_at, targets: tv,
+      };
+    });
+  }
+
+  const upsertJobStmt = (postId, runAt) => [`INSERT INTO jobs(post_id, state, run_at, phase, attempts, created_at, updated_at) VALUES(?, 'queued', ?, 'start', 0, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET state='queued', run_at=excluded.run_at, phase='start', pending_data=NULL, pending_since=NULL, attempts=0,
+            locked_by=NULL, locked_until=NULL, inflight=NULL, last_error=NULL, updated_at=excluded.updated_at WHERE jobs.state <> 'running'`, postId, runAt, Date.now(), Date.now()];
+
+  async function assertNotRunning(postIds) {
+    if (!postIds.length) return;
+    const rows = await inChunks(postIds, (c) => db.all(`SELECT post_id FROM jobs WHERE state = 'running' AND post_id IN (${marks(c.length)})`, ...c));
+    if (rows.length) throw new HttpError(409, 'This post is being published right now; try again in a moment.');
   }
 
   const api = {
     composed,
     validateComposed,
     event,
+    eventStmt,
+    loadGroups,
 
-    getGroup(id) {
-      const g = db.get('SELECT * FROM groups WHERE id = ?', id);
-      if (!g) return null;
-      const targets = db.all(`${SELECT} WHERE p.group_id = ? ORDER BY i.provider`, id).map(postView);
-      return {
-        id: g.id, content: g.content, media: media.getMany(parse(g.media, [])).map(media.view), publish_at: g.publish_at, status: aggregateStatus(targets),
-        created_by: g.created_by, approval_note: g.approval_note, created_at: g.created_at, updated_at: g.updated_at, targets,
-      };
+    async getGroup(id) {
+      const [g] = await loadGroups([id]);
+      return g || null;
     },
 
     /**
      * Create or update a group.
      * input: { content, media:[ids], publish_at, action:'draft'|'schedule'|'now', posts:[{integration_id, content_override, media_override, settings}] }
      */
-    saveGroup(input, groupId = null, { principal = null } = {}) {
+    async saveGroup(input, groupId = null, { principal = null } = {}) {
       const approval = !!principal?.approval;
       const action = input.action || 'draft';
       if (!['draft', 'schedule', 'now'].includes(action)) throw new HttpError(400, 'Invalid action');
       const now = Date.now();
-      let publishAt = action === 'now' ? now : input.publish_at ? Number(input.publish_at) : null;
+      const publishAt = action === 'now' ? now : input.publish_at ? Number(input.publish_at) : null;
       if (action === 'schedule' && !publishAt) throw new HttpError(400, 'Pick a date and time to schedule.');
       if (action === 'schedule' && publishAt < now - 60000) throw new HttpError(400, 'The scheduled time is in the past. Use "Post now" or pick a future time.');
       const list = Array.isArray(input.posts) ? input.posts : [];
       if (!list.length) throw new HttpError(400, 'Select at least one account.');
       const content = String(input.content ?? '');
       const mediaIds = (input.media || []).map(String);
-      for (const mid of mediaIds) if (!media.get(mid)) throw new HttpError(400, `Unknown media ${mid}`);
+
+      // Load everything needed for validation up front (3 queries).
+      const integ = new Map((await inChunks(list.map((p) => p.integration_id), (c) => db.all(`SELECT * FROM integrations WHERE id IN (${marks(c.length)})`, ...c))).map((r) => [r.id, r]));
+      const thumbs = list.map((p) => p.settings?.thumbnail).filter(Boolean);
+      const overrides = list.flatMap((p) => (Array.isArray(p.media_override) ? p.media_override.map(String) : []));
+      const mediaMap = await loadMedia([...mediaIds, ...overrides, ...thumbs]);
+      for (const mid of mediaIds) if (!mediaMap.has(mid)) throw new HttpError(400, `Unknown media ${mid}`);
 
       // Validate everything before touching the DB.
       const plan = [];
       const errors = {};
+      const g0 = { content, media: JSON.stringify(mediaIds) };
       for (const p of list) {
-        const integ = integrations.rawGet(p.integration_id);
-        if (!integ) throw new HttpError(400, `Unknown account ${p.integration_id}`);
-        const settings = { ...defaultSettings(integ.provider), ...(p.settings || {}) };
+        const ig = integ.get(String(p.integration_id));
+        if (!ig) throw new HttpError(400, `Unknown account ${p.integration_id}`);
+        const settings = { ...defaultSettings(ig.provider), ...(p.settings || {}) };
         const content_override = p.content_override === undefined || p.content_override === null ? null : String(p.content_override);
         const media_override = Array.isArray(p.media_override) ? p.media_override.map(String) : null;
-        const fake = { provider: integ.provider, settings: JSON.stringify(settings), content_override, media_override: media_override && JSON.stringify(media_override) };
-        const c = composed(fake, { content, media: JSON.stringify(mediaIds) });
+        const fake = { provider: ig.provider, settings: JSON.stringify(settings), content_override, media_override: media_override && JSON.stringify(media_override) };
+        const c = composeWith(fake, g0, mediaMap);
         if (action !== 'draft') {
-          if (integ.status !== 'active') (errors[integ.id] ||= []).push(`${integ.name}: account needs to be reconnected.`);
-          const v = validateComposed(integ.provider, c);
-          if (v.errors.length) (errors[integ.id] ||= []).push(...v.errors);
+          if (ig.status !== 'active') (errors[ig.id] ||= []).push(`${ig.name}: account needs to be reconnected.`);
+          const v = validateComposed(ig.provider, c);
+          if (v.errors.length) (errors[ig.id] ||= []).push(...v.errors);
         }
-        plan.push({ integ, settings, content_override, media_override });
+        plan.push({ integ: ig, settings, content_override, media_override });
       }
       if (Object.keys(errors).length) throw new HttpError(422, 'Please fix the validation errors.', { errors });
 
-      return db.tx(() => {
-        let gid = groupId;
-        if (gid) {
-          const g = db.get('SELECT id FROM groups WHERE id = ?', gid);
-          if (!g) throw new HttpError(404, 'Post not found');
-          db.run('UPDATE groups SET content=?, media=?, publish_at=?, updated_at=? WHERE id=?', content, JSON.stringify(mediaIds), publishAt, now, gid);
+      let gid = groupId;
+      const ops = [];
+      let existing = [];
+      if (gid) {
+        const g = await db.get('SELECT id FROM groups WHERE id = ?', gid);
+        if (!g) throw new HttpError(404, 'Post not found');
+        existing = await db.all('SELECT * FROM posts WHERE group_id = ?', gid);
+        await assertNotRunning(existing.map((e) => e.id));
+        ops.push(['UPDATE groups SET content=?, media=?, publish_at=?, updated_at=? WHERE id=?', content, JSON.stringify(mediaIds), publishAt, now, gid]);
+      } else {
+        gid = uid();
+        ops.push(['INSERT INTO groups(id, content, media, publish_at, created_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?)', gid, content, JSON.stringify(mediaIds), publishAt, principal?.name || null, now, now]);
+      }
+      const keep = new Set(plan.map((p) => p.integ.id));
+      for (const e of existing) {
+        if (!keep.has(e.integration_id) && !LOCKED.has(e.status)) ops.push(["DELETE FROM posts WHERE id = ? AND status NOT IN ('published','publishing')", e.id]);
+      }
+      const status = action === 'draft' ? 'draft' : approval ? 'pending_approval' : 'scheduled';
+      if (approval && action !== 'draft') ops.push(['UPDATE groups SET approval_note = NULL WHERE id = ?', gid]);
+      for (const p of plan) {
+        const e = existing.find((x) => x.integration_id === p.integ.id);
+        if (e && LOCKED.has(e.status)) continue; // published/publishing posts are immutable
+        const id = e ? e.id : uid();
+        if (e) {
+          ops.push(["UPDATE posts SET content_override=?, media_override=?, settings=?, publish_at=?, status=?, error=NULL, warning=NULL, attempts=0, updated_at=? WHERE id=? AND status NOT IN ('published','publishing')",
+            p.content_override, p.media_override && JSON.stringify(p.media_override), JSON.stringify(p.settings), publishAt, status, now, id]);
         } else {
-          gid = uid();
-          db.run('INSERT INTO groups(id, content, media, publish_at, created_by, created_at, updated_at) VALUES(?,?,?,?,?,?,?)', gid, content, JSON.stringify(mediaIds), publishAt, principal?.name || null, now, now);
+          ops.push(['INSERT INTO posts(id, group_id, integration_id, content_override, media_override, settings, publish_at, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            id, gid, p.integ.id, p.content_override, p.media_override && JSON.stringify(p.media_override), JSON.stringify(p.settings), publishAt, status, now, now]);
         }
-        const existing = db.all('SELECT * FROM posts WHERE group_id = ?', gid);
-        assertNotRunning(existing.map((e) => e.id));
-        const keep = new Set(plan.map((p) => p.integ.id));
-        for (const e of existing) {
-          if (!keep.has(e.integration_id) && !LOCKED.has(e.status)) db.run('DELETE FROM posts WHERE id = ?', e.id);
+        if (status === 'scheduled') {
+          ops.push(upsertJobStmt(id, publishAt));
+          ops.push(eventStmt(id, 'info', action === 'now' ? 'Queued for immediate publishing' : `Scheduled for ${new Date(publishAt).toISOString()}`));
+        } else {
+          ops.push(["DELETE FROM jobs WHERE post_id = ? AND state <> 'running'", id]);
+          if (status === 'pending_approval') ops.push(eventStmt(id, 'info', `Awaiting approval (requested by ${principal?.name || 'agent'})`));
         }
-        const status = action === 'draft' ? 'draft' : approval ? 'pending_approval' : 'scheduled';
-        if (approval && action !== 'draft') db.run('UPDATE groups SET approval_note = NULL WHERE id = ?', gid);
-        for (const p of plan) {
-          const e = existing.find((x) => x.integration_id === p.integ.id);
-          if (e && LOCKED.has(e.status)) continue; // published/publishing posts are immutable
-          const id = e ? e.id : uid();
-          if (e) {
-            db.run('UPDATE posts SET content_override=?, media_override=?, settings=?, publish_at=?, status=?, error=NULL, warning=NULL, attempts=0, updated_at=? WHERE id=?',
-              p.content_override, p.media_override && JSON.stringify(p.media_override), JSON.stringify(p.settings), publishAt, status, now, id);
-          } else {
-            db.run('INSERT INTO posts(id, group_id, integration_id, content_override, media_override, settings, publish_at, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-              id, gid, p.integ.id, p.content_override, p.media_override && JSON.stringify(p.media_override), JSON.stringify(p.settings), publishAt, status, now, now);
-          }
-          if (status === 'scheduled') {
-            upsertJob(id, publishAt);
-            event(id, 'info', action === 'now' ? 'Queued for immediate publishing' : `Scheduled for ${new Date(publishAt).toISOString()}`);
-          } else {
-            db.run('DELETE FROM jobs WHERE post_id = ?', id);
-            if (status === 'pending_approval') event(id, 'info', `Awaiting approval (requested by ${principal?.name || 'agent'})`);
-          }
-        }
-        return gid;
-      });
+      }
+      await db.batch(ops);
+      return gid;
     },
 
     /** Approve pending posts of a group (optionally only some targets / at a new time). Past times publish now. */
-    approve(groupId, { target_ids = null, publish_at = null, principal = null } = {}) {
-      const g = db.get('SELECT * FROM groups WHERE id = ?', groupId);
+    async approve(groupId, { target_ids = null, publish_at = null, principal = null } = {}) {
+      const g = await db.get('SELECT * FROM groups WHERE id = ?', groupId);
       if (!g) throw new HttpError(404, 'Post not found');
-      const pend = db.all("SELECT p.*, i.provider, i.status AS istatus FROM posts p JOIN integrations i ON i.id = p.integration_id WHERE p.group_id = ? AND p.status = 'pending_approval'", groupId)
+      const pend = (await db.all("SELECT p.*, i.provider, i.status AS istatus FROM posts p JOIN integrations i ON i.id = p.integration_id WHERE p.group_id = ? AND p.status = 'pending_approval'", groupId))
         .filter((p) => !target_ids || target_ids.includes(p.id));
       if (!pend.length) throw new HttpError(409, 'Nothing is awaiting approval in this post.');
+      const mediaMap = await loadMedia(pend.flatMap((p) => mediaIdsOf(p, g)));
       const errors = {};
       for (const p of pend) {
-        const v = validateComposed(p.provider, composed(p, g));
+        const v = validateComposed(p.provider, composeWith(p, g, mediaMap));
         if (v.errors.length) errors[p.integration_id] = v.errors;
         if (p.istatus !== 'active') (errors[p.integration_id] ||= []).push('Account needs to be reconnected.');
       }
       if (Object.keys(errors).length) throw new HttpError(422, 'Cannot approve: validation errors.', { errors });
       const now = Date.now();
-      db.tx(() => {
-        for (const p of pend) {
-          const at = Math.max(Number(publish_at || p.publish_at || now), now);
-          db.run("UPDATE posts SET status='scheduled', publish_at=?, updated_at=? WHERE id=?", at, now, p.id);
-          upsertJob(p.id, at);
-          event(p.id, 'info', `Approved by ${principal?.name || 'admin'}; scheduled for ${new Date(at).toISOString()}`);
-        }
-        db.run('UPDATE groups SET approval_note = NULL WHERE id = ?', groupId);
-      });
+      const ops = [];
+      for (const p of pend) {
+        const at = Math.max(Number(publish_at || p.publish_at || now), now);
+        ops.push(["UPDATE posts SET status='scheduled', publish_at=?, updated_at=? WHERE id=?", at, now, p.id]);
+        ops.push(upsertJobStmt(p.id, at));
+        ops.push(eventStmt(p.id, 'info', `Approved by ${principal?.name || 'admin'}; scheduled for ${new Date(at).toISOString()}`));
+      }
+      ops.push(['UPDATE groups SET approval_note = NULL WHERE id = ?', groupId]);
+      await db.batch(ops);
       return pend.length;
     },
 
-    reject(groupId, { reason = '', principal = null } = {}) {
-      const pend = db.all("SELECT id FROM posts WHERE group_id = ? AND status = 'pending_approval'", groupId);
+    async reject(groupId, { reason = '', principal = null } = {}) {
+      const pend = await db.all("SELECT id FROM posts WHERE group_id = ? AND status = 'pending_approval'", groupId);
       if (!pend.length) throw new HttpError(409, 'Nothing is awaiting approval in this post.');
-      db.tx(() => {
-        for (const p of pend) {
-          db.run("UPDATE posts SET status='draft', updated_at=? WHERE id=?", Date.now(), p.id);
-          event(p.id, 'warn', `Rejected by ${principal?.name || 'admin'}${reason ? `: ${reason}` : ''}`);
-        }
-        db.run('UPDATE groups SET approval_note = ? WHERE id = ?', `Rejected${reason ? `: ${reason}` : ''}`, groupId);
-      });
+      const ops = [];
+      for (const p of pend) {
+        ops.push(["UPDATE posts SET status='draft', updated_at=? WHERE id=?", Date.now(), p.id]);
+        ops.push(eventStmt(p.id, 'warn', `Rejected by ${principal?.name || 'admin'}${reason ? `: ${reason}` : ''}`));
+      }
+      ops.push(['UPDATE groups SET approval_note = ? WHERE id = ?', `Rejected${reason ? `: ${reason}` : ''}`, groupId]);
+      await db.batch(ops);
       return pend.length;
     },
 
     /** Groups with at least one target matching the filters. */
-    listGroups({ from = null, to = null, status = null, provider = null, integration_id = null, limit = 50, offset = 0 } = {}) {
+    async listGroups({ from = null, to = null, status = null, provider = null, integration_id = null, limit = 50, offset = 0 } = {}) {
       const where = [];
       const args = [];
       if (from !== null && from !== undefined) { where.push('COALESCE(p.published_at, p.publish_at, p.updated_at) >= ?'); args.push(Number(from)); }
@@ -207,112 +265,116 @@ export function createPosts({ db, media, integrations }) {
       if (status) { where.push('p.status = ?'); args.push(status); }
       if (provider) { where.push('i.provider = ?'); args.push(provider); }
       if (integration_id) { where.push('p.integration_id = ?'); args.push(integration_id); }
-      const rows = db.all(`SELECT p.group_id, MIN(COALESCE(p.published_at, p.publish_at, p.updated_at)) AS t FROM posts p JOIN integrations i ON i.id = p.integration_id
+      const rows = await db.all(`SELECT p.group_id, MIN(COALESCE(p.published_at, p.publish_at, p.updated_at)) AS t FROM posts p JOIN integrations i ON i.id = p.integration_id
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''} GROUP BY p.group_id ORDER BY t ${from !== null && from !== undefined ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`, ...args, Math.min(Number(limit) || 50, 500), Number(offset) || 0);
-      return rows.map((r) => api.getGroup(r.group_id)).filter(Boolean);
+      return loadGroups(rows.map((r) => r.group_id));
     },
 
-    pendingApprovals() {
-      return db.all("SELECT DISTINCT group_id FROM posts WHERE status = 'pending_approval'").map((r) => api.getGroup(r.group_id)).filter(Boolean);
+    async pendingApprovals() {
+      return loadGroups((await db.all("SELECT DISTINCT group_id FROM posts WHERE status = 'pending_approval'")).map((r) => r.group_id));
     },
 
-    deleteGroup(id) {
-      const posts = db.all('SELECT id FROM posts WHERE group_id = ?', id);
-      assertNotRunning(posts.map((p) => p.id));
-      db.run('DELETE FROM groups WHERE id = ?', id);
+    async deleteGroup(id) {
+      const posts = await db.all('SELECT id FROM posts WHERE group_id = ?', id);
+      await assertNotRunning(posts.map((p) => p.id));
+      await db.run('DELETE FROM groups WHERE id = ?', id);
     },
 
-    duplicateGroup(id) {
-      const g = api.getGroup(id);
+    async duplicateGroup(id) {
+      const g = await api.getGroup(id);
       if (!g) throw new HttpError(404, 'Not found');
-      const posts = db.all('SELECT * FROM posts WHERE group_id = ?', id);
+      const posts = await db.all('SELECT * FROM posts WHERE group_id = ?', id);
       const now = Date.now();
-      return db.tx(() => {
-        const nid = uid();
-        db.run('INSERT INTO groups(id, content, media, publish_at, created_at, updated_at) VALUES(?,?,?,?,?,?)', nid, g.content, JSON.stringify(g.media.map((m) => m.id)), g.publish_at, now, now);
-        for (const p of posts) {
-          db.run('INSERT INTO posts(id, group_id, integration_id, content_override, media_override, settings, publish_at, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-            uid(), nid, p.integration_id, p.content_override, p.media_override, p.settings, p.publish_at, 'draft', now, now);
-        }
-        return nid;
-      });
+      const nid = uid();
+      const ops = [['INSERT INTO groups(id, content, media, publish_at, created_at, updated_at) VALUES(?,?,?,?,?,?)', nid, g.content, JSON.stringify(g.media.map((m) => m.id)), g.publish_at, now, now]];
+      for (const p of posts) {
+        ops.push(['INSERT INTO posts(id, group_id, integration_id, content_override, media_override, settings, publish_at, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+          uid(), nid, p.integration_id, p.content_override, p.media_override, p.settings, p.publish_at, 'draft', now, now]);
+      }
+      await db.batch(ops);
+      return nid;
     },
 
     /** Move every not-yet-published post of a group to a new time (calendar drag & drop). */
-    rescheduleGroup(id, publishAt) {
+    async rescheduleGroup(id, publishAt) {
       publishAt = Number(publishAt);
       if (!publishAt) throw new HttpError(400, 'publish_at required');
       if (publishAt < Date.now() - 60000) throw new HttpError(400, 'Cannot move a post into the past.');
-      const posts = db.all('SELECT * FROM posts WHERE group_id = ?', id);
+      const posts = await db.all('SELECT * FROM posts WHERE group_id = ?', id);
       if (!posts.length) throw new HttpError(404, 'Not found');
-      assertNotRunning(posts.map((p) => p.id));
-      db.tx(() => {
-        db.run('UPDATE groups SET publish_at=?, updated_at=? WHERE id=?', publishAt, Date.now(), id);
-        for (const p of posts) {
-          if (LOCKED.has(p.status)) continue;
-          db.run('UPDATE posts SET publish_at=?, updated_at=? WHERE id=?', publishAt, Date.now(), p.id);
-          if (p.status === 'scheduled' || p.status === 'pending_approval') {
-            db.run("UPDATE jobs SET run_at=?, updated_at=? WHERE post_id=? AND state='queued'", publishAt, Date.now(), p.id);
-            event(p.id, 'info', `Rescheduled to ${new Date(publishAt).toISOString()}`);
-          }
+      await assertNotRunning(posts.map((p) => p.id));
+      const ops = [['UPDATE groups SET publish_at=?, updated_at=? WHERE id=?', publishAt, Date.now(), id]];
+      for (const p of posts) {
+        if (LOCKED.has(p.status)) continue;
+        ops.push(["UPDATE posts SET publish_at=?, updated_at=? WHERE id=? AND status NOT IN ('published','publishing')", publishAt, Date.now(), p.id]);
+        if (p.status === 'scheduled' || p.status === 'pending_approval') {
+          ops.push(["UPDATE jobs SET run_at=?, updated_at=? WHERE post_id=? AND state='queued'", publishAt, Date.now(), p.id]);
+          ops.push(eventStmt(p.id, 'info', `Rescheduled to ${new Date(publishAt).toISOString()}`));
         }
-      });
+      }
+      await db.batch(ops);
     },
 
     /** Retry a failed post, or publish a draft/scheduled post immediately. */
-    publishNow(postId, { retry = false, principal = null } = {}) {
-      const p = db.get('SELECT p.*, i.provider, i.status AS istatus FROM posts p JOIN integrations i ON i.id = p.integration_id WHERE p.id = ?', postId);
+    async publishNow(postId, { retry = false, principal = null } = {}) {
+      const p = await db.get('SELECT p.*, i.provider, i.status AS istatus FROM posts p JOIN integrations i ON i.id = p.integration_id WHERE p.id = ?', postId);
       if (!p) throw new HttpError(404, 'Not found');
       if (LOCKED.has(p.status)) throw new HttpError(409, `Post is already ${p.status}.`);
       if (retry && p.status !== 'failed') throw new HttpError(409, 'Only failed posts can be retried.');
       if (p.istatus !== 'active') throw new HttpError(409, 'Reconnect the account first.');
-      const v = validateComposed(p.provider, composed(p));
+      const v = validateComposed(p.provider, await composed(p));
       if (v.errors.length) throw new HttpError(422, 'Please fix the validation errors.', { errors: { [p.integration_id]: v.errors } });
       const now = Date.now();
       if (principal?.approval) {
-        db.tx(() => {
-          db.run("UPDATE posts SET status='pending_approval', publish_at=?, error=NULL, attempts=0, updated_at=? WHERE id=?", now, now, postId);
-          db.run('DELETE FROM jobs WHERE post_id = ?', postId);
-        });
-        event(postId, 'info', `${retry ? 'Retry' : 'Publish now'} requested by ${principal.name}; awaiting approval`);
+        await db.batch([
+          ["UPDATE posts SET status='pending_approval', publish_at=?, error=NULL, attempts=0, updated_at=? WHERE id=? AND status NOT IN ('published','publishing')", now, now, postId],
+          ["DELETE FROM jobs WHERE post_id = ? AND state <> 'running'", postId],
+          eventStmt(postId, 'info', `${retry ? 'Retry' : 'Publish now'} requested by ${principal.name}; awaiting approval`),
+        ]);
         return 'pending_approval';
       }
-      db.tx(() => {
-        db.run("UPDATE posts SET status='scheduled', publish_at=?, error=NULL, attempts=0, updated_at=? WHERE id=?", now, now, postId);
-        upsertJob(postId, now);
-      });
-      event(postId, 'info', retry ? 'Retry requested' : 'Publish now requested');
+      await db.batch([
+        ["UPDATE posts SET status='scheduled', publish_at=?, error=NULL, attempts=0, updated_at=? WHERE id=? AND status NOT IN ('published','publishing')", now, now, postId],
+        upsertJobStmt(postId, now),
+        eventStmt(postId, 'info', retry ? 'Retry requested' : 'Publish now requested'),
+      ]);
       return 'scheduled';
     },
 
-    deletePost(postId) {
-      assertNotRunning([postId]);
-      const p = db.get('SELECT group_id FROM posts WHERE id = ?', postId);
+    async deletePost(postId) {
+      await assertNotRunning([postId]);
+      const p = await db.get('SELECT group_id FROM posts WHERE id = ?', postId);
       if (!p) return;
-      db.tx(() => {
-        db.run('DELETE FROM posts WHERE id = ?', postId);
-        if (!db.get('SELECT 1 FROM posts WHERE group_id = ?', p.group_id)) db.run('DELETE FROM groups WHERE id = ?', p.group_id);
-      });
+      await db.batch([
+        ['DELETE FROM posts WHERE id = ?', postId],
+        ['DELETE FROM groups WHERE id = ? AND NOT EXISTS (SELECT 1 FROM posts WHERE group_id = ?)', p.group_id, p.group_id],
+      ]);
     },
 
     /** Calendar range: posts whose scheduled or published time is in [from, to). Drafts without a date are included separately. */
-    listRange(from, to) {
-      const rows = db.all(`${SELECT} WHERE COALESCE(p.published_at, p.publish_at) >= ? AND COALESCE(p.published_at, p.publish_at) < ? ORDER BY COALESCE(p.published_at, p.publish_at)`, from, to);
-      return rows.map(postView);
+    async listRange(from, to) {
+      return postViews(await db.all(`${SELECT} WHERE COALESCE(p.published_at, p.publish_at) >= ? AND COALESCE(p.published_at, p.publish_at) < ? ORDER BY COALESCE(p.published_at, p.publish_at)`, from, to));
     },
-    listDrafts() {
-      return db.all(`${SELECT} WHERE p.status = 'draft' AND p.publish_at IS NULL ORDER BY p.updated_at DESC LIMIT 200`).map(postView);
+    async listDrafts() {
+      return postViews(await db.all(`${SELECT} WHERE p.status = 'draft' AND p.publish_at IS NULL ORDER BY p.updated_at DESC LIMIT 200`));
     },
-    history({ status, limit = 100, offset = 0 } = {}) {
+    async history({ status, limit = 100, offset = 0 } = {}) {
       const where = status ? 'WHERE p.status = ?' : "WHERE p.status IN ('published','failed','publishing')";
       const args = status ? [status, limit, offset] : [limit, offset];
-      return db.all(`${SELECT} ${where} ORDER BY COALESCE(p.published_at, p.updated_at) DESC LIMIT ? OFFSET ?`, ...args).map(postView);
+      return postViews(await db.all(`${SELECT} ${where} ORDER BY COALESCE(p.published_at, p.updated_at) DESC LIMIT ? OFFSET ?`, ...args));
     },
-    get(postId) {
-      const r = db.get(`${SELECT} WHERE p.id = ?`, postId);
-      return r ? postView(r) : null;
+    async get(postId) {
+      const r = await db.get(`${SELECT} WHERE p.id = ?`, postId);
+      return r ? (await postViews([r]))[0] || null : null;
     },
     events: (postId) => db.all('SELECT at, level, message FROM post_events WHERE post_id = ? ORDER BY id', postId),
+    /** Events for several posts in one query: Map postId → events. */
+    async eventsMany(postIds) {
+      const rows = await inChunks(postIds, (c) => db.all(`SELECT post_id, at, level, message FROM post_events WHERE post_id IN (${marks(c.length)}) ORDER BY id`, ...c));
+      const out = new Map(postIds.map((id) => [id, []]));
+      for (const r of rows) out.get(r.post_id)?.push({ at: r.at, level: r.level, message: r.message });
+      return out;
+    },
   };
   return api;
 }

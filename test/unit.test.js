@@ -5,7 +5,8 @@ import { sniffMime, imageSize, probeMp4 } from '../src/probe.js';
 import { makeJpeg, makeMp4, makePng } from './helpers.js';
 import { classifyInstagram, classifyFacebook } from '../src/providers/meta-errors.js';
 import { classifyGoogle } from '../src/providers/youtube.js';
-import { makeCipher, hashPassword, verifyPassword } from '../src/crypto.js';
+import { makeCipher, hashPasswordPbkdf2, verifyPasswordPbkdf2 } from '../src/crypto.js';
+import { hashPassword, verifyPassword } from '../src/node/core.js';
 import { zonedToUtc, parseLocal, nextSlots, formatLocal } from '../src/shared/time.js';
 import { validate } from '../src/api/schema.js';
 import fs from 'node:fs';
@@ -15,7 +16,7 @@ import path from 'node:path';
 const img = (w = 1080, h = 1080, extra = {}) => ({ kind: 'image', mime: 'image/jpeg', size: 200000, width: w, height: h, name: 'i.jpg', ...extra });
 const vid = (w = 1080, h = 1920, duration = 30, extra = {}) => ({ kind: 'video', mime: 'video/mp4', size: 5e6, width: w, height: h, duration, name: 'v.mp4', ...extra });
 
-test('youtube rules', () => {
+test('youtube rules', async () => {
   assert.deepEqual(validatePost('youtube', { caption: 'd', media: [vid()], settings: { title: 'Good title' } }).errors, []);
   assert.match(validatePost('youtube', { media: [img()], settings: { title: 'x y' } }).errors.join(), /exactly one video/);
   assert.match(validatePost('youtube', { media: [vid()], settings: { title: 'x' } }).errors.join(), /title is required/);
@@ -29,7 +30,7 @@ test('youtube rules', () => {
   assert.match(validatePost('youtube', { media: [vid()], settings: { title: 'ok' }, thumbnail: img(1280, 720, { mime: 'image/gif' }) }).errors.join(), /JPEG or PNG/);
 });
 
-test('facebook rules', () => {
+test('facebook rules', async () => {
   assert.deepEqual(validatePost('facebook', { caption: 'hello' }).errors, []);
   assert.match(validatePost('facebook', { caption: '' }).errors.join(), /needs text/);
   assert.match(validatePost('facebook', { media: [img(), vid()] }).errors.join(), /mix/);
@@ -42,7 +43,7 @@ test('facebook rules', () => {
   assert.match(validatePost('facebook', { caption: 'x'.repeat(63207) }).errors.join(), /63206/);
 });
 
-test('instagram rules', () => {
+test('instagram rules', async () => {
   for (const p of ['instagram', 'instagram-standalone']) {
     assert.deepEqual(validatePost(p, { caption: 'hi', media: [img(1080, 1350)] }).errors, []);
     assert.match(validatePost(p, { caption: 'hi' }).errors.join(), /at least one/);
@@ -62,7 +63,7 @@ test('instagram rules', () => {
   assert.equal(describeKind('instagram', [vid()], {}), 'Reel');
 });
 
-test('media probing: mime sniffing, image dims, mp4 duration/dims', () => {
+test('media probing: mime sniffing, image dims, mp4 duration/dims', async () => {
   assert.equal(sniffMime(makeJpeg()), 'image/jpeg');
   assert.equal(sniffMime(makePng()), 'image/png');
   assert.equal(sniffMime(Buffer.from('hello world!')), null);
@@ -71,10 +72,13 @@ test('media probing: mime sniffing, image dims, mp4 duration/dims', () => {
   const f = path.join(fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'pl-')), 'v.mp4');
   fs.writeFileSync(f, makeMp4({ width: 720, height: 1280, seconds: 12.5 }));
   assert.equal(sniffMime(fs.readFileSync(f)), 'video/mp4');
-  assert.deepEqual(probeMp4(f), { duration: 12.5, width: 720, height: 1280 });
+  const fd = fs.openSync(f, 'r');
+  const reader = async (pos, len) => { const b = Buffer.alloc(len); return b.subarray(0, fs.readSync(fd, b, 0, len, pos)); };
+  assert.deepEqual(await probeMp4(reader, fs.statSync(f).size), { duration: 12.5, width: 720, height: 1280 });
+  fs.closeSync(fd);
 });
 
-test('error classification: transient vs permanent vs auth', () => {
+test('error classification: transient vs permanent vs auth', async () => {
   assert.equal(classifyInstagram('{"error":{"code":9004,"error_subcode":2207052}}', 400).kind, 'transient');
   assert.equal(classifyInstagram('{"error":{"code":9004,"error_subcode":2207026}}', 400).kind, 'permanent');
   assert.equal(classifyInstagram('{"error":{"message":"bad","code":190}}', 400).kind, 'auth');
@@ -88,20 +92,25 @@ test('error classification: transient vs permanent vs auth', () => {
   assert.equal(classifyGoogle('{"error":{"code":403,"errors":[{"reason":"rateLimitExceeded"}]}}', 403).kind, 'transient');
 });
 
-test('token encryption at rest + password hashing', () => {
+test('token encryption at rest + password hashing', async () => {
   const c = makeCipher('some-long-test-secret-value');
-  const enc = c.encrypt('EAAB-secret-token');
+  const enc = await c.encrypt('EAAB-secret-token');
   assert.ok(!enc.includes('EAAB'));
-  assert.equal(c.decrypt(enc), 'EAAB-secret-token');
+  assert.equal(await c.decrypt(enc), 'EAAB-secret-token');
   const other = makeCipher('a-different-secret-value-xyz');
-  assert.throws(() => other.decrypt(enc));
+  await assert.rejects(() => other.decrypt(enc));
   assert.throws(() => makeCipher(''), /TOKEN_ENC_KEY/);
   const h = hashPassword('pw-1234567890');
-  assert.ok(verifyPassword('pw-1234567890', h));
-  assert.ok(!verifyPassword('nope', h));
+  assert.ok(await verifyPassword('pw-1234567890', h));
+  assert.ok(!(await verifyPassword('nope', h)));
+  // portable PBKDF2 hashes (Cloudflare Workers) verify on Node too
+  const ph = await hashPasswordPbkdf2('pw-1234567890', 1000);
+  assert.ok(await verifyPassword('pw-1234567890', ph));
+  assert.equal(await verifyPasswordPbkdf2('nope', ph), false);
+  assert.equal(await verifyPasswordPbkdf2('x', h), null, 'scrypt hashes are not PBKDF2');
 });
 
-test('timezone conversion and posting slots', () => {
+test('timezone conversion and posting slots', async () => {
   assert.equal(new Date(zonedToUtc(2026, 11, 2, 9, 30, 'Asia/Kolkata')).toISOString(), '2026-11-02T04:00:00.000Z');
   assert.equal(new Date(parseLocal('2026-03-29T03:30', 'Europe/Berlin')).toISOString(), '2026-03-29T01:30:00.000Z');
   assert.equal(parseLocal('2026-11-02T09:30:00Z', 'Asia/Kolkata'), Date.parse('2026-11-02T09:30:00Z'));
@@ -113,7 +122,7 @@ test('timezone conversion and posting slots', () => {
   assert.equal(formatLocal(skip[0], 'Asia/Kolkata'), '2026-11-02T18:00');
 });
 
-test('schema validator gives actionable messages', () => {
+test('schema validator gives actionable messages', async () => {
   const s = { type: 'object', additionalProperties: false, required: ['targets'], properties: { targets: { type: 'array', minItems: 1 }, publish_at: { type: 'string' } } };
   const errs = validate(s, { scheduled_at: 'x' });
   assert.ok(errs.some((e) => /targets is required/.test(e)));

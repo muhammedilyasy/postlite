@@ -9,8 +9,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let app, yt, ig;
 before(async () => {
   app = await createTestApp();
-  yt = app.seed('youtube');
-  ig = app.seed('instagram');
+  yt = await app.seed('youtube');
+  ig = await app.seed('instagram');
   app.core.scheduler.start();
 });
 after(async () => { await app.close(); });
@@ -71,7 +71,7 @@ const childEnv = (key, extra = {}) => ({
 test('MCP over HTTP: auth, initialize, tools/list, tools/call end-to-end publish to YouTube (Short)', async () => {
   const unauth = await httpClient(null)('initialize', {}, { raw: true });
   assert.equal(unauth.status, 401);
-  const key = app.core.apiKeys.create({ name: 'Claude', approval_mode: false }).key;
+  const key = (await app.core.apiKeys.create({ name: 'Claude', approval_mode: false })).key;
   const rpc = httpClient(key);
   const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(init.result.protocolVersion, '2025-06-18');
@@ -117,7 +117,7 @@ test('MCP over HTTP: auth, initialize, tools/list, tools/call end-to-end publish
 });
 
 test('MCP over HTTP: scope errors are tool errors with a fix hint', async () => {
-  const key = app.core.apiKeys.create({ name: 'readonly', scopes: ['read'] }).key;
+  const key = (await app.core.apiKeys.create({ name: 'readonly', scopes: ['read'] })).key;
   const rpc = httpClient(key);
   const r = await rpc('tools/call', { name: 'sync_analytics', arguments: {} });
   assert.equal(r.result.isError, true);
@@ -125,7 +125,7 @@ test('MCP over HTTP: scope errors are tool errors with a fix hint', async () => 
 });
 
 test('MCP over stdio (in-process): approval mode flow + local file upload + publish', async () => {
-  const key = app.core.apiKeys.create({ name: 'Hermes', approval_mode: true }).key;
+  const key = (await app.core.apiKeys.create({ name: 'Hermes', approval_mode: true })).key;
   const c = stdioClient(childEnv(key));
   try {
     const init = await c.request('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } });
@@ -155,7 +155,7 @@ test('MCP over stdio (in-process): approval mode flow + local file upload + publ
       return r.result.structuredContent.post.status === 'published' ? r.result.structuredContent.post : null;
     });
     assert.match(done.targets[0].published_url, /instagram\.com/);
-    const audit = app.core.audit.list({ limit: 50 });
+    const audit = await app.core.audit.list({ limit: 50 });
     assert.ok(audit.some((e) => e.via === 'mcp-stdio' && e.operation === 'create_post' && e.actor_name === 'Hermes'));
   } finally {
     await c.close();
@@ -163,7 +163,7 @@ test('MCP over stdio (in-process): approval mode flow + local file upload + publ
 });
 
 test('MCP stdio bridge mode forwards to a remote server', async () => {
-  const key = app.core.apiKeys.create({ name: 'bridge', approval_mode: false }).key;
+  const key = (await app.core.apiKeys.create({ name: 'bridge', approval_mode: false })).key;
   const c = stdioClient({ POSTLITE_URL: app.base, POSTLITE_API_KEY: key, LOG_LEVEL: 'silent' });
   try {
     const init = await c.request('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } });
@@ -183,7 +183,7 @@ test('MCP stdio bridge mode forwards to a remote server', async () => {
 });
 
 test('CLI mirrors the API (posts create/list via HTTP)', async () => {
-  const key = app.core.apiKeys.create({ name: 'cli', approval_mode: false }).key;
+  const key = (await app.core.apiKeys.create({ name: 'cli', approval_mode: false })).key;
   const run = (args) => new Promise((resolve) => {
     const p = spawn(process.execPath, [path.join(ROOT, 'bin/postlite.js'), ...args], { env: { ...process.env, POSTLITE_URL: app.base, POSTLITE_API_KEY: key } });
     let out = '', err = '';
@@ -191,7 +191,7 @@ test('CLI mirrors the API (posts create/list via HTTP)', async () => {
     p.stderr.on('data', (d) => { err += d; });
     p.on('exit', (code) => resolve({ code, out, err }));
   });
-  const fb = app.seed('facebook');
+  const fb = await app.seed('facebook');
   const c = await run(['posts', 'create', '--content', 'from the cli', '--accounts', fb, '--at', new Date(Date.now() + 86400000).toISOString()]);
   assert.equal(c.code, 0, c.err);
   const created = JSON.parse(c.out).post;

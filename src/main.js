@@ -1,6 +1,6 @@
-// Server entry: load config, create core, start HTTP + background loops, handle shutdown.
-import { getConfig } from './config.js';
-import { createCore, makeLogger } from './core.js';
+// Node server entry: load config, create core, start HTTP + background loops, handle shutdown.
+import { getConfig } from './node/config.js';
+import { createNodeCore, makeLogger } from './node/core.js';
 import { createServer } from './http/server.js';
 import { validateAuthConfig } from './access.js';
 
@@ -15,13 +15,13 @@ export async function start({ env = process.env } = {}) {
     log('error', e.message);
     process.exit(1);
   }
-  const core = createCore(cfg, { log });
+  const core = createNodeCore(cfg, { log });
   const server = createServer(core);
   await new Promise((resolve) => server.listen(cfg.port, cfg.host, resolve));
-  core.startBackground();
+  await core.startBackground();
   log('info', `postlite listening on http://${cfg.host}:${cfg.port} (public URL ${cfg.publicUrl})`);
   if (cfg.auth.mode === 'cloudflare-access') log('info', `auth: Cloudflare Access (${cfg.auth.teamDomain}), ${cfg.auth.allowedEmails.length} allowed email(s); password login disabled`);
-  else if (!core.db.getSetting('admin_password')) log('warn', 'No admin password yet: run `node bin/postlite.js set-password`');
+  else if (!(await core.db.getSetting('admin_password'))) log('warn', 'No admin password yet: run `node bin/postlite.js set-password`');
   let stopping = false;
   const shutdown = async (sig) => {
     if (stopping) return;

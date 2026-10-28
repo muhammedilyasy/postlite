@@ -3,10 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startFake } from './fake/server.js';
-import { getConfig } from '../src/config.js';
-import { createCore } from '../src/core.js';
+import { getConfig } from '../src/node/config.js';
+import { createNodeCore as createCore, hashPassword } from '../src/node/core.js';
 import { createServer } from '../src/http/server.js';
-import { hashPassword } from '../src/crypto.js';
 
 export const PASSWORD = 'correct horse battery';
 
@@ -73,7 +72,8 @@ export async function createTestApp({ env = {}, listen = true } = {}) {
     ...env,
   });
   const core = createCore(cfg, { log: () => {} });
-  core.db.setSetting('admin_password', hashPassword(PASSWORD));
+  await core.db.setSetting('admin_password', hashPassword(PASSWORD));
+  await core.prepare();
   let server = null;
   let base = null;
   if (listen) {
@@ -94,8 +94,7 @@ export async function createTestApp({ env = {}, listen = true } = {}) {
       return core.integrations.upsert(provider, { ...defaults, ...extra });
     },
     async upload(buf, name) {
-      const { Readable } = await import('node:stream');
-      return core.media.save(Readable.from([buf]), name);
+      return core.media.save(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength), name);
     },
     async login() {
       const r1 = await fetch(`${base}/login`);

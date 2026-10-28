@@ -5,34 +5,34 @@ import { createTestApp, makeJpeg, makeMp4, waitFor } from './helpers.js';
 let app, fb, ig, yt;
 before(async () => {
   app = await createTestApp();
-  fb = app.seed('facebook');
-  ig = app.seed('instagram');
-  yt = app.seed('youtube');
+  fb = await app.seed('facebook');
+  ig = await app.seed('instagram');
+  yt = await app.seed('youtube');
   app.core.scheduler.start();
 });
 after(async () => { await app.close(); });
 
-const key = (opts) => app.core.apiKeys.create({ name: 'test', ...opts }).key;
+const key = async (opts) => (await app.core.apiKeys.create({ name: 'test', ...opts })).key;
 
 test('API keys: hashed at rest, bearer auth, revoked keys rejected', async () => {
-  const k = key({ scopes: ['read'] });
-  const row = app.core.db.get('SELECT hash FROM api_keys ORDER BY created_at DESC LIMIT 1');
+  const k = await key({ scopes: ['read'] });
+  const row = await app.core.db.get('SELECT hash FROM api_keys ORDER BY created_at DESC LIMIT 1');
   assert.ok(!row.hash.includes(k.split('_')[2]));
   assert.equal((await app.api('GET', '/accounts', { key: k })).status, 200);
   assert.equal((await app.api('GET', '/accounts', { key: k + 'x' })).status, 401);
-  const id = app.core.apiKeys.list()[0].id;
-  app.core.apiKeys.revoke(id);
+  const id = (await app.core.apiKeys.list())[0].id;
+  await app.core.apiKeys.revoke(id);
   const r = await app.api('GET', '/accounts', { key: k });
   assert.equal(r.status, 401);
   assert.match(r.headers.get('www-authenticate'), /Bearer/);
 });
 
 test('scopes are enforced with helpful messages', async () => {
-  const ro = key({ scopes: ['read'] });
+  const ro = await key({ scopes: ['read'] });
   const r = await app.api('POST', '/posts', { key: ro, body: { content: 'x', targets: [{ account_id: fb }] } });
   assert.equal(r.status, 403);
   assert.match(r.json.error.message, /"write" scope/);
-  const w = key({ scopes: ['read', 'write'], approval_mode: false });
+  const w = await key({ scopes: ['read', 'write'], approval_mode: false });
   const draft = await app.api('POST', '/posts', { key: w, body: { content: 'draft only', targets: [{ account_id: fb }] } });
   assert.equal(draft.status, 200, draft.text);
   assert.equal(draft.json.post.status, 'draft');
@@ -45,7 +45,7 @@ test('scopes are enforced with helpful messages', async () => {
 });
 
 test('per-key rate limiting returns 429 + Retry-After', async () => {
-  const k = key({ scopes: ['read'], rate_limit_per_min: 3 });
+  const k = await key({ scopes: ['read'], rate_limit_per_min: 3 });
   const codes = [];
   for (let i = 0; i < 5; i++) codes.push((await app.api('GET', '/me', { key: k })).status);
   assert.deepEqual(codes.slice(0, 3), [200, 200, 200]);
@@ -55,7 +55,7 @@ test('per-key rate limiting returns 429 + Retry-After', async () => {
 });
 
 test('input validation errors are actionable', async () => {
-  const k = key({ approval_mode: false });
+  const k = await key({ approval_mode: false });
   const r = await app.api('POST', '/posts', { key: k, body: { content: 'x', targets: [{ account_id: fb }], scheduled_at: 'tomorrow' } });
   assert.equal(r.status, 400);
   assert.match(r.json.error.message, /Unknown field "scheduled_at"/);
@@ -70,7 +70,7 @@ test('input validation errors are actionable', async () => {
 });
 
 test('validate_post dry run reports per-platform results', async () => {
-  const k = key({ scopes: ['read', 'write'] });
+  const k = await key({ scopes: ['read', 'write'] });
   const v = await app.upload(makeMp4({ width: 1920, height: 1080, seconds: 30 }), 'land.mp4');
   const r = await app.api('POST', '/posts/validate', { key: k, body: { content: 'Hello', media_ids: [v.id], targets: [{ account_id: yt, settings: { title: 'Landscape', isShort: true } }, { account_id: ig }, { account_id: fb }] } });
   assert.equal(r.status, 200, r.text);
@@ -83,7 +83,7 @@ test('validate_post dry run reports per-platform results', async () => {
 });
 
 test('full REST flow without approval: upload, schedule, reschedule, publish-now, published', async () => {
-  const k = key({ approval_mode: false });
+  const k = await key({ approval_mode: false });
   const up = await fetch(`${app.base}/api/v1/media`, { method: 'POST', headers: { authorization: `Bearer ${k}`, 'x-filename': 'photo.jpg', 'content-type': 'image/jpeg' }, body: makeJpeg(1080, 1080) });
   const media = (await up.json()).media;
   assert.ok(media.public_url.includes('/m/'));
@@ -109,16 +109,16 @@ test('full REST flow without approval: upload, schedule, reschedule, publish-now
 });
 
 test('approval mode: agent posts wait for a human; approval-mode keys cannot approve or escalate', async () => {
-  const agent = key({ name: 'agent', approval_mode: true, scopes: ['read', 'write', 'publish', 'admin'] });
+  const agent = await key({ name: 'agent', approval_mode: true, scopes: ['read', 'write', 'publish', 'admin'] });
   const media = await app.upload(makeJpeg(1080, 1080), 'a.jpg');
   const r = await app.api('POST', '/posts', { key: agent, body: { content: 'needs approval', media_ids: [media.id], targets: [{ account_id: ig }], mode: 'now' } });
   assert.equal(r.status, 200, r.text);
   assert.equal(r.json.post.status, 'pending_approval');
   assert.match(r.json.note, /approval/);
   const pid = r.json.post.id;
-  assert.equal(app.core.db.get('SELECT COUNT(*) n FROM jobs WHERE post_id = ?', r.json.post.targets[0].id).n, 0, 'no job until approved');
+  assert.equal((await app.core.db.get('SELECT COUNT(*) n FROM jobs WHERE post_id = ?', r.json.post.targets[0].id)).n, 0, 'no job until approved');
   await app.core.scheduler.drain();
-  assert.equal(app.core.posts.getGroup(pid).status, 'pending_approval');
+  assert.equal((await app.core.posts.getGroup(pid)).status, 'pending_approval');
   const self = await app.api('POST', `/posts/${pid}/approve`, { key: agent, body: {} });
   assert.equal(self.status, 403);
   const esc = await app.api('POST', '/api-keys', { key: agent, body: { name: 'sneaky', approval_mode: false } });
@@ -134,10 +134,10 @@ test('approval mode: agent posts wait for a human; approval-mode keys cannot app
   assert.equal(upd.json.post.status, 'pending_approval');
   const ok = await app.api('POST', `/posts/${pid}/approve`, { session: s, body: {} });
   assert.equal(ok.status, 200, ok.text);
-  const g = await waitFor(() => { const x = app.core.posts.getGroup(pid); return x.status === 'published' ? x : null; });
+  const g = await waitFor(async () => { const x = await app.core.posts.getGroup(pid); return x.status === 'published' ? x : null; });
   assert.equal(g.targets[0].status, 'published');
   // admin key without approval mode can approve too
-  const admin = key({ scopes: ['admin'], approval_mode: false });
+  const admin = await key({ scopes: ['admin'], approval_mode: false });
   const r2 = await app.api('POST', '/posts', { key: agent, body: { content: 'second', targets: [{ account_id: fb }], mode: 'next_slot' } });
   assert.equal(r2.json.post.status, 'pending_approval');
   const ap = await app.api('POST', `/posts/${r2.json.post.id}/approve`, { key: admin, body: {} });
@@ -146,7 +146,7 @@ test('approval mode: agent posts wait for a human; approval-mode keys cannot app
 });
 
 test('slots, settings, duplicate, delete, calendar, platforms, openapi', async () => {
-  const k = key({ approval_mode: false, scopes: ['read', 'write', 'publish', 'admin'] });
+  const k = await key({ approval_mode: false, scopes: ['read', 'write', 'publish', 'admin'] });
   const set = await app.api('PATCH', '/settings', { key: k, body: { timezone: 'Asia/Kolkata', posting_slots: { mon: ['09:00'], tue: ['09:00'], wed: ['09:00'], thu: ['09:00'], fri: ['09:00'], sat: [], sun: [] } } });
   assert.equal(set.status, 200, set.text);
   const bad = await app.api('PATCH', '/settings', { key: k, body: { posting_slots: { monday: ['9'] } } });
@@ -174,7 +174,7 @@ test('slots, settings, duplicate, delete, calendar, platforms, openapi', async (
 });
 
 test('media from URL (SSRF guard can be disabled for local tests) and base64', async () => {
-  const k = key({ approval_mode: false });
+  const k = await key({ approval_mode: false });
   const src = await app.upload(makeJpeg(500, 500), 'src.jpg');
   const r = await app.api('POST', '/media/from-url', { key: k, body: { url: app.core.media.publicUrl(src) } });
   assert.equal(r.status, 200, r.text);
@@ -189,16 +189,16 @@ test('media from URL (SSRF guard can be disabled for local tests) and base64', a
 });
 
 test('connect URL for agents + disconnect', async () => {
-  const admin = key({ scopes: ['admin'], approval_mode: false });
+  const admin = await key({ scopes: ['admin'], approval_mode: false });
   const r = await app.api('POST', '/accounts/connect', { key: admin, body: { provider: 'facebook' } });
   assert.equal(r.status, 200, r.text);
   // human opens the URL (fake consent auto-approves) → all pages auto-connected
   const consent = await fetch(r.json.url, { redirect: 'manual' });
   const cb = await fetch(consent.headers.get('location'));
   assert.equal(cb.status, 200);
-  const pages = app.core.integrations.list().filter((a) => a.provider === 'facebook');
+  const pages = (await app.core.integrations.list()).filter((a) => a.provider === 'facebook');
   assert.ok(pages.some((p) => p.external_id === 'page2'));
   const p2 = pages.find((p) => p.external_id === 'page2');
   assert.equal((await app.api('DELETE', `/accounts/${p2.id}`, { key: admin })).status, 200);
-  assert.ok(!app.core.integrations.get(p2.id));
+  assert.ok(!await app.core.integrations.get(p2.id));
 });

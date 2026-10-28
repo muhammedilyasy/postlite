@@ -14,6 +14,7 @@ export const SCOPE_HELP = {
 export const SESSION_PRINCIPAL = Object.freeze({ type: 'session', id: 'admin', name: 'admin (web UI)', scopes: SCOPES, approval: false });
 
 export function createApiKeys({ db }) {
+  // Token buckets live in memory: per process on Node, per isolate on Workers (best effort there).
   const buckets = new Map(); // keyId -> { tokens, at }
 
   const view = (r) => r && {
@@ -23,7 +24,7 @@ export function createApiKeys({ db }) {
 
   return {
     /** Returns { key (shown once), ...view } */
-    create({ name, scopes = ['read', 'write', 'publish', 'analytics'], approval_mode = true, rate_limit_per_min = 120 }) {
+    async create({ name, scopes = ['read', 'write', 'publish', 'analytics'], approval_mode = true, rate_limit_per_min = 120 }) {
       const bad = scopes.filter((s) => !SCOPES.includes(s));
       if (bad.length) throw new Error(`Unknown scope(s): ${bad.join(', ')}. Valid: ${SCOPES.join(', ')}`);
       if (!scopes.length) throw new Error('At least one scope is required');
@@ -31,34 +32,34 @@ export function createApiKeys({ db }) {
       const prefix = randomToken(6).replace(/[-_]/g, 'x').slice(0, 8);
       const secret = randomToken(32);
       const key = `pl_${prefix}_${secret}`;
-      db.run('INSERT INTO api_keys(id, name, prefix, hash, scopes, approval_mode, rate_limit_per_min, created_at) VALUES(?,?,?,?,?,?,?,?)',
-        id, String(name || 'agent').slice(0, 100), prefix, sha256(key), JSON.stringify([...new Set(scopes)]), approval_mode ? 1 : 0, Math.max(1, Number(rate_limit_per_min) || 120), Date.now());
-      return { key, ...view(db.get('SELECT * FROM api_keys WHERE id = ?', id)) };
+      await db.run('INSERT INTO api_keys(id, name, prefix, hash, scopes, approval_mode, rate_limit_per_min, created_at) VALUES(?,?,?,?,?,?,?,?)',
+        id, String(name || 'agent').slice(0, 100), prefix, await sha256(key), JSON.stringify([...new Set(scopes)]), approval_mode ? 1 : 0, Math.max(1, Number(rate_limit_per_min) || 120), Date.now());
+      return { key, ...view(await db.get('SELECT * FROM api_keys WHERE id = ?', id)) };
     },
-    list: () => db.all('SELECT * FROM api_keys ORDER BY created_at DESC').map(view),
-    get: (id) => view(db.get('SELECT * FROM api_keys WHERE id = ?', id)),
-    update(id, { name, scopes, approval_mode, rate_limit_per_min }) {
-      const r = db.get('SELECT * FROM api_keys WHERE id = ?', id);
+    list: async () => (await db.all('SELECT * FROM api_keys ORDER BY created_at DESC')).map(view),
+    get: async (id) => view(await db.get('SELECT * FROM api_keys WHERE id = ?', id)),
+    async update(id, { name, scopes, approval_mode, rate_limit_per_min }) {
+      const r = await db.get('SELECT * FROM api_keys WHERE id = ?', id);
       if (!r) return null;
       if (scopes) {
         const bad = scopes.filter((s) => !SCOPES.includes(s));
         if (bad.length) throw new Error(`Unknown scope(s): ${bad.join(', ')}`);
       }
-      db.run('UPDATE api_keys SET name=?, scopes=?, approval_mode=?, rate_limit_per_min=? WHERE id=?',
+      await db.run('UPDATE api_keys SET name=?, scopes=?, approval_mode=?, rate_limit_per_min=? WHERE id=?',
         name ?? r.name, scopes ? JSON.stringify(scopes) : r.scopes, approval_mode === undefined ? r.approval_mode : approval_mode ? 1 : 0, rate_limit_per_min ?? r.rate_limit_per_min, id);
-      return view(db.get('SELECT * FROM api_keys WHERE id = ?', id));
+      return view(await db.get('SELECT * FROM api_keys WHERE id = ?', id));
     },
-    revoke(id) {
-      return db.run('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', Date.now(), id).changes > 0;
+    async revoke(id) {
+      return (await db.run('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', Date.now(), id)).changes > 0;
     },
 
     /** Authenticate a bearer token. Returns a principal or null. */
-    authenticate(token) {
+    async authenticate(token) {
       const m = /^pl_([A-Za-z0-9]{8})_[A-Za-z0-9_-]{20,}$/.exec(String(token || '').trim());
       if (!m) return null;
-      const r = db.get('SELECT * FROM api_keys WHERE prefix = ?', m[1]);
-      if (!r || r.revoked_at || !safeEqual(r.hash, sha256(String(token).trim()))) return null;
-      if (!r.last_used_at || Date.now() - r.last_used_at > 60000) db.run('UPDATE api_keys SET last_used_at = ? WHERE id = ?', Date.now(), r.id);
+      const r = await db.get('SELECT * FROM api_keys WHERE prefix = ?', m[1]);
+      if (!r || r.revoked_at || !safeEqual(r.hash, await sha256(String(token).trim()))) return null;
+      if (!r.last_used_at || Date.now() - r.last_used_at > 60000) await db.run('UPDATE api_keys SET last_used_at = ? WHERE id = ?', Date.now(), r.id);
       return { type: 'api_key', id: r.id, name: r.name, scopes: JSON.parse(r.scopes), approval: !!r.approval_mode, rateLimit: r.rate_limit_per_min };
     },
 
@@ -84,15 +85,15 @@ export function createApiKeys({ db }) {
 export function createAudit({ db }) {
   return {
     record({ principal, via, operation, target = null, status = 200, detail = null }) {
-      db.run('INSERT INTO audit_log(at, actor_type, actor_id, actor_name, via, operation, target, status, detail) VALUES(?,?,?,?,?,?,?,?,?)',
+      return db.run('INSERT INTO audit_log(at, actor_type, actor_id, actor_name, via, operation, target, status, detail) VALUES(?,?,?,?,?,?,?,?,?)',
         Date.now(), principal?.type || 'system', principal?.id || null, principal?.name || null, via, operation, target, status, detail ? JSON.stringify(detail).slice(0, 4000) : null);
     },
-    list({ limit = 100, offset = 0, actor_id } = {}) {
+    async list({ limit = 100, offset = 0, actor_id } = {}) {
       const rows = actor_id
-        ? db.all('SELECT * FROM audit_log WHERE actor_id = ? ORDER BY id DESC LIMIT ? OFFSET ?', actor_id, limit, offset)
-        : db.all('SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?', limit, offset);
+        ? await db.all('SELECT * FROM audit_log WHERE actor_id = ? ORDER BY id DESC LIMIT ? OFFSET ?', actor_id, limit, offset)
+        : await db.all('SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?', limit, offset);
       return rows.map((r) => ({ ...r, detail: r.detail ? JSON.parse(r.detail) : null }));
     },
-    prune(days = 180) { db.run('DELETE FROM audit_log WHERE at < ?', Date.now() - days * 86400000); },
+    prune(days = 180) { return db.run('DELETE FROM audit_log WHERE at < ?', Date.now() - days * 86400000); },
   };
 }

@@ -2,8 +2,10 @@
 // UI/API instead of .env. Stored in the settings table with the secret AES-GCM encrypted (TOKEN_ENC_KEY).
 // Resolution order per app: saved in DB (both id + secret) → .env → not configured.
 // createApps() replaces cfg.meta / cfg.instagram / cfg.google with live getters, so every OAuth start,
-// token exchange/refresh and publish reads the current value — no restart needed.
-import { HttpError } from './media.js';
+// token exchange/refresh and publish reads the current value — no restart needed. Because the DB and
+// WebCrypto are async, the saved values are cached in memory: sync() reloads them (each HTTP request,
+// cron tick and CLI command calls it; at most once per second) and set()/clear() update the cache.
+import { HttpError } from './errors.js';
 import { request, qs } from './providers/http.js';
 import { providers } from './providers/index.js';
 
@@ -89,21 +91,42 @@ export function createApps({ db, cfg, cipher }) {
     return [a, { id: String(v[d.idKey] || ''), secret: String(v[d.secretKey] || '') }];
   }));
 
-  const saved = (app) => {
-    const raw = db.getSetting(KEY(app));
+  // cache: app -> { saved: {id, secret_enc, updated_at} | null, secret: string|null, test: object|null }
+  let cache = Object.fromEntries(APP_IDS.map((a) => [a, { saved: null, secret: null, test: null }]));
+  let loadedAt = 0;
+  let loading = null;
+
+  const parseSaved = (raw) => {
     if (!raw) return null;
-    try {
-      const r = JSON.parse(raw);
-      return r.id && r.secret_enc ? r : null;
-    } catch { return null; }
+    try { const r = JSON.parse(raw); return r.id && r.secret_enc ? r : null; } catch { return null; }
   };
 
-  /** Effective credentials { id, secret, source }. */
+  /** Reload saved credentials from the settings table (decrypting the secrets). */
+  async function sync({ maxAgeMs = 1000 } = {}) {
+    if (Date.now() - loadedAt < maxAgeMs) return;
+    if (loading) return loading;
+    loading = (async () => {
+      const rows = await db.all("SELECT key, value FROM settings WHERE key LIKE 'platform_app.%'");
+      const by = new Map(rows.map((r) => [r.key, r.value]));
+      const next = {};
+      for (const app of APP_IDS) {
+        const saved = parseSaved(by.get(KEY(app)));
+        let secret = null;
+        if (saved) { try { secret = (await cipher.decrypt(saved.secret_enc)) || ''; } catch { secret = null; /* key changed → fall back to env */ } }
+        let test = null;
+        try { test = JSON.parse(by.get(TEST_KEY(app)) || 'null'); } catch {}
+        next[app] = { saved, secret, test };
+      }
+      cache = next;
+      loadedAt = Date.now();
+    })().finally(() => { loading = null; });
+    return loading;
+  }
+
+  /** Effective credentials { id, secret, source } (synchronous, from the cache). */
   function resolve(app) {
-    const s = saved(app);
-    if (s) {
-      try { return { id: s.id, secret: cipher.decrypt(s.secret_enc) || '', source: 'db' }; } catch { /* key changed → fall back to env */ }
-    }
+    const c = cache[app];
+    if (c.saved && c.secret !== null) return { id: c.saved.id, secret: c.secret, source: 'db' };
     const e = envVals[app];
     if (e.id && e.secret) return { ...e, source: 'env' };
     return { id: '', secret: '', source: 'none' };
@@ -127,16 +150,15 @@ export function createApps({ db, cfg, cipher }) {
   const scrub = (msg, secret) => (secret ? String(msg).split(secret).join('***') : String(msg));
 
   const api = {
+    sync,
     resolve,
 
     /** Public status — never includes the secret (only its last 4 chars). */
     status(app) {
       const d = check(app);
       const r = resolve(app);
-      const s = saved(app);
+      const s = cache[app].saved;
       const env = envVals[app];
-      let lastTest = null;
-      try { lastTest = JSON.parse(db.getSetting(TEST_KEY(app)) || 'null'); } catch {}
       return {
         app, label: d.label,
         status: r.source === 'db' ? 'configured' : r.source === 'env' ? 'configured_env' : 'not_configured',
@@ -154,37 +176,44 @@ export function createApps({ db, cfg, cipher }) {
         redirect_uris: redirectUris(app),
         scopes: [...new Set(d.providers.flatMap((p) => providers[p].scopes))],
         products: d.products, apis: d.apis, steps: d.steps, links: d.links, guide: d.guide,
-        last_test: lastTest,
+        last_test: cache[app].test,
       };
     },
     list: () => APP_IDS.map((a) => api.status(a)),
 
-    set(app, { client_id, client_secret } = {}) {
+    async set(app, { client_id, client_secret } = {}) {
       const d = check(app);
       const id = String(client_id ?? '').trim();
       const secretIn = client_secret === undefined || client_secret === null ? '' : String(client_secret).trim();
       if (!id) throw new HttpError(400, `${d.idLabel} is required.`);
       if (!d.idPattern.test(id)) throw new HttpError(400, `"${id.slice(0, 80)}" does not look like a valid ${d.idLabel}. ${d.idHint}`);
       if (secretIn && (/\s/.test(secretIn) || secretIn.length < 8 || secretIn.length > 512)) throw new HttpError(400, `${d.secretLabel} looks invalid (8–512 chars, no spaces).`);
-      const prev = saved(app);
+      await sync({ maxAgeMs: 0 });
+      const prev = cache[app].saved;
       let secret_enc;
-      if (secretIn) secret_enc = cipher.encrypt(secretIn);
+      if (secretIn) secret_enc = await cipher.encrypt(secretIn);
       else if (prev) secret_enc = prev.secret_enc; // keep the stored secret when only the id changes
       else throw new HttpError(400, `${d.secretLabel} is required.`);
-      db.setSetting(KEY(app), JSON.stringify({ id, secret_enc, updated_at: Date.now() }));
-      db.run('DELETE FROM settings WHERE key = ?', TEST_KEY(app));
+      const saved = { id, secret_enc, updated_at: Date.now() };
+      await db.batch([
+        ['INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', KEY(app), JSON.stringify(saved)],
+        ['DELETE FROM settings WHERE key = ?', TEST_KEY(app)],
+      ]);
+      cache[app] = { saved, secret: secretIn || cache[app].secret, test: null };
       return api.status(app);
     },
 
-    clear(app) {
+    async clear(app) {
       check(app);
-      db.run('DELETE FROM settings WHERE key IN (?, ?)', KEY(app), TEST_KEY(app));
+      await db.run('DELETE FROM settings WHERE key IN (?, ?)', KEY(app), TEST_KEY(app));
+      cache[app] = { saved: null, secret: null, test: null };
       return api.status(app);
     },
 
     /** Validate credentials without a user login. Returns { ok, verified, message }. */
     async test(app) {
       check(app);
+      await sync({ maxAgeMs: 0 });
       const r = resolve(app);
       let out;
       if (r.source === 'none') out = { ok: false, verified: false, message: 'Not configured: save the app ID and secret first.' };
@@ -193,7 +222,8 @@ export function createApps({ db, cfg, cipher }) {
         out.message = scrub(out.message, r.secret);
       }
       const rec = { ...out, source: r.source, at: Date.now() };
-      db.setSetting(TEST_KEY(app), JSON.stringify(rec));
+      await db.setSetting(TEST_KEY(app), JSON.stringify(rec));
+      cache[app].test = rec;
       return rec;
     },
   };

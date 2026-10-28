@@ -95,7 +95,7 @@ test('OAuth: Facebook with page picker (long-lived token exchange + permission c
   const sel = await app.api('POST', `/oauth/pending/${state}`, { session: s, body: { external_ids: ['page1'] } });
   assert.equal(sel.json.connected.length, 1);
   assert.ok(app.fake.state.calls.some((c) => c.query.grant_type === 'fb_exchange_token'));
-  const row = app.core.db.get("SELECT * FROM integrations WHERE provider='facebook' AND external_id='page1'");
+  const row = await app.core.db.get("SELECT * FROM integrations WHERE provider='facebook' AND external_id='page1'");
   assert.ok(row.access_token_enc.startsWith('v1:') && !row.access_token_enc.includes('page1-token'), 'token encrypted at rest');
 });
 
@@ -112,7 +112,7 @@ test('OAuth: Instagram via Facebook (single linked account auto-connects)', asyn
   const s = await app.login();
   const { res } = await oauthRoundTrip('instagram', s);
   assert.equal(res.status, 200);
-  const a = app.core.integrations.list().find((x) => x.provider === 'instagram' && x.external_id === 'ig1');
+  const a = (await app.core.integrations.list()).find((x) => x.provider === 'instagram' && x.external_id === 'ig1');
   assert.equal(a.username, 'testig');
   assert.equal(a.meta.page_id, 'page1');
 });
@@ -122,11 +122,11 @@ test('OAuth: Instagram standalone (Instagram Login) + token refresh', async () =
   const { authUrl, res } = await oauthRoundTrip('instagram-standalone', s);
   assert.match(authUrl, /igwww\/oauth\/authorize/);
   assert.equal(res.status, 200);
-  const a = app.core.integrations.list().find((x) => x.provider === 'instagram-standalone');
+  const a = (await app.core.integrations.list()).find((x) => x.provider === 'instagram-standalone');
   assert.equal(a.external_id, 'igs1');
-  assert.equal(app.core.integrations.secret(a.id).access_token, 'ig-long');
+  assert.equal((await app.core.integrations.secret(a.id)).access_token, 'ig-long');
   await app.core.integrations.refresh(a.id);
-  assert.equal(app.core.integrations.secret(a.id).access_token, 'ig-long-2');
+  assert.equal((await app.core.integrations.secret(a.id)).access_token, 'ig-long-2');
 });
 
 test('OAuth: YouTube (offline access, PKCE, scope check, refresh token stored)', async () => {
@@ -137,11 +137,11 @@ test('OAuth: YouTube (offline access, PKCE, scope check, refresh token stored)',
   assert.equal(u.searchParams.get('prompt'), 'consent');
   assert.equal(u.searchParams.get('code_challenge_method'), 'S256');
   assert.equal(res.status, 200);
-  const a = app.core.integrations.list().find((x) => x.provider === 'youtube');
+  const a = (await app.core.integrations.list()).find((x) => x.provider === 'youtube');
   assert.equal(a.name, 'Test Channel');
   const tokenCall = app.fake.state.calls.find((c) => c.path === '/gtoken/token' && c.body.grant_type === 'authorization_code');
   assert.ok(tokenCall.body.code_verifier);
-  assert.equal(app.core.integrations.secret(a.id).refresh_token, '1//refresh');
+  assert.equal((await app.core.integrations.secret(a.id)).refresh_token, '1//refresh');
 });
 
 test('OAuth: invalid state is rejected', async () => {
@@ -150,10 +150,10 @@ test('OAuth: invalid state is rejected', async () => {
 });
 
 test('token health check marks revoked accounts', async () => {
-  const id = app.seed('facebook', { external_id: 'page2', name: 'Second Page', access_token: 'page2-token' });
+  const id = await app.seed('facebook', { external_id: 'page2', name: 'Second Page', access_token: 'page2-token' });
   app.fake.state.revoked.add('page2-token');
   const r = await app.core.integrations.check(id);
   app.fake.state.revoked.delete('page2-token');
   assert.equal(r.ok, false);
-  assert.equal(app.core.integrations.get(id).status, 'needs_reconnect');
+  assert.equal((await app.core.integrations.get(id)).status, 'needs_reconnect');
 });

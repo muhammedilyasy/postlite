@@ -17,7 +17,7 @@ before(async () => {
 });
 after(async () => { await app.close(); });
 
-const key = (opts) => app.core.apiKeys.create({ name: 'apps-test', ...opts }).key;
+const key = async (opts) => (await app.core.apiKeys.create({ name: 'apps-test', ...opts })).key;
 const statusOf = (list, id) => list.find((a) => a.app === id);
 
 test('status: env fallback vs not configured, redirect URIs from PUBLIC_URL, no secrets', async () => {
@@ -45,7 +45,7 @@ test('unconfigured Connect redirects to the Platform apps card instead of failin
   const r = await fetch(`${app.base}/oauth/youtube/start`, { redirect: 'manual', headers: { cookie: s.cookie } });
   assert.equal(r.status, 302);
   assert.equal(r.headers.get('location'), '/#/settings/apps/google');
-  const k = key({ scopes: ['admin'], approval_mode: false });
+  const k = await key({ scopes: ['admin'], approval_mode: false });
   const api = await app.api('POST', '/accounts/connect', { key: k, body: { provider: 'youtube' } });
   assert.equal(api.status, 409);
   assert.match(api.json.error.message, /Platform apps/);
@@ -63,7 +63,7 @@ test('save encrypts the secret, takes effect immediately (no restart) and OAuth 
   assert.equal(r.json.platform_app.secret_hint, '…9876');
   assert.ok(!r.text.includes(G_SECRET));
   // at rest: encrypted, not plaintext
-  const raw = app.core.db.get("SELECT value FROM settings WHERE key = 'platform_app.google'").value;
+  const raw = (await app.core.db.get("SELECT value FROM settings WHERE key = 'platform_app.google'")).value;
   assert.ok(!raw.includes(G_SECRET));
   assert.match(JSON.parse(raw).secret_enc, /^v1:/);
   assert.equal(app.core.cfg.google.clientSecret, G_SECRET); // live getter
@@ -75,7 +75,7 @@ test('save encrypts the secret, takes effect immediately (no restart) and OAuth 
   const cb = (await fetch(authUrl, { redirect: 'manual' })).headers.get('location');
   const done = await fetch(cb, { redirect: 'manual', headers: { cookie: s.cookie } });
   assert.equal(done.status, 200, await done.text());
-  assert.ok(app.core.integrations.list().some((a) => a.provider === 'youtube'));
+  assert.ok((await app.core.integrations.list()).some((a) => a.provider === 'youtube'));
   // changing only the id keeps the stored secret
   const r2 = await app.api('POST', '/platform-apps/google', { session: s, body: { client_id: `9${G_ID}` } });
   assert.equal(r2.status, 200, r2.text);
@@ -136,26 +136,26 @@ test('Test button: Meta client_credentials + GET /app, Google and Instagram dumm
 });
 
 test('scopes: admin only; approval-mode keys cannot change credentials; audit has no secret', async () => {
-  const w = key({ scopes: ['read', 'write', 'publish', 'analytics'], approval_mode: false });
+  const w = await key({ scopes: ['read', 'write', 'publish', 'analytics'], approval_mode: false });
   assert.equal((await app.api('GET', '/platform-apps', { key: w })).status, 403);
   assert.equal((await app.api('POST', '/platform-apps/meta', { key: w, body: { client_id: META_ID, client_secret: META_SECRET } })).status, 403);
-  const appr = key({ scopes: ['admin'], approval_mode: true });
+  const appr = await key({ scopes: ['admin'], approval_mode: true });
   assert.equal((await app.api('GET', '/platform-apps', { key: appr })).status, 200);
   const r = await app.api('POST', '/platform-apps/meta', { key: appr, body: { client_id: META_ID, client_secret: META_SECRET } });
   assert.equal(r.status, 403);
   assert.match(r.json.error.message, /Approval-mode/);
   assert.equal((await app.api('DELETE', '/platform-apps/google', { key: appr })).status, 403);
-  const admin = key({ scopes: ['admin'], approval_mode: false });
+  const admin = await key({ scopes: ['admin'], approval_mode: false });
   const ok = await app.api('POST', '/platform-apps/instagram', { key: admin, body: { client_id: '987654321', client_secret: 'ig-db-secret-zyx987' } });
   assert.equal(ok.status, 200, ok.text);
   await app.api('DELETE', '/platform-apps/instagram', { key: admin });
-  const audit = JSON.stringify(app.core.audit.list({ limit: 1000 }));
+  const audit = JSON.stringify(await app.core.audit.list({ limit: 1000 }));
   for (const sec of [G_SECRET, META_SECRET, 'ig-db-secret-zyx987', 'wrong-secret-1234']) assert.ok(!audit.includes(sec), `audit leaked ${sec}`);
-  assert.ok(app.core.audit.list({ limit: 1000 }).some((e) => e.operation === 'set_platform_app' && e.target === 'instagram' && e.detail.client_secret === '[redacted]'));
+  assert.ok((await app.core.audit.list({ limit: 1000 })).some((e) => e.operation === 'set_platform_app' && e.target === 'instagram' && e.detail.client_secret === '[redacted]'));
 });
 
 test('MCP: platform app tools exist and never return secrets', async () => {
-  const k = key({ scopes: ['admin'], approval_mode: false });
+  const k = await key({ scopes: ['admin'], approval_mode: false });
   const rpc = async (method, params) => (await fetch(`${app.base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${k}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json();
   const tools = (await rpc('tools/list', {})).result.tools.map((t) => t.name);
   for (const t of ['list_platform_apps', 'set_platform_app', 'clear_platform_app', 'test_platform_app']) assert.ok(tools.includes(t), t);
@@ -180,7 +180,7 @@ test('setup guides are served as HTML inside the app', async () => {
   assert.equal((await fetch(`${app.base}/docs/setup/..%2F..%2F.env`)).status, 404);
 });
 
-test('markdown renderer escapes HTML and unsafe links', () => {
+test('markdown renderer escapes HTML and unsafe links', async () => {
   const { html, title } = renderMarkdown('# T <b>\n\nHi <script>alert(1)</script> [x](javascript:alert(1)) [g](youtube.md#a) <https://e.com/x>\n\n| a | b |\n| --- | --- |\n| `<i>` | **c** |\n\n1. one\n   - nested\n2. two');
   assert.equal(title, 'T <b>');
   assert.ok(!html.includes('<script>') && !html.includes('<b>'));

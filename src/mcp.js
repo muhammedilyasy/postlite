@@ -1,9 +1,8 @@
 // Model Context Protocol server (JSON-RPC 2.0, hand-rolled — no SDK dependency).
-// Transports: stdio (newline-delimited JSON) and Streamable HTTP (POST /mcp, JSON responses).
-import fs from 'node:fs';
-import path from 'node:path';
+// Transports: Streamable HTTP (POST /mcp, JSON responses; Node and Workers) and stdio (Node only,
+// src/node/mcp-stdio.js).
 import { operations, opsByName, execute } from './api/operations.js';
-import { HttpError } from './media.js';
+import { HttpError } from './errors.js';
 
 export const MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
@@ -13,7 +12,7 @@ Times: ISO-8601 with offset, epoch ms, or local "YYYY-MM-DDTHH:mm" in the server
 If your key is in approval mode, scheduled posts become "pending_approval" until a human approves; tell the user.
 Errors explain what to fix (e.g. per-platform validation). Never retry a failed post whose error says it "may have been published" without checking the platform first.`;
 
-const PATH_TOOL = {
+export const PATH_TOOL = {
   name: 'upload_media_from_path',
   title: 'Upload a local file',
   description: 'Upload a file from the local filesystem of the machine running this MCP stdio server (e.g. "/home/me/videos/clip.mp4"). Only available over stdio. Returns the media id.',
@@ -63,26 +62,23 @@ const PROMPTS = [
   },
 ];
 
-function rpcError(id, code, message, data) {
+export function rpcError(id, code, message, data) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message, ...(data !== undefined ? { data } : {}) } };
 }
 
 /**
  * Create an MCP message handler bound to a core and transport.
  * @param {object} core
- * @param {{via:'mcp-stdio'|'mcp-http', stdio?:boolean, version?:string}} opts
+ * @param {{via:'mcp-stdio'|'mcp-http', stdio?:boolean, version?:string, uploadFromPath?:Function}} opts
+ *   uploadFromPath(core, args, principal) handles upload_media_from_path (stdio on Node only).
  */
-export function createMcp(core, { via, stdio = false, version = '0.1.0' }) {
+export function createMcp(core, { via, stdio = false, version = '0.1.0', uploadFromPath = null }) {
   const tools = toolDefs({ stdio });
 
   async function callTool(name, args, principal) {
-    if (name === PATH_TOOL.name && stdio) {
+    if (name === PATH_TOOL.name && stdio && uploadFromPath) {
       if (!principal.scopes.includes('write') && !principal.scopes.includes('admin')) throw new HttpError(403, 'This API key lacks the "write" scope.');
-      const p = String(args?.path || '');
-      if (!path.isAbsolute(p) || !fs.existsSync(p) || !fs.statSync(p).isFile()) throw new HttpError(400, `File not found: "${p}". Pass an absolute path to an existing file.`);
-      const m = await core.media.save(fs.createReadStream(p), args.filename || path.basename(p));
-      core.audit.record({ principal, via, operation: PATH_TOOL.name, target: m.id, status: 200, detail: { path: p } });
-      return { media: { ...core.media.view(m), public_url: core.media.publicUrl(m) } };
+      return uploadFromPath(core, args || {}, principal, via);
     }
     const op = opsByName[name];
     if (!op || op.mcp === false) return undefined;
@@ -180,81 +176,3 @@ export function createMcp(core, { via, stdio = false, version = '0.1.0' }) {
   return { handle, handleAny, tools };
 }
 
-/** Run MCP over stdio (newline-delimited JSON-RPC). */
-export function runStdio(core, principal, { input = process.stdin, output = process.stdout, version } = {}) {
-  const mcp = createMcp(core, { via: 'mcp-stdio', stdio: true, version });
-  let buf = '';
-  let pending = Promise.resolve();
-  input.setEncoding('utf8');
-  input.on('data', (chunk) => {
-    buf += chunk;
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      pending = pending.then(async () => {
-        let msg;
-        try { msg = JSON.parse(line); } catch { output.write(JSON.stringify(rpcError(null, -32700, 'Parse error')) + '\n'); return; }
-        const res = await mcp.handleAny(msg, principal);
-        if (res) output.write(JSON.stringify(res) + '\n');
-      });
-    }
-  });
-  return new Promise((resolve) => input.on('end', () => pending.then(resolve)));
-}
-
-/** stdio → remote Streamable HTTP bridge (for laptops talking to a postlite server). */
-export function runBridge({ url, key, input = process.stdin, output = process.stdout }) {
-  let buf = '';
-  let session = null;
-  let pending = Promise.resolve();
-  const endpoint = `${url.replace(/\/+$/, '')}/mcp`;
-  input.setEncoding('utf8');
-  input.on('data', (chunk) => {
-    buf += chunk;
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      pending = pending.then(async () => {
-        let msg;
-        try { msg = JSON.parse(line); } catch { output.write(JSON.stringify(rpcError(null, -32700, 'Parse error')) + '\n'); return; }
-        // Local file uploads are handled here and sent as a raw REST upload.
-        if (msg.method === 'tools/call' && msg.params?.name === PATH_TOOL.name) {
-          const p = String(msg.params.arguments?.path || '');
-          try {
-            if (!fs.existsSync(p)) throw new Error(`File not found: ${p}`);
-            const res = await fetch(`${url.replace(/\/+$/, '')}/api/v1/media?filename=${encodeURIComponent(msg.params.arguments?.filename || path.basename(p))}`, {
-              method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/octet-stream' }, body: fs.createReadStream(p), duplex: 'half',
-            });
-            const j = await res.json();
-            const ok = res.ok;
-            output.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(j, null, 2) }], structuredContent: j, isError: !ok } }) + '\n');
-          } catch (e) {
-            output.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true } }) + '\n');
-          }
-          return;
-        }
-        try {
-          const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(session ? { 'mcp-session-id': session } : {}) },
-            body: JSON.stringify(msg),
-          });
-          session = res.headers.get('mcp-session-id') || session;
-          const text = await res.text();
-          if (!text) return;
-          let parsed;
-          try { parsed = JSON.parse(text); } catch { parsed = rpcError(msg.id, -32603, `Bad response from server (HTTP ${res.status})`); }
-          if (msg.method === 'tools/list' && parsed.result?.tools) parsed.result.tools.push(PATH_TOOL);
-          output.write(JSON.stringify(parsed) + '\n');
-        } catch (e) {
-          if (msg.id !== undefined) output.write(JSON.stringify(rpcError(msg.id, -32603, `Cannot reach postlite at ${url}: ${e.cause?.code || e.message}`)) + '\n');
-        }
-      });
-    }
-  });
-  return new Promise((resolve) => input.on('end', () => pending.then(resolve)));
-}

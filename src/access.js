@@ -1,9 +1,12 @@
 // Cloudflare Zero Trust Access: verify the application token (RS256 JWT) that Access puts in the
-// `Cf-Access-Jwt-Assertion` header / `CF_Authorization` cookie. No dependencies: node:crypto + fetch.
+// `Cf-Access-Jwt-Assertion` header / `CF_Authorization` cookie. No dependencies: WebCrypto + fetch, so
+// the same code runs on Node and on Cloudflare Workers.
 // Docs: https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/
-import crypto from 'node:crypto';
+import { fromBase64Url, fromUtf8 } from './bytes.js';
+import { importRsaJwk, verifyRs256 } from './crypto.js';
+import { meteredFetch } from './meter.js';
 
-const b64urlJson = (s) => JSON.parse(Buffer.from(s, 'base64url').toString('utf8'));
+const b64urlJson = (s) => JSON.parse(fromUtf8(fromBase64Url(s)));
 
 export class AccessError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -44,9 +47,9 @@ export function createAccessVerifier(opts) {
   const timeoutMs = opts.timeoutMs ?? 5000;
   const cacheMs = opts.cacheMs ?? 3600000;
   const minRefreshMs = opts.minRefreshMs ?? 10000; // throttle unknown-kid refreshes (forged kids can't DoS the certs URL)
-  const doFetch = opts.fetchImpl || fetch;
+  const doFetch = opts.fetchImpl || meteredFetch;
   const allowed = new Set(opts.allowedEmails.map((e) => e.toLowerCase()));
-  let keys = new Map(); // kid -> KeyObject
+  let keys = new Map(); // kid -> CryptoKey
   let fetchedAt = 0;
   let inflight = null;
 
@@ -60,7 +63,7 @@ export function createAccessVerifier(opts) {
         const next = new Map();
         for (const jwk of body.keys || []) {
           if (jwk.kty !== 'RSA' || !jwk.kid || (jwk.use && jwk.use !== 'sig')) continue;
-          try { next.set(jwk.kid, crypto.createPublicKey({ key: { kty: 'RSA', n: jwk.n, e: jwk.e }, format: 'jwk' })); } catch {}
+          try { next.set(jwk.kid, await importRsaJwk(jwk)); } catch {}
         }
         if (!next.size) throw new AccessError('jwks_unavailable', 'Access certs endpoint returned no usable RSA keys');
         keys = next;
@@ -90,7 +93,8 @@ export function createAccessVerifier(opts) {
     if (header.alg !== 'RS256') throw new AccessError('bad_alg', `Unsupported token algorithm ${header.alg}`);
     const key = await keyFor(String(header.kid || ''));
     if (!key) throw new AccessError('unknown_kid', 'Access token signed with an unknown key');
-    const ok = crypto.verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), key, Buffer.from(parts[2], 'base64url'));
+    let ok = false;
+    try { ok = await verifyRs256(key, `${parts[0]}.${parts[1]}`, parts[2]); } catch {}
     if (!ok) throw new AccessError('bad_signature', 'Invalid Access token signature');
     const auds = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
     if (!auds.includes(opts.aud)) throw new AccessError('bad_aud', 'Access token audience does not match CF_ACCESS_AUD');

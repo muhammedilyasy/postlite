@@ -77,7 +77,7 @@ test('valid token: page served, session mapped to the email, audit log records i
   assert.equal(noCsrf.status, 403);
   const ok = await app.api('PATCH', '/settings', { session: s, body: { timezone: 'UTC' } });
   assert.equal(ok.status, 200, ok.text);
-  const entries = app.core.audit.list({ limit: 20 });
+  const entries = await app.core.audit.list({ limit: 20 });
   assert.ok(entries.some((e) => e.operation === 'update_settings' && e.actor_name === OWNER && e.actor_id === OWNER));
   assert.ok(entries.some((e) => e.operation === 'login' && e.actor_name === OWNER));
   // the allow-list is case-insensitive
@@ -94,7 +94,7 @@ test('/api/v1 with a session: bound to the Access identity and the Access token 
   assert.equal((await fetch(`${app.base}/api/v1/accounts`, { headers: { cookie: `pl_sid=${s.sid}; CF_Authorization=${sign({ aud: ['nope-nope-nope-nope'] })}` } })).status, 401);
   assert.equal((await fetch(`${app.base}/api/v1/accounts`, { headers: { cookie: s.cookie } })).status, 200);
   // once the Access token behind the session has expired, the bare session cookie stops working
-  app.core.db.run('UPDATE sessions SET access_exp = ? WHERE email = ?', Date.now() - 3600000, OWNER);
+  await app.core.db.run('UPDATE sessions SET access_exp = ? WHERE email = ?', Date.now() - 3600000, OWNER);
   assert.equal((await fetch(`${app.base}/api/v1/accounts`, { headers: { cookie: `pl_sid=${s.sid}` } })).status, 401);
   // ...until a fresh Access token is seen again
   assert.equal((await fetch(`${app.base}/api/v1/accounts`, { headers: { cookie: s.cookie } })).status, 200);
@@ -102,7 +102,7 @@ test('/api/v1 with a session: bound to the Access identity and the Access token 
   // password-mode sessions (no email) are never accepted in access mode
   const legacy = 'legacy-session-id-0123456789abcdef';
   const crypto2 = await import('node:crypto');
-  app.core.db.run('INSERT INTO sessions(id_hash, csrf, created_at, expires_at) VALUES(?,?,?,?)', crypto2.createHash('sha256').update(legacy).digest('hex'), 'c', Date.now(), Date.now() + 86400000);
+  await app.core.db.run('INSERT INTO sessions(id_hash, csrf, created_at, expires_at) VALUES(?,?,?,?)', crypto2.createHash('sha256').update(legacy).digest('hex'), 'c', Date.now(), Date.now() + 86400000);
   assert.equal((await fetch(`${app.base}/api/v1/accounts`, { headers: { cookie: `pl_sid=${legacy}` } })).status, 401);
   // a session for another email is replaced, not reused
   const r = await page('/', sign({ email: OTHER }), { cookie: `pl_sid=${s.sid}` });
@@ -117,9 +117,9 @@ test('rejected tokens: wrong aud, wrong iss, expired, not yet valid, bad signatu
     'wrong iss': [sign({ iss: 'https://evil.cloudflareaccess.com' }), 401],
     expired: [sign({ exp: now - 3600, iat: now - 7200, nbf: now - 7200 }), 401],
     'not yet valid': [sign({ nbf: now + 3600 }), 401],
-    'bad signature': [`${sign().split('.').slice(0, 2).join('.')}.${sign({ email: OTHER }).split('.')[2]}`, 401],
+    'bad signature': [`${(sign()).split('.').slice(0, 2).join('.')}.${(sign({ email: OTHER })).split('.')[2]}`, 401],
     'signed by unknown key': [sign({}, { key: { privateKey: keyPair().privateKey }, kid: 'kid-one' }), 401],
-    'alg none': [`${Buffer.from('{"alg":"none","kid":"kid-one"}').toString('base64url')}.${sign().split('.')[1]}.`, 401],
+    'alg none': [`${Buffer.from('{"alg":"none","kid":"kid-one"}').toString('base64url')}.${(sign()).split('.')[1]}.`, 401],
     'email not allowed': [sign({ email: 'intruder@example.com' }), 403],
     'no email (service token)': [sign({ email: undefined }), 401],
     'global org token': [sign({ type: 'org' }), 401],
@@ -179,7 +179,7 @@ test('bypass paths work without Access but still enforce their own auth', async 
   // REST: no Access JWT needed, but an API key is
   assert.equal((await fetch(`${app.base}/api/v1/accounts`)).status, 401);
   assert.equal((await fetch(`${app.base}/api/v1/accounts`, { headers: { 'cf-access-jwt-assertion': sign() } })).status, 401, 'an Access JWT alone is not an API credential');
-  const { key } = app.core.apiKeys.create({ name: 'agent', scopes: ['read'] });
+  const { key } = await app.core.apiKeys.create({ name: 'agent', scopes: ['read'] });
   assert.equal((await app.api('GET', '/accounts', { key })).status, 200);
   assert.equal((await app.api('GET', '/accounts', { key: 'pl_abcdefgh_wrongwrongwrongwrongwrong' })).status, 401);
   // OpenAPI + agent docs are public through the /api/v1 bypass
@@ -217,7 +217,7 @@ test('JWKS fetch has a timeout', async () => {
   await new Promise((r) => hang.close(r));
 });
 
-test('fail closed: access mode without team domain, AUD or allow-list refuses to start', () => {
+test('fail closed: access mode without team domain, AUD or allow-list refuses to start', async () => {
   const base = { TOKEN_ENC_KEY: 'x'.repeat(32), AUTH_MODE: 'cloudflare-access', CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: AUD, ALLOWED_EMAILS: OWNER };
   assert.doesNotThrow(() => validateAuthConfig(getConfig(base)));
   assert.throws(() => validateAuthConfig(getConfig({ ...base, CF_ACCESS_TEAM_DOMAIN: '' })), /CF_ACCESS_TEAM_DOMAIN/);

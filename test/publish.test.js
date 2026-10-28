@@ -7,13 +7,13 @@ before(async () => { app = await createTestApp(); });
 after(async () => { await app.close(); });
 
 async function publish(integrationId, { content = 'Hello', media = [], settings = {} } = {}) {
-  const gid = app.core.posts.saveGroup({ content, media: media.map((m) => m.id), action: 'now', posts: [{ integration_id: integrationId, settings }] });
+  const gid = await app.core.posts.saveGroup({ content, media: media.map((m) => m.id), action: 'now', posts: [{ integration_id: integrationId, settings }] });
   await app.core.scheduler.drain(15000);
-  return app.core.posts.getGroup(gid).targets[0];
+  return (await app.core.posts.getGroup(gid)).targets[0];
 }
 
 test('facebook: text + link post', async () => {
-  const fb = app.seed('facebook');
+  const fb = await app.seed('facebook');
   const t = await publish(fb, { content: 'Read this', settings: { url: 'https://example.com/a' } });
   assert.equal(t.status, 'published', t.error);
   assert.match(t.published_url, /facebook\.com\/page1\/posts/);
@@ -23,7 +23,7 @@ test('facebook: text + link post', async () => {
 });
 
 test('facebook: multi-photo post uploads unpublished photos then one feed post', async () => {
-  const fb = app.seed('facebook');
+  const fb = await app.seed('facebook');
   const a = await app.upload(makeJpeg(1200, 800), 'a.jpg');
   const b = await app.upload(makePng(800, 800), 'b.png');
   const before = app.fake.state.calls.length;
@@ -41,7 +41,7 @@ test('facebook: multi-photo post uploads unpublished photos then one feed post',
 });
 
 test('facebook: video post, reel and story; first comment', async () => {
-  const fb = app.seed('facebook');
+  const fb = await app.seed('facebook');
   const v = await app.upload(makeMp4({ seconds: 20 }), 'v.mp4');
   const t1 = await publish(fb, { content: 'Video', media: [v], settings: { title: 'My video', first_comment: 'first!' } });
   assert.equal(t1.status, 'published', t1.error);
@@ -58,7 +58,7 @@ test('facebook: video post, reel and story; first comment', async () => {
 });
 
 test('instagram (FB login): single image, reel, carousel with polling, story', async () => {
-  const ig = app.seed('instagram');
+  const ig = await app.seed('instagram');
   const img = await app.upload(makeJpeg(1080, 1350), 'p.jpg');
   const vid = await app.upload(makeMp4({ seconds: 30 }), 'r.mp4');
   app.fake.state.inProgressPolls = 2;
@@ -83,7 +83,7 @@ test('instagram (FB login): single image, reel, carousel with polling, story', a
 });
 
 test('instagram: container ERROR is a permanent failure with a clear message', async () => {
-  const ig = app.seed('instagram');
+  const ig = await app.seed('instagram');
   const vid = await app.upload(makeMp4({ seconds: 10 }), 'bad.mp4');
   app.fake.state.containerError = '2207026';
   const t = await publish(ig, { content: 'x', media: [vid] });
@@ -94,7 +94,7 @@ test('instagram: container ERROR is a permanent failure with a clear message', a
 });
 
 test('instagram standalone uses graph.instagram.com host', async () => {
-  const igs = app.seed('instagram-standalone');
+  const igs = await app.seed('instagram-standalone');
   const img = await app.upload(makeJpeg(1080, 1080), 'q.jpg');
   const before = app.fake.state.calls.length;
   const t = await publish(igs, { content: 'standalone', media: [img] });
@@ -106,7 +106,7 @@ test('instagram standalone uses graph.instagram.com host', async () => {
 });
 
 test('youtube: resumable upload in chunks, metadata, thumbnail; refresh on expiry', async () => {
-  const yt = app.seed('youtube', { access_token: 'ya29.expired', token_expires_at: Date.now() - 1000 });
+  const yt = await app.seed('youtube', { access_token: 'ya29.expired', token_expires_at: Date.now() - 1000 });
   const vid = await app.upload(makeMp4({ width: 1080, height: 1920, seconds: 40, mdatBytes: 700000 }), 'short.mp4');
   const thumb = await app.upload(makeJpeg(1280, 720), 'thumb.jpg');
   app.fake.state.ytChunkFailOnce = true; // transient 503 mid-upload → retried, resumes from probe offset
@@ -126,22 +126,22 @@ test('youtube: resumable upload in chunks, metadata, thumbnail; refresh on expir
 });
 
 test('youtube: revoked refresh token marks account needs_reconnect', async () => {
-  const yt = app.seed('youtube', { external_id: 'UC1', access_token: 'ya29.x', token_expires_at: Date.now() - 1000 });
+  const yt = await app.seed('youtube', { external_id: 'UC1', access_token: 'ya29.x', token_expires_at: Date.now() - 1000 });
   const vid = await app.upload(makeMp4({ seconds: 5 }), 'v.mp4');
   app.fake.state.googleRefreshInvalid = true;
   const t = await publish(yt, { content: 'd', media: [vid], settings: { title: 'Title' } });
   app.fake.state.googleRefreshInvalid = false;
   assert.equal(t.status, 'failed');
   assert.match(t.error, /reconnect/i);
-  assert.equal(app.core.integrations.get(yt).status, 'needs_reconnect');
+  assert.equal((await app.core.integrations.get(yt)).status, 'needs_reconnect');
 });
 
 test('facebook: revoked token → needs_reconnect, no retry', async () => {
-  const fb = app.seed('facebook', { external_id: 'page2', name: 'Second Page', access_token: 'page2-token' });
+  const fb = await app.seed('facebook', { external_id: 'page2', name: 'Second Page', access_token: 'page2-token' });
   app.fake.state.revoked.add('page2-token');
   const t = await publish(fb, { content: 'x' });
   app.fake.state.revoked.delete('page2-token');
   assert.equal(t.status, 'failed');
-  assert.equal(app.core.integrations.get(fb).status, 'needs_reconnect');
+  assert.equal((await app.core.integrations.get(fb)).status, 'needs_reconnect');
   assert.equal(t.attempts, 0);
 });

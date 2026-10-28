@@ -6,6 +6,7 @@
 //   auth             → token expired/invalid: refresh if possible, else mark integration "needs reconnect"
 //   disconnect       → account action required on the platform: mark "needs reconnect", fail
 //   unknown_outcome  → an irreversible call got no response: never retry blindly (could double-post)
+import { meteredFetch } from '../meter.js';
 
 export class ProviderError extends Error {
   constructor(kind, message, { status = 0, body = '', code } = {}) {
@@ -56,7 +57,7 @@ export async function request(url, opts = {}) {
   if (!init.signal) init.signal = AbortSignal.timeout(timeoutMs);
   let res;
   try {
-    res = await fetch(url, init);
+    res = await meteredFetch(url, init);
   } catch (e) {
     const what = label || new URL(url).pathname;
     if (irreversible) {

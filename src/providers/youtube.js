@@ -1,7 +1,6 @@
 // YouTube provider: Google OAuth (offline + refresh), resumable uploads via plain REST.
 // Modeled on Postiz's public YouTube integration and the YouTube Data/Analytics API docs.
-import fs from 'node:fs';
-import { Readable } from 'node:stream';
+import { meteredFetch } from '../meter.js';
 import { request, qs, ProviderError, classifyHttp } from './http.js';
 import { shortReason } from './facebook.js';
 
@@ -54,7 +53,7 @@ const authz = (token) => ({ authorization: `Bearer ${token}` });
 async function raw(url, init, cfg) {
   let res;
   try {
-    res = await fetch(url, { ...init, signal: init.signal || AbortSignal.timeout(cfg.fetchTimeoutMs) });
+    res = await meteredFetch(url, { ...init, signal: init.signal || AbortSignal.timeout(cfg.fetchTimeoutMs) });
   } catch (e) {
     throw new ProviderError('transient', `Network error talking to YouTube: ${e.cause?.code || e.message}`);
   }
@@ -140,7 +139,7 @@ export const youtube = {
     const { cfg, post } = ctx;
     const s = post.settings;
     const video = post.media[0];
-    const size = fs.statSync(ctx.mediaPath(video)).size;
+    const size = ctx.mediaSize(video);
     const url = `${cfg.urls.youtube}/upload/youtube/v3/videos?` + qs({ uploadType: 'resumable', part: 'snippet,status', notifySubscribers: s.notifySubscribers === false ? 'false' : 'true' });
     const tags = (s.tags || []).map((t) => String(t).trim()).filter(Boolean);
     const res = await raw(url, {
@@ -175,12 +174,14 @@ export const youtube = {
         let uploaded = p.uploaded;
         const chunk = Math.max(256 * 1024, Math.floor(cfg.youtubeChunkBytes / (256 * 1024)) * 256 * 1024);
         const started = Date.now();
-        const file = ctx.mediaPath(ctx.post.media[0]);
+        const video = ctx.post.media[0];
         while (uploaded < data.size) {
-          if (Date.now() - started > 4 * 60000) return { status: 'pending', delayMs: 0, data: { ...data, uploaded } };
+          if (Date.now() - started > (cfg.scheduler?.stepBudgetMs ?? 4 * 60000)) return { status: 'pending', delayMs: 0, data: { ...data, uploaded } };
+          // Workers: stop between chunks when the invocation's subrequest budget runs low; the next tick resumes.
+          if (ctx.budgetLow?.()) return { status: 'pending', delayMs: 0, data: { ...data, uploaded } };
           const end = Math.min(uploaded + chunk, data.size) - 1;
-          // Stream the byte range from disk (never hold a whole chunk in memory).
-          const body = Readable.toWeb(fs.createReadStream(file, { start: uploaded, end, highWaterMark: 256 * 1024 }));
+          // Stream the byte range from storage (local file or R2); never hold a whole chunk in memory.
+          const body = await ctx.openMedia(video, uploaded, end);
           const res = await raw(data.uploadUri, {
             method: 'PUT',
             headers: { ...authz(ctx.token), 'content-type': ctx.post.media[0].mime, 'content-length': String(end - uploaded + 1), 'content-range': `bytes ${uploaded}-${end}/${data.size}` },
@@ -208,9 +209,9 @@ export const youtube = {
     let warning = null;
     if (data.thumbnailId && ctx.thumbnail) {
       try {
-        const tpath = ctx.mediaPath(ctx.thumbnail);
+        const tsize = ctx.mediaSize(ctx.thumbnail);
         const res = await raw(`${cfg.urls.youtube}/upload/youtube/v3/thumbnails/set?` + qs({ videoId, uploadType: 'media' }), {
-          method: 'POST', headers: { ...authz(ctx.token), 'content-type': ctx.thumbnail.mime, 'content-length': String(fs.statSync(tpath).size) }, body: Readable.toWeb(fs.createReadStream(tpath)), duplex: 'half',
+          method: 'POST', headers: { ...authz(ctx.token), 'content-type': ctx.thumbnail.mime, 'content-length': String(tsize) }, body: await ctx.openMedia(ctx.thumbnail, 0, tsize - 1), duplex: 'half',
         }, cfg);
         if (!res.ok) await failFrom(res, 'Thumbnail upload failed.');
         await res.arrayBuffer().catch(() => {});

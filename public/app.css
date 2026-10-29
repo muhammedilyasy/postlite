@@ -409,17 +409,36 @@ code.url { word-break: break-all; }
 /* ---------- analytics ---------- */
 .kpi-grid.single { grid-template-columns: minmax(0, 1fr); }
 .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; margin-bottom: 16px; }
-.acc-kpi { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
-.acc-kpi .an-notice { margin: 0; }
-.an-notice a { white-space: nowrap; }
+.acc-kpi { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .ak-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.ak-head a { margin-left: auto; font-size: 12.5px; flex: none; }
-.ak-foot { color: var(--text-3); }
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+.ak-head > a { margin-left: auto; font-size: 12.5px; flex: none; }
+.ak-name { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.ak-name .small { font-size: 12px; }
+.ak-empty { margin: 0; }
+.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+.brand-totals .kpis, .kpi-grid.single .kpis, .an-rest .kpis { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 .kpi { background: var(--surface); padding: 10px 12px; min-width: 0; box-shadow: 1px 1px 0 var(--border); }
-.kl { font-size: 11.5px; color: var(--text-2); text-transform: capitalize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.kv { font-size: 19px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-top: 2px; }
-.kc { font-size: 11px; margin-top: 2px; }
+.kl { font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kv { font-size: 19px; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin-top: 2px; white-space: nowrap; }
+.ku { font-size: 12px; font-weight: 500; color: var(--text-3); letter-spacing: 0; }
+.kc { font-size: 11px; margin-top: 2px; min-height: 15px; color: var(--text-3); }
+.an-line { display: flex; align-items: center; gap: 6px; margin-top: auto; color: var(--text-2); min-width: 0; line-height: 1.4; }
+.an-line > .ic { color: var(--warn); flex: none; }
+.an-line.err > .ic { color: var(--err); }
+.an-line > .ellipsis { flex: 0 1 auto; }
+.an-line > a { flex: none; white-space: nowrap; }
+.brand-totals + .h-section.an-by { margin-top: 24px; }
+.an-charts { margin-bottom: 16px; }
+.an-filters { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.an-rest .cc-head { text-transform: none; margin-bottom: 12px; }
+.top-posts .cell-post { max-width: none; }
+.top-posts td:first-child { max-width: 0; width: 100%; }
+.top-posts th.num, .top-posts td.num { white-space: nowrap; width: 1%; }
+.cp-sub { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+.cp-sub > span:not(.mini-mark) + span::before, .cp-sub > span + a::before { content: '·'; margin-right: 6px; color: var(--text-3); }
+.cp-sub > .ellipsis { display: inline-block; flex: 0 1 auto; max-width: 180px; }
+.mini-mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; color: var(--text-2); }
+.mini-mark svg { width: 12px; height: 12px; }
 .kc.up { color: var(--ok-text); } .kc.down { color: var(--err-text); }
 .chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 .chart-card { padding: 14px 16px 10px; }
@@ -664,6 +683,17 @@ code.url { word-break: break-all; }
   .kv-list { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .kv-list dd { margin-bottom: 8px; }
   .chart-grid, .kpi-grid { grid-template-columns: minmax(0, 1fr); }
+  .kpi-grid { gap: 12px; }
+  .acc-kpi { padding: 14px; gap: 12px; }
+  .kpi { padding: 8px 10px; }
+  .kv { font-size: 17px; }
+  .brand-totals .kpis, .kpi-grid.single .kpis, .an-rest .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .an-toolbar { align-items: stretch; }
+  .an-filters { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); }
+  .an-filters > .select-wrap { display: block; min-width: 0; }
+  .cp-sub > .hide-sm + span::before { content: none; }
+  .an-filters select.input { width: 100%; }
+  .cp-sub > .ellipsis { max-width: 120px; }
   #toasts { left: 12px; right: 12px; bottom: 12px; align-items: stretch; }
   .toast { max-width: none; min-width: 0; }
   .auth-card { padding: 22px; }

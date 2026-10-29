@@ -1,5 +1,5 @@
 // Secondary views: accounts, approvals, analytics, settings (general, API keys, webhooks, audit log, platform apps).
-import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, fmtNum, fmtBytes, refreshCommon, modal, icon, relTime } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, markOf, fmtNum, fmtBytes, refreshCommon, modal, icon, relTime } from './core.js';
 import { openComposer } from './composer.js';
 import { formatLocal } from '/assets/shared/time.js';
 import { renderPlatformApps } from './apps.js';
@@ -120,16 +120,43 @@ export async function renderApprovals(root) {
 // ---------------------------------------------------------------- Analytics
 const METRIC_LABELS = { followers: 'Followers', views: 'Views', reach: 'Reach', engagements: 'Engagements', new_followers: 'New followers', lost_followers: 'Lost followers', profile_views: 'Profile views', watch_minutes: 'Watch time (min)', avg_view_sec: 'Avg view (s)', likes: 'Likes', comments: 'Comments', shares: 'Shares', saves: 'Saves', interactions: 'Interactions', accounts_engaged: 'Accounts engaged', total_views: 'Total views', media_count: 'Posts', page_likes: 'Page likes', following: 'Following', plays: 'Plays', clicks: 'Clicks', avg_watch_ms: 'Avg watch (ms)', watch_time_ms: 'Watch time (ms)', replies: 'Replies', net_followers: 'Net followers', video_views: 'Video views', impressions: 'Impressions', reposts: 'Reposts', quotes: 'Quotes', bookmarks: 'Bookmarks', clicks_url: 'Link clicks' };
 
-/** One actionable line per account when metrics are missing for a fixable reason (API off, permission not granted). */
+// Shorter labels for tiles and table headers (full label in the title attribute).
+const SHORT_LABELS = { watch_minutes: 'Watch time', avg_view_sec: 'Avg view', accounts_engaged: 'Engaged', clicks_url: 'Link clicks' };
+const UNIT = { watch_minutes: ' min', avg_view_sec: ' s' };
+const shortLabel = (m) => SHORT_LABELS[m] || METRIC_LABELS[m] || m;
+
+/** Metrics an account can't report (missing permission, API off). They're hidden instead of shown as a misleading 0. */
+function unavailableSet(a) {
+  const un = a.sync?.unavailable || {};
+  return new Set([...Object.keys(un.account || {}), ...(un.notices || []).flatMap((n) => n.metrics || [])]);
+}
+
+/** ONE quiet line per account when metrics are missing for a fixable reason (API off, permission not granted). */
 function analyticsNotice(a, accountId) {
-  const n = (a.sync?.unavailable?.notices || []).find((x) => x.action) || (a.sync?.unavailable?.notices || [])[0];
+  const notices = a.sync?.unavailable?.notices || [];
+  const n = notices.find((x) => x.action) || notices[0];
   if (!n) return null;
-  const link = n.action === 'open' && n.url ? h('a', { href: n.url, target: '_blank', rel: 'noopener' }, n.api ? `Turn on ${n.api}` : 'Open console')
+  const link = n.action === 'open' && n.url ? h('a', { href: n.url, target: '_blank', rel: 'noopener' }, 'Turn on')
     : n.action === 'reconnect' ? h('a', { href: `/oauth/${a.provider}/start?reconnect=${accountId}` }, 'Reconnect')
     : n.action === 'guide' && n.url ? h('a', { href: n.url, target: '_blank', rel: 'noopener' }, 'How to get access') : null;
-  return h('div', { class: 'notice warn small an-notice' }, icon('alert', 14), h('span', {}, n.text, link ? [' ', link] : null));
+  const short = n.code === 'api_disabled' && n.api ? `${n.api} is off`
+    : n.code === 'missing_permission' ? 'Some metrics need a permission that wasn’t granted'
+    : String(n.text || '').split(/(?<=\.)\s/)[0];
+  return h('div', { class: 'an-line small', title: n.text }, icon('alert', 13), h('span', { class: 'ellipsis' }, short), link);
 }
 const label = (m) => METRIC_LABELS[m] || m;
+
+function kpiTiles(src, keys, { fill = 3 } = {}) {
+  // Pad to full rows so the divider grid stays even (5 tiles in a 3-column grid would leave a hole).
+  const pad = fill && keys.length % fill ? fill - (keys.length % fill) : 0;
+  return h('div', { class: 'kpis' }, keys.map((k) => h('div', { class: 'kpi' },
+    h('div', { class: 'kl', title: label(k) }, shortLabel(k)),
+    h('div', { class: 'kv' }, fmtNum(src[k].value), UNIT[k] ? h('span', { class: 'ku' }, UNIT[k]) : null),
+    h('div', { class: `kc mono ${src[k].change > 0 ? 'up' : src[k].change < 0 ? 'down' : ''}` }, src[k].change ? `${src[k].change > 0 ? '↑ ' : '↓ '}${fmtNum(Math.abs(src[k].change))}` : ''))),
+    Array.from({ length: pad }, () => h('div', { class: 'kpi blank', 'aria-hidden': 'true' })));
+}
+
+const markEl = (provider, cls = 'mini-mark') => h('span', { class: cls, 'aria-hidden': 'true', html: MARKS[markOf(provider)] || '' });
 
 export async function renderAnalytics(root, params = {}) {
   const days = Number(params.days || 30);
@@ -146,10 +173,10 @@ export async function renderAnalytics(root, params = {}) {
       acc ? { label: 'Daily account CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=account&account_id=${acc}&from=${new Date(from).toISOString()}` } : null,
     ], { align: 'right' }) }, icon('download', 15)),
   ] });
-  const toolbar = h('div', { class: 'toolbar' },
-    h('div', { class: 'row gap wrap' },
-    (state.brands || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Brand'), brandSelect(brand, (v) => go({ brand: v, account: '' }))) : null,
-    h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Account'), h('select', { class: 'input slim', onchange: (e) => go({ account: e.target.value }) }, h('option', { value: '' }, brandObj ? `All ${brandObj.name} channels` : 'All accounts'), state.accounts.filter((a) => !brandObj || brandObj.channel_ids.includes(a.id)).map((a) => h('option', { value: a.id, selected: a.id === acc }, `${a.name} · ${PROVIDER_META[a.provider].label}`))))),
+  const toolbar = h('div', { class: 'toolbar an-toolbar' },
+    h('div', { class: 'an-filters' },
+      (state.brands || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Brand'), brandSelect(brand, (v) => go({ brand: v, account: '' }))) : null,
+      h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Account'), h('select', { class: 'input slim', onchange: (e) => go({ account: e.target.value }) }, h('option', { value: '' }, brandObj ? `All ${brandObj.name} channels` : 'All accounts'), state.accounts.filter((a) => !brandObj || brandObj.channel_ids.includes(a.id)).map((a) => h('option', { value: a.id, selected: a.id === acc }, `${a.name} · ${PROVIDER_META[a.provider].label}`))))),
     segmented([[7, '7d'], [30, '30d'], [90, '90d']], days, (d) => go({ days: d }), { label: 'Range' }));
   mount(root, head, toolbar, skeleton('cards', 3));
   let ov, accData = null, top;
@@ -162,12 +189,15 @@ export async function renderAnalytics(root, params = {}) {
   const list = acc ? ov.accounts.filter((a) => a.account_id === acc) : ov.accounts;
   const cards = list.map((a) => {
     const s = a.summary;
-    const keys = ['followers', 'views', 'video_views', 'total_views', 'reach', 'watch_minutes', 'impressions', 'engagements', 'interactions', 'profile_views', 'new_followers', 'media_count'].filter((k) => s[k]);
-    return h('div', { class: 'card acc-kpi', style: { '--pc': PROVIDER_META[a.provider].color } },
-      h('div', { class: 'ak-head' }, avatar({ provider: a.provider, name: a.name, picture: state.accounts.find((x) => x.id === a.account_id)?.picture }, 26), h('strong', { class: 'ellipsis' }, a.name), acc ? null : h('a', { class: 'small', href: `#/analytics?days=${days}&account=${a.account_id}${brand ? `&brand=${brand}` : ''}` }, 'Details')),
-      keys.length ? h('div', { class: 'kpis' }, keys.slice(0, 6).map((k) => h('div', { class: 'kpi' }, h('div', { class: 'kl' }, label(k)), h('div', { class: 'kv' }, fmtNum(s[k].value)), s[k].change ? h('div', { class: `kc mono ${s[k].change > 0 ? 'up' : 'down'}` }, `${s[k].change > 0 ? '↑ ' : '↓ '}${fmtNum(Math.abs(s[k].change))}`) : null))) : h('p', { class: 'muted small' }, a.sync?.last_sync_at ? 'No metrics in this range.' : 'Not synced yet — click “Sync now”.'),
-      a.sync?.last_error ? h('div', { class: 'notice error small' }, a.sync.last_error) : analyticsNotice(a, a.account_id),
-      a.sync?.last_sync_at ? h('div', { class: 'muted small ak-foot mono' }, `synced ${relTime(a.sync.last_sync_at)}`) : null);
+    const off = unavailableSet(a);
+    const keys = ['followers', 'views', 'video_views', 'total_views', 'reach', 'watch_minutes', 'impressions', 'engagements', 'interactions', 'profile_views', 'new_followers', 'media_count'].filter((k) => s[k] && !off.has(k)).slice(0, acc ? 6 : 6);
+    const meta = PROVIDER_META[a.provider] || {};
+    return h('div', { class: 'card acc-kpi' },
+      h('div', { class: 'ak-head' }, avatar({ provider: a.provider, name: a.name, picture: state.accounts.find((x) => x.id === a.account_id)?.picture }, 28),
+        h('div', { class: 'ak-name' }, h('strong', { class: 'ellipsis' }, a.name), h('span', { class: 'muted small ellipsis' }, meta.label, a.sync?.last_sync_at ? ` · synced ${relTime(a.sync.last_sync_at)}` : '')),
+        acc ? null : h('a', { class: 'small', href: `#/analytics?days=${days}&account=${a.account_id}${brand ? `&brand=${brand}` : ''}` }, 'Details')),
+      keys.length ? kpiTiles(s, keys, { fill: acc ? 0 : 3 }) : h('p', { class: 'muted small ak-empty' }, a.sync?.last_sync_at ? 'No metrics in this range.' : 'Not synced yet. Click “Sync now”.'),
+      a.sync?.last_error ? h('div', { class: 'an-line err small', title: a.sync.last_error }, icon('x-circle', 13), h('span', { class: 'ellipsis' }, a.sync.last_error)) : analyticsNotice(a, a.account_id));
   });
 
   // Brand: one totals strip across its channels, then the per-channel cards as the breakdown.
@@ -177,33 +207,42 @@ export async function renderAnalytics(root, params = {}) {
     const keys = ['followers', 'views', 'video_views', 'total_views', 'reach', 'engagements', 'interactions', 'likes', 'comments', 'watch_minutes', 'impressions', 'profile_views'].filter((k) => t[k]);
     brandTotals = h('div', { class: 'card acc-kpi brand-totals' },
       h('div', { class: 'ak-head' }, brandDot(brandObj), h('strong', {}, ov.brand.name), h('span', { class: 'muted small' }, `Total across ${ov.brand.channels} channel${ov.brand.channels === 1 ? '' : 's'}`)),
-      keys.length ? h('div', { class: 'kpis' }, keys.slice(0, 6).map((k) => h('div', { class: 'kpi' }, h('div', { class: 'kl' }, label(k)), h('div', { class: 'kv' }, fmtNum(t[k].value)),
-        t[k].change ? h('div', { class: `kc mono ${t[k].change > 0 ? 'up' : 'down'}` }, `${t[k].change > 0 ? '↑ ' : '↓ '}${fmtNum(Math.abs(t[k].change))}`) : null))) : h('p', { class: 'muted small' }, 'No metrics in this range yet.'));
+      keys.length ? kpiTiles(t, keys.slice(0, 6), { fill: 0 }) : h('p', { class: 'muted small' }, 'No metrics in this range yet.'));
   }
 
   let charts = null;
   if (accData) {
     const un = accData.sync?.unavailable || {};
+    const off = unavailableSet(accData);
     const covered = new Set((un.notices || []).flatMap((n) => n.metrics || []));
     const unav = Object.entries({ ...(un.account || {}) }).filter(([k]) => !covered.has(k));
-    charts = h('div', { class: 'stack' },
-      h('div', { class: 'chart-grid' }, Object.entries(accData.series).map(([metric, pts]) => h('div', { class: 'card chart-card' }, h('div', { class: 'cc-head' }, h('strong', {}, label(metric)), h('span', { class: 'cc-val' }, fmtNum(accData.summary[metric]?.value))), lineChart(pts, { color: 'var(--accent)', label: label(metric) })))),
-      unav.length ? h('details', { class: 'card small pad' }, h('summary', {}, `${unav.length} metric(s) not available for this account`), h('ul', {}, unav.map(([k, v]) => h('li', {}, h('strong', {}, label(k)), ': ', v)))) : null);
+    const series = Object.entries(accData.series).filter(([m]) => !off.has(m));
+    // Only series with history and some signal get a chart; the rest are one compact row of latest values.
+    const chartable = series.filter(([, pts]) => pts.length >= 2 && pts.some((p) => p.value));
+    const rest = series.filter((x) => !chartable.includes(x));
+    charts = h('div', { class: 'stack an-charts' },
+      chartable.length ? h('div', { class: 'chart-grid' }, chartable.map(([metric, pts]) => h('div', { class: 'card chart-card' }, h('div', { class: 'cc-head' }, h('strong', {}, label(metric)), h('span', { class: 'cc-val' }, fmtNum(accData.summary[metric]?.value ?? pts[pts.length - 1].value))), lineChart(pts, { color: 'var(--accent)', label: label(metric) })))) : null,
+      rest.length ? h('div', { class: 'card pad an-rest' }, h('div', { class: 'cc-head' }, h('strong', {}, 'Other metrics'), h('span', { class: 'muted small' }, 'Not enough history to chart yet')),
+        h('div', { class: 'kpis' }, rest.map(([m, pts]) => h('div', { class: 'kpi' }, h('div', { class: 'kl', title: label(m) }, shortLabel(m)), h('div', { class: 'kv' }, fmtNum(accData.summary[m]?.value ?? pts[pts.length - 1]?.value), UNIT[m] ? h('span', { class: 'ku' }, UNIT[m]) : null), h('div', { class: 'kc mono' }, pts.length ? `as of ${pts[pts.length - 1].day.slice(5)}` : ''))))) : null,
+      unav.length ? h('details', { class: 'card small pad' }, h('summary', {}, `${unav.length} metric${unav.length === 1 ? '' : 's'} not available for this account`), h('ul', {}, unav.map(([k, v]) => h('li', {}, h('strong', {}, label(k)), ': ', v)))) : null);
   }
 
-  const metricCols = ['views', 'reach', 'likes', 'comments', 'shares', 'saves', 'watch_minutes'];
-  const topTable = section('Top posts', { actions: h('label', { class: 'row gap small' }, h('span', { class: 'muted' }, 'Sort by'), h('select', { class: 'input slim', onchange: (e) => go({ sort: e.target.value }) }, metricCols.map((m) => h('option', { value: m, selected: m === sort }, label(m))))) },
-    top.posts.length ? h('div', { class: 'table-wrap flush' }, h('table', { class: 'table' },
-      h('thead', {}, h('tr', {}, h('th', {}, 'Post'), h('th', { class: 'hide-sm' }, 'Published'), metricCols.map((m) => h('th', { class: `num ${m === sort ? 'sorted' : ''} ${['shares', 'saves', 'watch_minutes', 'reach'].includes(m) ? 'hide-sm' : ''}` }, label(m))))),
+  // Top posts: drop columns no row reports (e.g. saves on YouTube), date + platform go in the sub-line, so it fits without scrolling.
+  const allCols = ['views', 'reach', 'likes', 'comments', 'shares', 'saves', 'watch_minutes'];
+  const metricCols = allCols.filter((m) => m === sort || top.posts.some((p) => p.metrics[m] !== undefined));
+  const secondary = new Set(allCols.filter((m) => m !== sort && m !== 'likes'));
+  const topTable = section('Top posts', { actions: h('label', { class: 'row gap small' }, h('span', { class: 'muted' }, 'Sort by'), h('select', { class: 'input slim', onchange: (e) => go({ sort: e.target.value }) }, allCols.map((m) => h('option', { value: m, selected: m === sort }, label(m))))) },
+    top.posts.length ? h('div', { class: 'table-wrap flush' }, h('table', { class: 'table top-posts' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Post'), metricCols.map((m) => h('th', { class: `num ${m === sort ? 'sorted' : ''} ${secondary.has(m) ? 'hide-sm' : ''}`, title: label(m) }, shortLabel(m))))),
       h('tbody', {}, top.posts.map((p) => h('tr', {},
         h('td', {}, h('div', { class: 'cell-post' }, p.thumbnail ? h('img', { class: 'lthumb', src: p.thumbnail, alt: '', onerror: (e) => e.target.remove() }) : avatar({ provider: p.provider, name: p.account }, 24),
-          h('div', { class: 'cp-text' }, h('div', { class: 'cp-title ellipsis' }, p.caption || p.kind || p.external_id), h('div', { class: 'muted small' }, p.account, p.via_postlite ? ' · via postlite' : '', p.permalink ? [' · ', h('a', { href: p.permalink, target: '_blank', rel: 'noopener' }, 'open')] : null)))),
-        h('td', { class: 'nowrap small mono hide-sm' }, fmtTime(p.published_at).slice(0, 10)),
-        metricCols.map((m) => h('td', { class: `num mono ${['shares', 'saves', 'watch_minutes', 'reach'].includes(m) ? 'hide-sm' : ''}` }, p.metrics[m] === undefined ? h('span', { class: 'muted', title: 'Not available' }, '—') : fmtNum(p.metrics[m])))))))) : emptyState({ icon: 'analytics', compact: true, title: 'No post metrics yet', body: 'Sync to fetch them.' }));
+          h('div', { class: 'cp-text' }, h('div', { class: 'cp-title ellipsis', title: p.caption || '' }, p.caption || p.kind || p.external_id),
+            h('div', { class: 'muted small cp-sub' }, markEl(p.provider), h('span', { class: 'ellipsis hide-sm' }, p.account), h('span', { class: 'mono' }, fmtTime(p.published_at).slice(0, 10)), p.via_postlite ? h('span', { class: 'hide-sm' }, 'via postlite') : null, p.permalink ? h('a', { href: p.permalink, target: '_blank', rel: 'noopener' }, 'open') : null)))),
+        metricCols.map((m) => h('td', { class: `num mono ${secondary.has(m) ? 'hide-sm' : ''}` }, p.metrics[m] === undefined ? h('span', { class: 'muted', title: 'Not available' }, '—') : fmtNum(p.metrics[m])))))))) : emptyState({ icon: 'analytics', compact: true, title: 'No post metrics yet', body: 'Sync to fetch them.' }));
 
   mount(root, head, toolbar,
     brandTotals,
-    brandTotals ? h('h2', { class: 'h-section' }, 'By channel') : null,
+    brandTotals ? h('h2', { class: 'h-section an-by' }, 'By channel') : null,
     cards.length ? h('div', { class: `kpi-grid ${acc ? 'single' : ''}` }, cards) : h('div', { class: 'card' }, emptyState({ icon: 'analytics', title: 'No accounts to analyse', body: 'Connect an account first.', action: h('a', { class: 'btn', href: '#/accounts' }, 'Accounts') })),
     charts, topTable);
 }

@@ -7,17 +7,26 @@ export function lineChart(points, { color = 'var(--accent)', height = 150, label
   if (points.length < 2) return h('div', { class: 'chart-single' }, h('div', { class: 'kv' }, fmtNum(points[0].value)), h('div', { class: 'muted small mono' }, `as of ${points[0].day}`));
   const W = 1000, H = 100;
   const vals = points.map((p) => p.value);
-  let min = Math.min(...vals), max = Math.max(...vals);
-  if (min === max) { min -= 1; max += 1; }
-  if (min > 0 && min / max < 0.6) min = 0;
-  const pad = (max - min) * 0.08;
-  max += pad; if (min !== 0) min -= pad;
+  // "Nice" round axis ticks (0, 250, 500 … not 291.2 / 582.5), integer steps for count data.
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const ints = vals.every((v) => Number.isInteger(v));
+  // Start at 0 for non-negative series unless the values sit in a narrow high band.
+  const base = lo >= 0 && (lo === hi || lo / (hi || 1) < 0.6) ? 0 : lo;
+  const rough = (hi - base || Math.abs(hi) || 1) / 3;
+  const mag = 10 ** Math.floor(Math.log10(rough));
+  let step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((c) => c >= rough) || 10 * mag;
+  if (ints) step = Math.max(1, Math.ceil(step));
+  const min = Math.floor(base / step) * step;
+  let max = Math.ceil(hi / step) * step;
+  if (max === min) max = min + step;
+  if (max === hi && hi !== 0 && (max - min) / step < 4) max += step; // headroom so the line doesn't touch the top
   const span = max - min;
   const x = (i) => (i * W) / (points.length - 1);
   const y = (v) => (1 - (v - min) / span) * H;
   const d = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(2)},${y(p.value).toFixed(2)}`).join(' ');
   const area = `${d} L${W},${H} L0,${H} Z`;
-  const ticks = [0, 1, 2, 3].map((k) => min + (span * k) / 3);
+  const ticks = [];
+  for (let t = min; t <= max + step / 1e6 && ticks.length < 7; t += step) ticks.push(Math.round(t * 1e6) / 1e6);
   const uid = `g${Math.random().toString(36).slice(2, 8)}`;
   const grid = ticks.map((t) => `<line x1="0" x2="${W}" y1="${y(t).toFixed(2)}" y2="${y(t).toFixed(2)}" class="grid"/>`).join('');
   const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="chart" role="img" aria-label="${label} chart"><defs><linearGradient id="${uid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".25"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${grid}<path d="${area}" fill="url(#${uid})"/><path d="${d}" fill="none" stroke="${color}" stroke-width="1.75" vector-effect="non-scaling-stroke" stroke-linejoin="round"/><line class="xhair" x1="0" x2="0" y1="0" y2="${H}" visibility="hidden"/></svg>`;
@@ -25,7 +34,9 @@ export function lineChart(points, { color = 'var(--accent)', height = 150, label
   plot.querySelector('svg').style.height = `${height}px`; // CSSOM (inline style attributes are blocked by the CSP)
   const yAxis = h('div', { class: 'chart-y', style: { height: `${height}px` } }, ticks.map((t) => h('span', { class: 'mono', style: { top: `${(y(t) / H) * 100}%` } }, fmtNum(t))));
   const xi = [0, Math.floor((points.length - 1) / 2), points.length - 1];
-  const xAxis = h('div', { class: 'chart-x mono' }, xi.map((i) => h('span', {}, String(points[i].day || '').slice(5))));
+  const xl = xi.map((i) => String(points[i].day || '').slice(5));
+  if (xl[1] === xl[0] || xl[1] === xl[2]) xl[1] = ''; // no repeated middle date on short ranges
+  const xAxis = h('div', { class: 'chart-x mono' }, xl.map((t) => h('span', {}, t)));
   const dot = h('span', { class: 'chart-dot', hidden: true, style: { background: color } });
   const tip = h('div', { class: 'chart-tip', hidden: true });
   plot.append(dot, tip);

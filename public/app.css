@@ -852,3 +852,21 @@ code.uri, .uri-row code.uri { border: 0; font: 12.5px var(--mono); word-break: b
 .brand-totals { margin-bottom: 4px; }
 .brand-totals .ak-head { gap: 8px; }
 @media (max-width: 560px) { .plist-name .pl-note { display: none; } .btags { display: none; } }
+
+/* Composer caption tools: emoji picker, Unicode bold/italic (LinkedIn/X). */
+.cap-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+.cap-head .label { margin-bottom: 6px; }
+.cap-tools { display: inline-flex; align-items: center; gap: 2px; margin-bottom: 4px; }
+.cap-tools .icon-btn { width: 30px; height: 28px; }
+.cap-tools .fmt { font: 600 14px var(--font); color: var(--text-2); }
+.cap-tools .fmt.i { font-style: italic; font-family: Georgia, serif; }
+.emoji-ic { font-size: 16px; line-height: 1; color: var(--text-2); }
+.cap-note { margin: 6px 0 0; }
+.emoji-pop { position: absolute; z-index: 60; width: 296px; padding: 8px; }
+.emoji-head { padding: 2px 4px 6px; }
+.emoji-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
+.emoji-tabs button { flex: 1; height: 28px; border: 0; background: transparent; border-radius: var(--r-sm); font-size: 15px; cursor: pointer; opacity: .6; }
+.emoji-tabs button.on, .emoji-tabs button:hover { background: var(--surface-2); opacity: 1; }
+.emoji-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; max-height: 196px; overflow-y: auto; overflow-x: hidden; }
+.emoji-grid .emoji { height: 32px; border: 0; background: transparent; border-radius: var(--r-sm); font-size: 19px; cursor: pointer; line-height: 1; }
+.emoji-grid .emoji:hover, .emoji-grid .emoji:focus-visible { background: var(--surface-2); outline: none; }

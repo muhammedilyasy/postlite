@@ -3,6 +3,7 @@ import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, 
 import { segmented } from './ui.js';
 import { mediaVisual, ensurePoster, viewOnLink, REMOVED_NOTE } from './media.js';
 import { brandDot } from './brands.js';
+import { captionTools, hasStyled } from './emoji.js';
 
 const LAST_BRAND = 'pl_last_brand';
 import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, captionLength, xWeightedLength } from '/assets/shared/validate.js';
@@ -13,7 +14,7 @@ const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.w
 
 export async function openComposer({ groupId = null, at = null, onSaved = () => {} } = {}) {
   const tz = state.settings.timezone;
-  const st = { id: null, content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
+  const st = { id: null, focusEl: null, content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
   if (groupId) {
     const { post } = await api('GET', `/posts/${groupId}`);
     Object.assign(st, { id: post.id, content: post.content, media: post.media, publish_at: post.publish_at, status: post.status, approval_note: post.approval_note });
@@ -76,8 +77,9 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
               },
             }, avatar(a, 22), h('span', {}, a.name), on ? icon('check-circle', 14, 'pill-check') : null);
           }) : h('p', { class: 'muted' }, 'No accounts connected yet. ', h('a', { href: '#/accounts', onclick: () => m.close() }, 'Connect one'), '.')),
-          h('label', { class: 'label', for: 'pl-caption' }, 'Caption'),
+          h('div', { class: 'cap-head' }, h('label', { class: 'label', for: 'pl-caption' }, 'Caption'), captionTools({ target: () => (st.focusEl?.isConnected ? st.focusEl : root.querySelector('#pl-caption')), styled: styledTargets() })),
           captionBox(),
+          styledNote(),
           counters(),
           h('div', { class: 'label' }, 'Media'),
           mediaBox(),
@@ -103,10 +105,21 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
   }
 
   function captionBox() {
-    const ta = h('textarea', { id: 'pl-caption', class: 'input caption', rows: 6, placeholder: 'Write something… #hashtags and @mentions welcome' });
+    const ta = h('textarea', { id: 'pl-caption', class: 'input caption', rows: 6, placeholder: 'Write something… #hashtags and @mentions welcome', onfocus: (e) => { st.focusEl = e.target; } });
     ta.value = st.content;
     ta.addEventListener('input', debounce(() => { st.content = ta.value; refreshLive(); }, 120));
     return ta;
+  }
+  /** Bold/italic only make sense where the platform has no rich text: LinkedIn and X. */
+  function styledTargets() {
+    const accs = accountsById();
+    return [...st.targets.keys()].some((aid) => /^(linkedin|linkedin-page|x)$/.test(accs[aid]?.provider || ''));
+  }
+  /** One quiet line when Unicode bold/italic is in use (accessibility + search caveat). */
+  function styledNote() {
+    const texts = [st.content, ...[...st.targets.values()].map((t) => t.content_override || '')];
+    const on = texts.some(hasStyled);
+    return h('div', { class: 'cap-note small muted', id: 'cap-note', hidden: !on }, 'Bold and italic use Unicode look-alike letters, which screen readers and search handle poorly.');
   }
 
   function counters() {
@@ -135,6 +148,8 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
   function refreshLive() {
     const c = root.querySelector('#counters');
     if (c) fillCounters(c);
+    const note = root.querySelector('#cap-note');
+    if (note) note.replaceWith(styledNote());
     const accs = accountsById();
     const aid = st.active;
     if (aid && st.targets.has(aid)) {
@@ -261,7 +276,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       locked ? h('p', { class: 'muted' }, 'This account was already published and can no longer be edited.') : [
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: t.content_override !== null && t.content_override !== undefined, onchange: (e) => { t.content_override = e.target.checked ? st.content : null; renderSide(); } }), `Custom ${PLATFORMS[a.provider].captionLabel.toLowerCase()} for ${a.name}`),
         t.content_override !== null && t.content_override !== undefined ? (() => {
-          const ta = h('textarea', { class: 'input', rows: 4, 'aria-label': `Custom caption for ${a.name}` });
+          const ta = h('textarea', { class: 'input', rows: 4, 'aria-label': `Custom caption for ${a.name}`, onfocus: (e) => { st.focusEl = e.target; } });
           ta.value = t.content_override;
           ta.addEventListener('input', debounce(() => { t.content_override = ta.value; refreshLive(); }, 150));
           return ta;

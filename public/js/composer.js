@@ -4,7 +4,8 @@ import { segmented } from './ui.js';
 import { mediaVisual, ensurePoster, viewOnLink, REMOVED_NOTE } from './media.js';
 import { brandDot } from './brands.js';
 import { captionTools, hasStyled } from './emoji.js';
-import { tagPicker } from './content.js';
+import { tagPicker, loadSignatures, withSignature, sigApplies } from './content.js';
+import { dropdown } from './ui.js';
 
 const LAST_BRAND = 'pl_last_brand';
 import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, captionLength, xWeightedLength } from '/assets/shared/validate.js';
@@ -13,7 +14,7 @@ import { formatLocal, parseLocal } from '/assets/shared/time.js';
 export { relTime };
 const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.name });
 
-export async function openComposer({ groupId = null, at = null, media = null, accountIds = null, onSaved = () => {} } = {}) {
+export async function openComposer({ groupId = null, at = null, media = null, accountIds = null, template = null, onSaved = () => {} } = {}) {
   const tz = state.settings.timezone;
   const st = { id: null, focusEl: null, tags: [], content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
   if (groupId) {
@@ -33,12 +34,32 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
     const lastBrand = (state.brands || []).find((b) => b.id === localStorage.getItem(LAST_BRAND));
     if (lastBrand) selectBrand(lastBrand);
     if (Array.isArray(media)) st.media = media.filter((m) => m && !m.purged); // "Use in new post" from the media library
+    if (template) { // "Use template": caption, channels + their settings, brand, tags (never media)
+      st.content = template.content || '';
+      const tTargets = (template.targets || []).filter((x) => state.accounts.some((a) => a.id === x.account_id));
+      if (tTargets.length || template.brand_id) st.targets.clear();
+      for (const x of tTargets) { const a = state.accounts.find((y) => y.id === x.account_id); st.targets.set(a.id, { content_override: x.content ?? null, settings: { ...defaultSettings(a.provider), ...(x.settings || {}) } }); }
+      const tb = !tTargets.length && (state.brands || []).find((b) => b.id === template.brand_id);
+      if (tb) selectBrand(tb);
+      st.active = [...st.targets.keys()][0] || null;
+      st.tags = (template.tags || []).slice();
+    }
     if (Array.isArray(accountIds)) { // "Create post" from a channel menu: exactly these channels
       st.targets.clear();
       for (const id of accountIds) { const a = state.accounts.find((x) => x.id === id); if (a) st.targets.set(a.id, { content_override: null, settings: defaultSettings(a.provider) }); }
       st.active = accountIds[0] || null;
     }
   }
+
+  // Signatures: insert from the caption tools; auto-add ones apply to new posts once their channel is picked.
+  const sigs = await loadSignatures();
+  const autoDone = new Set();
+  function applyAutoSignatures() {
+    if (st.id) return;
+    const accs = [...st.targets.keys()].map((id) => state.accounts.find((a) => a.id === id)).filter(Boolean);
+    for (const sg of sigs) if (!autoDone.has(sg.id) && sigApplies(sg, accs)) { st.content = withSignature(st.content, sg.content); autoDone.add(sg.id); }
+  }
+  applyAutoSignatures();
 
   const root = h('div', { class: 'composer' });
   const m = modal(root, { wide: true, label: st.id ? 'Edit post' : 'New post' });
@@ -62,6 +83,7 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
   const footStatus = (errs) => (errs.length ? h('div', { class: 'foot-errors' }, icon('alert', 15), `${errs.length} issue${errs.length > 1 ? 's' : ''} to fix`) : h('div', { class: 'foot-ok' }, st.targets.size ? [icon('check-circle', 15), 'Ready to publish'] : h('span', { class: 'muted' }, 'Pick at least one account')));
 
   function render() {
+    applyAutoSignatures();
     const accs = accountsById();
     const errs = allErrors();
     mount(root,
@@ -85,7 +107,7 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
               },
             }, avatar(a, 22), h('span', {}, a.name), a.disabled ? h('span', { class: 'pill-note' }, 'paused') : null, on ? icon('check-circle', 14, 'pill-check') : null);
           }) : h('p', { class: 'muted' }, 'No accounts connected yet. ', h('a', { href: '#/accounts', onclick: () => m.close() }, 'Connect one'), '.')),
-          h('div', { class: 'cap-head' }, h('label', { class: 'label', for: 'pl-caption' }, 'Caption'), captionTools({ target: () => (st.focusEl?.isConnected ? st.focusEl : root.querySelector('#pl-caption')), styled: styledTargets() })),
+          h('div', { class: 'cap-head' }, h('label', { class: 'label', for: 'pl-caption' }, 'Caption'), captionTools({ target: () => (st.focusEl?.isConnected ? st.focusEl : root.querySelector('#pl-caption')), styled: styledTargets(), extra: signatureButton() })),
           captionBox(),
           styledNote(),
           counters(),
@@ -104,6 +126,7 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
         h('div', { class: 'row gap wrap end' },
           st.id ? h('button', { class: 'btn ghost danger', onclick: del }, icon('trash', 15), 'Delete') : null,
           st.id ? h('button', { class: 'btn ghost', onclick: dup }, 'Duplicate') : null,
+          st.targets.size ? h('button', { class: 'btn ghost', title: 'Save caption, channels, settings and tags (not media) to start new posts from', onclick: saveTemplate }, 'Save as template') : null,
           st.status === 'pending_approval' ? [
             h('button', { class: 'btn', onclick: reject }, 'Reject'),
             h('button', { class: 'btn primary', dataset: { act: 'approve' }, onclick: approve, disabled: !!errs.length }, 'Approve'),
@@ -119,6 +142,20 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
     ta.value = st.content;
     ta.addEventListener('input', debounce(() => { st.content = ta.value; refreshLive(); }, 120));
     return ta;
+  }
+  /** Signature menu: insert a saved snippet at the cursor (or at the end). */
+  function signatureButton() {
+    return h('button', { type: 'button', class: 'icon-btn', title: 'Insert signature', 'aria-label': 'Insert signature', 'aria-haspopup': 'menu', onclick: (e) => dropdown(e.currentTarget, [
+      ...sigs.map((sg) => ({ label: sg.name, hint: sg.auto_add ? 'auto' : '', onClick: () => {
+        const ta = st.focusEl?.isConnected ? st.focusEl : root.querySelector('#pl-caption');
+        const atEnd = ta.selectionStart === ta.value.length || ta.selectionStart === 0 && !ta.value;
+        if (atEnd || ta.selectionStart === undefined) { ta.value = withSignature(ta.value, sg.content); ta.dispatchEvent(new Event('input', { bubbles: true })); }
+        else { const s0 = ta.selectionStart; ta.value = ta.value.slice(0, s0) + sg.content + ta.value.slice(ta.selectionEnd); ta.dispatchEvent(new Event('input', { bubbles: true })); }
+        ta.focus();
+      } })),
+      sigs.length ? { sep: true } : null,
+      { label: sigs.length ? 'Manage signatures' : 'Create a signature', icon: 'settings', href: '#/settings/content', onClick: () => m.close() },
+    ], { width: 240 }) }, icon('edit', 15));
   }
   /** Bold/italic only make sense where the platform has no rich text: LinkedIn and X. */
   function styledTargets() {
@@ -479,6 +516,12 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
       }
       toast(e.message.split('\n')[0], 'error', 6000);
     }
+  }
+  async function saveTemplate() {
+    const name = await confirmDialog('Name this template. It keeps the caption, channels with their settings and tags; media is not saved.', { ok: 'Save template', input: 'e.g. Weekly short', title: 'Save as template' });
+    if (!name || !name.trim()) return;
+    const b = body('draft');
+    try { await api('POST', '/templates', { name: name.trim(), content: b.content, targets: b.targets.map((t) => ({ account_id: t.account_id, content: t.content, settings: t.settings })), tags: b.tags }); toast('Template saved', 'success'); } catch (e) { toast(e.message, 'error'); }
   }
   async function del() {
     if (!(await confirmDialog('Delete this post? Already-published content stays live on the platforms.', { ok: 'Delete', danger: true }))) return;

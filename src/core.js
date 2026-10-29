@@ -23,6 +23,7 @@ import { createBrands } from './brands.js';
 import { createWipe } from './wipe.js';
 import { createLibrary } from './library.js';
 import { createTags } from './tags.js';
+import { createSignatures, createTemplates } from './snippets.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -113,6 +114,8 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     };
     sc.brands = createBrands({ db, ws });
     sc.tags = createTags({ db, ws });
+    sc.signatures = createSignatures({ db, ws });
+    sc.templates = createTemplates({ db, ws });
     sc.wipe = createWipe({ db, storage, ws, workspaces });
     sc.library = createLibrary({ db, ws, media, extraRefs: async () => (sc.series ? sc.series.activeMediaIds() : []) });
     sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log });

@@ -13,6 +13,7 @@ import { providers } from '../providers/index.js';
 import { APP_IDS } from '../apps.js';
 import { PLATFORM_PROVIDERS, MEDIA_TYPES } from '../posts.js';
 import { RETENTION_MODES, RETENTION_LABELS } from '../retention.js';
+import { appendSignature } from '../snippets.js';
 
 const DAY = 86400000;
 const S = (o) => ({ type: 'object', additionalProperties: false, ...o });
@@ -88,6 +89,9 @@ const BRAND_PARAM = { type: ['array', 'string'], items: { type: 'string' }, desc
 const TAG_PARAM = { type: ['array', 'string'], items: { type: 'string' }, description: 'Tag id(s) or name(s) (list_tags); matches posts with any of them.' };
 
 const POST_BODY = {
+  template_id: str('Start from a saved template (list_templates; id or name): its caption, targets/brand, per-channel settings and tags fill in whatever you do not pass. Media is never stored in templates.'),
+  signature: str('Append this saved signature (list_signatures; id or name) to content.'),
+  auto_signatures: { type: 'boolean', description: 'Append the signatures marked auto-add that apply to the selected channels (what the web composer does for new posts).' },
   tags: { type: 'array', items: { type: 'string' }, description: 'Tag ids or names for this post. Unknown names are created (list_tags). On update_post the list replaces the post\'s tags.' },
   brand_id: str('Shorthand for targets: a brand id or name (list_brands). Every connected channel of the brand becomes a target; channels that need a reconnect are skipped (listed in brand.skipped). Explicit targets for the same accounts still apply their settings.'),
   content: str('Global caption/description used by every target unless overridden.'),
@@ -194,6 +198,26 @@ async function brandScope(core, brand, accountId) {
   if (!has(accountId)) return ids;
   const only = new Set((Array.isArray(accountId) ? accountId : String(accountId).split(',')).map((x) => String(x).trim()));
   return ids.filter((x) => only.has(x));
+}
+/** Expand template_id / signature / auto_signatures (create_post, validate_post). */
+async function expandInput(core, i) {
+  let out = { ...i };
+  if (i.template_id) {
+    const t = await core.templates.mustFind(i.template_id);
+    const known = new Set((await core.integrations.list()).map((a) => a.id));
+    out = { ...out, content: i.content ?? t.content, tags: i.tags ?? t.tags };
+    if (!i.targets && !i.brand_id) { out.targets = (t.targets || []).filter((x) => known.has(x.account_id)); if (t.brand_id && !out.targets.length) out.brand_id = t.brand_id; }
+  }
+  delete out.template_id;
+  if (i.signature) out.content = appendSignature(out.content, (await core.signatures.mustFind(i.signature)).content);
+  delete out.signature;
+  if (i.auto_signatures) {
+    const ids = new Set([...(out.targets || []).map((x) => x.account_id), ...(out.brand_id ? await core.brands.accountIds(out.brand_id) : [])]);
+    const accs = (await core.integrations.list()).filter((a) => ids.has(a.id));
+    for (const s of await core.signatures.autoFor(accs)) out.content = appendSignature(out.content, s.content);
+  }
+  delete out.auto_signatures;
+  return out;
 }
 const needTargets = (i) => { if (!i.brand_id && !(i.targets || []).length) throw new HttpError(400, 'Give targets (one per account) or brand_id.'); };
 
@@ -500,6 +524,69 @@ export const operations = [
     input: S({ required: ['post_id', 'tags'], properties: { post_id: id('Post'), tags: { type: 'array', items: { type: 'string' } }, mode: { type: 'string', enum: ['replace', 'add', 'remove'] } } }),
     handler: async (core, i) => { await groupOrThrow(core, i.post_id); await core.tags.setForGroup(i.post_id, i.tags, i.mode || 'replace'); return { post: await core.posts.getGroup(i.post_id) }; },
   },
+  // ---- signatures & templates ----
+  {
+    name: 'list_signatures', method: 'GET', path: '/signatures', scope: 'read', tags: ['content'], readOnly: true,
+    summary: 'List saved signatures', description: 'Saved text snippets (sign-offs, hashtag blocks, links). auto_add=true ones are added to new posts for their platforms/account_ids (empty = every channel). Use create_post {signature} or {auto_signatures:true}.',
+    input: S({ properties: {} }),
+    handler: async (core) => ({ signatures: await core.signatures.list() }),
+  },
+  {
+    name: 'create_signature', method: 'POST', path: '/signatures', scope: 'write', tags: ['content'],
+    summary: 'Save a signature', description: 'Example: {"name":"IG hashtags","content":"#shorts #tech","auto_add":true,"platforms":["instagram"]}. platforms: youtube, facebook, instagram, x, linkedin.',
+    input: S({ required: ['name', 'content'], properties: { name: str('Name (unique, ≤ 60).'), content: str('Text (≤ 2000).'), auto_add: { type: 'boolean' }, platforms: { type: 'array', items: { type: 'string', enum: Object.keys(PLATFORM_PROVIDERS) } }, account_ids: { type: 'array', items: { type: 'string' } } } }),
+    handler: async (core, i) => ({ signature: await core.signatures.create(i) }),
+  },
+  {
+    name: 'update_signature', method: 'PATCH', path: '/signatures/{signature_id}', scope: 'write', tags: ['content'],
+    summary: 'Edit a signature', description: 'signature_id accepts the id or the name.',
+    input: S({ required: ['signature_id'], properties: { signature_id: str('Signature id or name.'), name: str('New name.'), content: str('Text.'), auto_add: { type: 'boolean' }, platforms: { type: 'array', items: { type: 'string', enum: Object.keys(PLATFORM_PROVIDERS) } }, account_ids: { type: 'array', items: { type: 'string' } } } }),
+    handler: async (core, i) => ({ signature: await core.signatures.update(i.signature_id, i) }),
+  },
+  {
+    name: 'delete_signature', method: 'DELETE', path: '/signatures/{signature_id}', scope: 'write', tags: ['content'], destructive: true,
+    summary: 'Delete a signature', description: 'Existing posts keep their text.',
+    input: S({ required: ['signature_id'], properties: { signature_id: str('Signature id or name.') } }),
+    handler: async (core, i) => ({ deleted: await core.signatures.remove(i.signature_id) }),
+  },
+  {
+    name: 'list_templates', method: 'GET', path: '/templates', scope: 'read', tags: ['content'], readOnly: true,
+    summary: 'List post templates', description: 'Templates ("sets") store a caption, the selected channels with their per-channel settings (YouTube title/privacy, post types…), an optional brand and tags. Never media. Start a post with create_post {template_id, media_ids, ...}.',
+    input: S({ properties: {} }),
+    handler: async (core) => ({ templates: await core.templates.list() }),
+  },
+  {
+    name: 'get_template', method: 'GET', path: '/templates/{template_id}', scope: 'read', tags: ['content'], readOnly: true,
+    summary: 'Get a template', description: 'template_id accepts the id or the name.',
+    input: S({ required: ['template_id'], properties: { template_id: str('Template id or name.') } }),
+    handler: async (core, i) => ({ template: await core.templates.mustFind(i.template_id) }),
+  },
+  {
+    name: 'create_template', method: 'POST', path: '/templates', scope: 'write', tags: ['content'],
+    summary: 'Save a post template', description: 'Either from_post_id (copies that post\'s caption, channels, per-channel settings and tags; media is left out) or content + targets [{account_id, content?, settings?}] + brand_id? + tags?. Example: {"name":"Weekly short","from_post_id":"<post id>"}.',
+    input: S({ required: ['name'], properties: { name: str('Name (unique, ≤ 60).'), from_post_id: str('Copy an existing post.'), content: str('Caption.'), targets: { type: 'array', items: TARGET }, brand_id: str('Brand id or name.'), tags: { type: 'array', items: { type: 'string' } } } }),
+    handler: async (core, i) => {
+      let data = i;
+      if (i.from_post_id) {
+        const g = await groupOrThrow(core, i.from_post_id);
+        data = { name: i.name, content: g.content, targets: g.targets.map((t) => ({ account_id: t.integration_id, content: t.content_override, settings: t.settings })), tags: g.tags.map((t) => t.name) };
+      }
+      if (data.brand_id) data.brand_id = (await core.brands.mustFind(data.brand_id)).id;
+      return { template: await core.templates.create(data) };
+    },
+  },
+  {
+    name: 'update_template', method: 'PATCH', path: '/templates/{template_id}', scope: 'write', tags: ['content'],
+    summary: 'Edit a template', description: 'Any of name, content, targets (replaces the list), brand_id, tags.',
+    input: S({ required: ['template_id'], properties: { template_id: str('Template id or name.'), name: str('New name.'), content: str('Caption.'), targets: { type: 'array', items: TARGET }, brand_id: { type: ['string', 'null'] }, tags: { type: 'array', items: { type: 'string' } } } }),
+    handler: async (core, i) => ({ template: await core.templates.update(i.template_id, { ...i, ...(i.brand_id ? { brand_id: (await core.brands.mustFind(i.brand_id)).id } : {}) }) }),
+  },
+  {
+    name: 'delete_template', method: 'DELETE', path: '/templates/{template_id}', scope: 'write', tags: ['content'], destructive: true,
+    summary: 'Delete a template', description: 'Posts made from it stay.',
+    input: S({ required: ['template_id'], properties: { template_id: str('Template id or name.') } }),
+    handler: async (core, i) => ({ deleted: await core.templates.remove(i.template_id) }),
+  },
   // ---- media ----
   {
     name: 'list_media', method: 'GET', path: '/media', scope: 'read', tags: ['media'], readOnly: true,
@@ -639,7 +726,8 @@ export const operations = [
     summary: 'Dry-run validation of a post',
     description: 'Checks content + media + settings against every target platform\'s rules WITHOUT saving. Returns errors/warnings per account and what will be published (e.g. "Reel", "Carousel (3)"). Same input as create_post.',
     input: S({ properties: { ...POST_BODY } }),
-    handler: async (core, i) => {
+    handler: async (core, i0) => {
+      let i = await expandInput(core, i0);
       needTargets(i);
       const bt = await brandTargets(core, i);
       if (bt) i = { ...i, targets: bt.targets };
@@ -673,7 +761,8 @@ export const operations = [
     description: 'Creates one post for one or more accounts. mode: "draft" (default), "schedule" (+publish_at), "next_slot" or "now". Scheduling needs the "publish" scope; keys in approval mode create posts as "pending_approval" until a human approves. ' +
       'Example: {"content":"New video is live! #howto","media_ids":["<video id>"],"targets":[{"account_id":"<yt id>","settings":{"title":"How to X","isShort":true}},{"account_id":"<ig id>"}],"mode":"schedule","publish_at":"2026-11-02T18:00"}. Validation errors are returned per account with the exact rule that failed. Post to a whole brand with {"brand_id":"North Star", ...} instead of listing targets.',
     input: S({ properties: { ...POST_BODY } }),
-    handler: async (core, i, p) => {
+    handler: async (core, i0, p) => {
+      const i = await expandInput(core, i0);
       needTargets(i);
       const bt = await brandTargets(core, i);
       const tagOps = i.tags?.length ? await core.tags.resolve(i.tags, { create: true }) : null;
@@ -1156,7 +1245,7 @@ export async function execute(rootCore, op, input, principal, via) {
   }
 }
 
-const targetOf = (input, result) => input?.app || input?.brand_id || result?.brand?.id || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
+const targetOf = (input, result) => input?.app || input?.template_id || input?.signature_id || input?.tag_id || input?.brand_id || result?.brand?.id || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
 function summarize(input) {
   if (!input) return null;
   const out = {};

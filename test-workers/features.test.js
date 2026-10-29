@@ -91,6 +91,22 @@ test('Workers/D1: tags — create, assign on create_post, filter posts/calendar,
   assert.deepEqual((await w.api('GET', `/posts/${p.json.post.id}`, { key: admin })).json.post.tags, []);
 });
 
+test('Workers/D1: signatures and templates — auto-add, insert, save from a post, start a post from it', { skip }, async () => {
+  assert.equal((await w.api('POST', '/signatures', { key: admin, body: { name: 'cf-sig', content: '— cf team', auto_add: true, platforms: ['facebook'] } })).status, 200);
+  const p = await w.api('POST', '/posts', { key: admin, body: { content: 'cf hello', auto_signatures: true, tags: ['cf-t'], targets: [{ account_id: fb, settings: { post_type: 'post' } }], mode: 'draft' } });
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json.post.content, 'cf hello\n\n— cf team');
+  const t = await w.api('POST', '/templates', { key: admin, body: { name: 'cf-tpl', from_post_id: p.json.post.id } });
+  assert.equal(t.status, 200, t.text);
+  assert.deepEqual(t.json.template.tags, ['cf-t']);
+  const n = await w.api('POST', '/posts', { key: admin, body: { template_id: 'cf-tpl', mode: 'draft' } });
+  assert.equal(n.status, 200, n.text);
+  assert.equal(n.json.post.content, 'cf hello\n\n— cf team');
+  assert.deepEqual(n.json.post.targets.map((x) => x.integration_id), [fb]);
+  assert.equal((await w.api('GET', '/templates', { key: admin })).json.templates.length, 1);
+  assert.equal((await w.api('DELETE', '/signatures/cf-sig', { key: admin })).status, 200);
+});
+
 // Runs last: wipes the workspace.
 test('Workers/D1: delete workspace data removes accounts, posts and keys, then the key stops working', { skip }, async () => {
   const p = await w.api('POST', '/posts', { key: admin, body: { content: 'to be wiped', targets: [{ account_id: fb }], mode: 'schedule', publish_at: Date.now() + 86400000 } });

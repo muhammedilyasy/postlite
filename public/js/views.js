@@ -8,7 +8,7 @@ import { lineChart } from './charts.js';
 import { mediaVisual, removedNote } from './media.js';
 import { brandsSection, brandTags, brandSelect, brandDot } from './brands.js';
 import { channelMenu } from './channels.js';
-import { tagsSection, tagSelect } from './content.js';
+import { tagsSection, tagSelect, signaturesSection, templatesSection } from './content.js';
 
 const fmtTime = fmtDateTime;
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
@@ -273,7 +273,8 @@ export async function renderSettings(root, { tab = '', focus = null } = {}) {
 /** Settings → Content: tags (and signatures + templates). */
 async function renderContent(body) {
   const rerender = () => renderContent(body);
-  mount(body, h('div', { class: 'stack' }, await tagsSection(rerender)));
+  const [tg, sg, tp] = await Promise.all([tagsSection(rerender), signaturesSection(rerender), templatesSection(rerender, (t) => openComposer({ template: t, onSaved: () => { location.hash = '#/posts'; } }))]);
+  mount(body, h('div', { class: 'stack' }, sg, tp, tg));
 }
 
 async function renderGeneral(body) {

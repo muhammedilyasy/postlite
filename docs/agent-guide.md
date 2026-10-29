@@ -86,6 +86,11 @@ A brand is a named set of channels across platforms (for example "North Star" = 
 - Assign: `create_post {..., tags: ["launch", "promo"]}` (unknown names are created), `update_post {tags}` replaces them, `set_post_tags {post_id, tags, mode: replace|add|remove}` works on published posts too. Posts carry `tags: [{id, name, color}]`.
 - Filter: `list_posts {tag}`, `get_calendar {tag}`, `get_top_posts {tag}` (only posts published through postlite carry tags) and the CSV export (`&tag=`).
 
+## Signatures and templates
+
+- Signatures are saved snippets: `list_signatures`, `create_signature {name, content, auto_add?, platforms?, account_ids?}`, `update_signature`, `delete_signature`. Add one to a post with `create_post {signature: "Sign-off"}`; `create_post {auto_signatures: true}` appends every auto-add signature whose platforms/account_ids match the selected channels (empty scope = every channel), like the web composer does for new posts. A signature already at the end is never added twice.
+- Templates ("sets") keep caption, channels with per-channel settings, brand and tags, never media: `list_templates`, `get_template`, `create_template {name, from_post_id}` or `{name, content, targets, brand_id?, tags?}`, `update_template`, `delete_template`. Start a post with `create_post {template_id, media_ids, publish_at, mode}`; anything you pass overrides the template, and targets for channels that no longer exist are dropped.
+
 ## Media library
 
 - `list_media {q?, kind?: image|video|document, usage?: used|unused|purged, limit?, offset?, counts?}` pages through uploads newest first. Each item has `used_by_posts`, `in_use` (an unfinished post or an active repeating post needs it), `deletable` and `purged`. `total` is the number of matches; `counts` (with `counts: true`) gives totals per kind and usage.

@@ -87,3 +87,83 @@ export async function tagsSection(rerender) {
       ], { align: 'right' }) }, icon('more', 15)))))
       : emptyState({ icon: 'tag', compact: true, title: 'No tags yet', body: 'Create one here or type a new tag in the composer.' }));
 }
+
+// ---------------------------------------------------------------- signatures
+const PLATFORM_OPTS = [['youtube', 'YouTube'], ['facebook', 'Facebook'], ['instagram', 'Instagram'], ['linkedin', 'LinkedIn'], ['x', 'X']];
+const PROV_PLATFORM = { youtube: 'youtube', facebook: 'facebook', instagram: 'instagram', 'instagram-standalone': 'instagram', linkedin: 'linkedin', 'linkedin-page': 'linkedin', x: 'x' };
+
+export async function loadSignatures() { try { state.signatures = (await api('GET', '/signatures')).signatures; } catch { state.signatures = []; } return state.signatures; }
+export async function loadTemplates() { try { state.templates = (await api('GET', '/templates')).templates; } catch { state.templates = []; } return state.templates; }
+
+/** Text that signature `sig` adds after `text` (same rule as the server's appendSignature). */
+export function withSignature(text, sig) {
+  const t = String(text || '').replace(/\s+$/, '');
+  const s2 = String(sig || '').trim();
+  if (!s2 || t.endsWith(s2)) return t;
+  return t ? `${t}\n\n${s2}` : s2;
+}
+/** Does an auto-add signature apply to any of these accounts? */
+export function sigApplies(sg, accounts) {
+  if (!sg.auto_add || !accounts.length) return false;
+  if (!sg.platforms.length && !sg.account_ids.length) return true;
+  return accounts.some((a) => sg.account_ids.includes(a.id) || sg.platforms.includes(PROV_PLATFORM[a.provider]));
+}
+const scopeText = (sg) => {
+  if (!sg.auto_add) return 'Insert from the composer';
+  const parts = [...sg.platforms.map((p) => PLATFORM_OPTS.find((o) => o[0] === p)?.[1] || p), ...sg.account_ids.map((id) => state.accounts.find((a) => a.id === id)?.name || 'removed channel')];
+  return `Added automatically${parts.length ? ` for ${parts.join(', ')}` : ' to every new post'}`;
+};
+
+function signatureDialog(sg = null, done = () => {}) {
+  const name = h('input', { class: 'input', value: sg?.name || '', placeholder: 'e.g. Sign-off, IG hashtags', 'aria-label': 'Signature name' });
+  const content = h('textarea', { class: 'input', rows: 4, placeholder: '— The North Star team · example.com', 'aria-label': 'Signature text' });
+  content.value = sg?.content || '';
+  const auto = h('input', { type: 'checkbox', checked: !!sg?.auto_add });
+  const connected = [...new Set(state.accounts.map((a) => PROV_PLATFORM[a.provider]))];
+  const plats = PLATFORM_OPTS.filter(([v]) => connected.includes(v) || sg?.platforms.includes(v)).map(([v, l]) => ({ v, box: h('input', { type: 'checkbox', checked: !!sg?.platforms.includes(v) }), l }));
+  const chans = state.accounts.map((a) => ({ a, box: h('input', { type: 'checkbox', checked: !!sg?.account_ids.includes(a.id) }) }));
+  const scope = h('div', { class: 'sig-scope' },
+    h('div', { class: 'muted small' }, 'Only for these platforms or channels (none ticked = every channel):'),
+    h('div', { class: 'check-row' }, plats.map((x) => h('label', { class: 'check' }, x.box, x.l))),
+    chans.length ? h('details', { class: 'sig-chans' }, h('summary', { class: 'small' }, 'Specific channels'), h('div', { class: 'check-col' }, chans.map((x) => h('label', { class: 'check' }, x.box, x.a.name, h('span', { class: 'muted small' }, ` · ${x.a.provider}`))))) : null);
+  const sync = () => { scope.hidden = !auto.checked; };
+  auto.addEventListener('change', sync); sync();
+  const m = modal(h('form', { class: 'confirm wide-confirm', onsubmit: async (e) => {
+    e.preventDefault();
+    const body = { name: name.value, content: content.value, auto_add: auto.checked, platforms: plats.filter((x) => x.box.checked).map((x) => x.v), account_ids: chans.filter((x) => x.box.checked).map((x) => x.a.id) };
+    try { if (sg) await api('PATCH', `/signatures/${sg.id}`, body); else await api('POST', '/signatures', body); m.close(); toast('Signature saved', 'success'); done(); } catch (err) { toast(err.message, 'error'); }
+  } }, h('h3', { class: 'confirm-title' }, sg ? 'Edit signature' : 'New signature'),
+  h('label', { class: 'field' }, h('span', {}, 'Name'), name), h('label', { class: 'field' }, h('span', {}, 'Text'), content),
+  h('label', { class: 'check' }, auto, 'Add automatically to new posts'), scope,
+  h('div', { class: 'row end gap' }, h('button', { type: 'button', class: 'btn', onclick: () => m.close() }, 'Cancel'), h('button', { type: 'submit', class: 'btn primary' }, 'Save'))), { label: 'Signature' });
+  setTimeout(() => name.focus(), 30);
+}
+
+export async function signaturesSection(rerender) {
+  const list = await loadSignatures();
+  return section('Signatures', { sub: 'Saved sign-offs, links and hashtag blocks. Insert them from the composer, or add them automatically per platform or channel.', actions: h('button', { class: 'btn small', onclick: () => signatureDialog(null, rerender) }, icon('plus', 13), 'New signature') },
+    list.length ? h('div', { class: 'plist' }, list.map((sg) => h('div', { class: 'plist-row' },
+      h('div', { class: 'plist-text' }, h('div', { class: 'plist-name' }, sg.name, sg.auto_add ? h('span', { class: 'pl-note' }, 'Auto') : null), h('div', { class: 'plist-desc' }, `${scopeText(sg)} · “${sg.content.replace(/\s+/g, ' ').slice(0, 60)}${sg.content.length > 60 ? '…' : ''}”`)),
+      h('button', { class: 'icon-btn', 'aria-label': `Actions for signature ${sg.name}`, 'aria-haspopup': 'menu', onclick: (e) => dropdown(e.currentTarget, [
+        { label: 'Edit', icon: 'edit', onClick: () => signatureDialog(sg, rerender) },
+        { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog(`Delete the signature “${sg.name}”? Posts that already contain it keep their text.`, { ok: 'Delete', danger: true })) { await api('DELETE', `/signatures/${sg.id}`); toast('Signature deleted'); rerender(); } } },
+      ], { align: 'right' }) }, icon('more', 15)))))
+      : emptyState({ icon: 'edit', compact: true, title: 'No signatures yet', body: 'For example a sign-off, your link-in-bio line or a block of hashtags.' }));
+}
+
+// ---------------------------------------------------------------- templates
+export async function templatesSection(rerender, openWith) {
+  const list = await loadTemplates();
+  return section('Templates', { sub: 'Saved posts to start from: caption, channels and their settings, brand and tags. Media is never saved in a template. Save one from the composer.' },
+    list.length ? h('div', { class: 'plist' }, list.map((t) => {
+      const chans = t.targets.map((x) => state.accounts.find((a) => a.id === x.account_id)).filter(Boolean);
+      return h('div', { class: 'plist-row' },
+        h('div', { class: 'plist-text' }, h('div', { class: 'plist-name' }, t.name), h('div', { class: 'plist-desc' }, `${chans.length ? `${chans.length} channel${chans.length === 1 ? '' : 's'}` : t.brand_id ? 'Brand' : 'No channels'} · “${(t.content || '').replace(/\s+/g, ' ').slice(0, 60) || 'no caption'}”`)),
+        h('button', { class: 'btn small', onclick: () => openWith(t) }, 'Use'),
+        h('button', { class: 'icon-btn', 'aria-label': `Actions for template ${t.name}`, 'aria-haspopup': 'menu', onclick: (e) => dropdown(e.currentTarget, [
+          { label: 'Rename', icon: 'edit', onClick: async () => { const n = await confirmDialog('New name for this template', { ok: 'Rename', input: t.name, title: 'Rename template' }); if (n && n.trim()) { await api('PATCH', `/templates/${t.id}`, { name: n.trim() }); rerender(); } } },
+          { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog(`Delete the template “${t.name}”? Posts made from it stay.`, { ok: 'Delete', danger: true })) { await api('DELETE', `/templates/${t.id}`); toast('Template deleted'); rerender(); } } },
+        ], { align: 'right' }) }, icon('more', 15)));
+    }))
+      : emptyState({ icon: 'posts', compact: true, title: 'No templates yet', body: 'In the composer, use “Save as template” to keep a post’s caption, channels and settings for next time.' }));
+}

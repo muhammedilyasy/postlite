@@ -53,11 +53,17 @@ function newMenu(btn) {
   dropdown(btn, [
     { label: 'Post', icon: 'edit', hint: 'N', onClick: () => newPost() },
     { label: 'Scheduled for next free slot', icon: 'clock', onClick: async () => { const r = await api('GET', '/slots?count=1'); newPost({ at: r.slots[0]?.epoch_ms }); } },
+    { label: 'From a template…', icon: 'posts', onClick: () => templateMenu(btn) },
     { sep: true },
     { label: 'Connect account', icon: 'accounts', href: '#/accounts' },
     { label: 'API key', icon: 'key', href: '#/settings/api-keys' },
     { label: 'Webhook', icon: 'webhook', href: '#/settings/webhooks' },
   ], { align: 'right', width: 250 });
+}
+
+async function templateMenu(btn) {
+  const { templates } = await api('GET', '/templates');
+  dropdown(btn, templates.length ? templates.map((t) => ({ label: t.name, onClick: () => newPost({ template: t }) })) : [{ label: 'No templates yet: save one from the composer', disabled: true }, { label: 'Settings → Content', icon: 'settings', href: '#/settings/content' }], { align: 'right', width: 260 });
 }
 
 function openDrawer() { document.body.classList.add('drawer-open'); document.querySelector('.sidebar .nav a.on, .sidebar .nav a')?.focus(); }

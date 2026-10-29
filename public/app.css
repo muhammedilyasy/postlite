@@ -940,3 +940,9 @@ code.uri, .uri-row code.uri { border: 0; font: 12.5px var(--mono); word-break: b
 .row-tags { display: inline-flex; gap: 4px; }
 .row-tags .tag-chip { height: 18px; padding: 0 6px; font-size: 11px; }
 .bdot.lg { width: 10px; height: 10px; }
+
+/* Signatures dialog */
+.check-row { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0; }
+.check-col { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 180px; overflow-y: auto; }
+.sig-scope { padding: 8px 0 4px 26px; }
+.sig-chans summary { cursor: pointer; color: var(--text-2); }

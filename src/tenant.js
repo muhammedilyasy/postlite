@@ -12,7 +12,7 @@ import { uid } from './crypto.js';
 export const LEGACY_WORKSPACE = 'owner';
 
 export const TENANT_TABLES = ['integrations', 'media', 'groups', 'posts', 'jobs', 'post_events', 'api_keys', 'audit_log', 'webhooks', 'webhook_deliveries',
-  'uploads', 'oauth_states', 'remote_posts', 'account_metrics', 'post_metrics', 'analytics_status', 'analytics_runs', 'workspace_settings', 'brands', 'brand_channels', 'tags', 'group_tags', 'signatures', 'post_templates'];
+  'uploads', 'oauth_states', 'remote_posts', 'account_metrics', 'post_metrics', 'analytics_status', 'analytics_runs', 'workspace_settings', 'brands', 'brand_channels', 'tags', 'group_tags', 'signatures', 'post_templates', 'series'];
 const TENANT_RE = new RegExp(`\\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\\s+(${TENANT_TABLES.join('|')})\\b`, 'i');
 const MARK_RE = /\/\*\s*ws:(system|checked)\s*\*\//;
 

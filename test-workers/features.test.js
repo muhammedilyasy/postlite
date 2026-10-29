@@ -107,6 +107,26 @@ test('Workers/D1: signatures and templates — auto-add, insert, save from a pos
   assert.equal((await w.api('DELETE', '/signatures/cf-sig', { key: admin })).status, 200);
 });
 
+test('Workers/D1: repeating posts — create with repeat, rolling occurrences, cron fill, update, stop', { skip }, async () => {
+  const first = Date.now() + 3600000;
+  const r = await w.api('POST', '/posts', { key: admin, body: { content: 'cf weekly', targets: [{ account_id: fb, settings: { post_type: 'post' } }], mode: 'schedule', publish_at: first, repeat: { frequency: 'weekly', count: 5 } } });
+  assert.equal(r.status, 200, r.text);
+  const sid = r.json.post.series_id;
+  let s = (await w.api('GET', `/series/${sid}`, { key: admin })).json.series;
+  assert.equal(s.occurrences.length, 3);
+  assert.deepEqual(s.occurrences.map((o) => o.publish_at), [0, 7, 14].map((d) => first + d * 86400000));
+  const u = await w.api('PATCH', `/series/${sid}`, { key: admin, body: { content: 'cf weekly v2' } });
+  assert.equal(u.status, 200, u.text);
+  const third = (await w.api('GET', `/posts/${s.occurrences[2].id}`, { key: admin })).json.post;
+  assert.equal(third.content, 'cf weekly v2');
+  assert.equal(third.series_id, sid);
+  const st = await w.api('POST', `/series/${sid}/stop`, { key: admin, body: {} });
+  assert.equal(st.status, 200, st.text);
+  assert.equal(st.json.removed_occurrences, 2);
+  s = (await w.api('GET', '/series', { key: admin })).json.series;
+  assert.equal(s[0].status, 'stopped');
+});
+
 // Runs last: wipes the workspace.
 test('Workers/D1: delete workspace data removes accounts, posts and keys, then the key stops working', { skip }, async () => {
   const p = await w.api('POST', '/posts', { key: admin, body: { content: 'to be wiped', targets: [{ account_id: fb }], mode: 'schedule', publish_at: Date.now() + 86400000 } });

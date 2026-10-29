@@ -14,12 +14,24 @@ import { formatLocal, parseLocal } from '/assets/shared/time.js';
 export { relTime };
 const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.name });
 
+const REPEAT_OPTS = [['', 'Does not repeat'], ['daily', 'Every day'], ...[2, 3, 4, 5, 6].map((n) => [`every_n_days:${n}`, `Every ${n} days`]), ['weekly', 'Every week'], ['biweekly', 'Every two weeks'], ['monthly', 'Every month']];
+const repeatValue = (r) => (r.frequency === 'every_n_days' ? `every_n_days:${r.interval_days}` : r.frequency || '');
+function ruleToForm(sr) {
+  const d = sr.until ? new Date(sr.until) : null;
+  const pad = (n) => String(n).padStart(2, '0');
+  return { frequency: sr.status === 'active' ? sr.frequency : '', interval_days: sr.interval_days || 2, end: sr.until ? 'until' : sr.count ? 'count' : 'never', until: d ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` : '', count: sr.count || 4 };
+}
+function formToRule(r) {
+  return { frequency: r.frequency, ...(r.frequency === 'every_n_days' ? { interval_days: r.interval_days } : {}), until: r.end === 'until' && r.until ? `${r.until}T23:59` : null, count: r.end === 'count' ? r.count : null };
+}
+
 export async function openComposer({ groupId = null, at = null, media = null, accountIds = null, template = null, onSaved = () => {} } = {}) {
   const tz = state.settings.timezone;
-  const st = { id: null, focusEl: null, tags: [], content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
+  const st = { id: null, focusEl: null, tags: [], repeat: { frequency: '', interval_days: 2, end: 'never', until: '', count: 4 }, series: null, applyFuture: true, content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
   if (groupId) {
     const { post } = await api('GET', `/posts/${groupId}`);
-    Object.assign(st, { id: post.id, content: post.content, media: post.media, publish_at: post.publish_at, status: post.status, approval_note: post.approval_note, tags: (post.tags || []).map((t) => t.id) });
+    Object.assign(st, { id: post.id, content: post.content, media: post.media, publish_at: post.publish_at, status: post.status, approval_note: post.approval_note, tags: (post.tags || []).map((t) => t.id), seriesIndex: post.series_index });
+      if (post.series_id) { try { st.series = (await api('GET', `/series/${post.series_id}`)).series; st.repeat = ruleToForm(st.series); } catch { st.series = null; } }
     for (const t of post.targets) {
       st.targets.set(t.integration_id, { content_override: t.content_override, settings: { ...t.settings }, status: t.status, error: t.error, warning: t.warning, published_url: t.published_url, target_id: t.id });
       if (['published', 'publishing'].includes(t.status)) st.locked.add(t.integration_id);
@@ -119,7 +131,8 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
           h('div', { class: 'row gap wrap' },
             h('input', { id: 'pl-when', type: 'datetime-local', class: 'input when', value: st.publish_at ? formatLocal(st.publish_at, tz) : '', onchange: (e) => { st.publish_at = e.target.value ? parseLocal(e.target.value, tz) : null; render(); } }),
             h('button', { type: 'button', class: 'btn', onclick: async () => { try { const r = await api('GET', '/slots?count=1'); st.publish_at = r.slots[0].epoch_ms; render(); } catch (e) { toast(e.message, 'error'); } } }, icon('clock', 15), 'Next free slot'),
-            st.publish_at ? h('span', { class: 'muted small' }, relTime(st.publish_at)) : null)),
+            st.publish_at ? h('span', { class: 'muted small' }, relTime(st.publish_at)) : null),
+          repeatBox()),
         h('div', { class: 'col-side' }, sidePanel(accs))),
       h('div', { class: 'composer-foot' },
         footStatus(errs),
@@ -133,7 +146,7 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
           ] : [
             h('button', { class: 'btn', onclick: () => save('draft') }, 'Save draft'),
             h('button', { class: 'btn', dataset: { act: 'now' }, onclick: () => save('now'), disabled: !!errs.length || !st.targets.size }, icon('send', 14), 'Post now'),
-            h('button', { class: 'btn primary', dataset: { act: 'schedule' }, onclick: () => save('schedule'), disabled: !!errs.length || !st.targets.size || !st.publish_at }, st.status === 'scheduled' ? 'Update schedule' : 'Schedule'),
+            h('button', { class: 'btn primary', dataset: { act: 'schedule' }, onclick: () => save('schedule'), disabled: !!errs.length || !st.targets.size || !st.publish_at }, st.status === 'scheduled' ? 'Update schedule' : st.repeat.frequency && !st.series ? 'Schedule repeating' : 'Schedule'),
           ])));
   }
 
@@ -492,6 +505,40 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
       t.settings.post_type !== 'story' ? h('div', { class: 'pv-cap' }, h('strong', {}, a.username || a.name), ' ', cap.length > 125 ? `${cap.slice(0, 125)}… more` : cap) : null);
   }
 
+  /** Repeat controls: new posts pick a rule; occurrences of a series show it and can change or stop it. */
+  function repeatBox() {
+    const r = st.repeat;
+    const stopped = st.series && st.series.status !== 'active';
+    const freq = h('select', { class: 'input slim', 'aria-label': 'Repeat', disabled: stopped, onchange: (e) => { const [f, n] = e.target.value.split(':'); r.frequency = f; if (n) r.interval_days = Number(n); render(); } },
+      REPEAT_OPTS.map(([v, l]) => h('option', { value: v, selected: v === repeatValue(r) }, l)));
+    const ends = r.frequency && !stopped ? [
+      h('select', { class: 'input slim', 'aria-label': 'Ends', onchange: (e) => { r.end = e.target.value; render(); } },
+        [['never', 'No end date'], ['until', 'Until…'], ['count', 'Number of times…']].map(([v, l]) => h('option', { value: v, selected: v === r.end }, l))),
+      r.end === 'until' ? h('input', { type: 'date', class: 'input slim', 'aria-label': 'Last date', value: r.until, onchange: (e) => { r.until = e.target.value; } }) : null,
+      r.end === 'count' ? h('input', { type: 'number', class: 'input slim num', min: 2, max: 1000, 'aria-label': 'Number of posts', value: r.count, onchange: (e) => { r.count = Number(e.target.value); } }) : null,
+      r.end === 'count' ? h('span', { class: 'muted small' }, 'posts in total') : null,
+    ] : null;
+    return h('div', { class: 'repeat-box' },
+      h('div', { class: 'row gap wrap' }, h('span', { class: 'repeat-ic', 'aria-hidden': 'true' }, icon('repeat', 15)), freq, ends),
+      st.series ? h('div', { class: 'repeat-note' },
+        stopped ? `This post was part of a repeating series (${st.series.rule.toLowerCase()}), now ${st.series.status}.`
+          : [`Occurrence ${Number(st.seriesIndex) + 1} of a repeating post · next one ${st.series.next_at ? fmtDateTime(st.series.next_at) : 'none'}${st.series.last_error ? ` · ${st.series.last_error}` : ''}`,
+            h('label', { class: 'check small' }, h('input', { type: 'checkbox', checked: st.applyFuture, onchange: (e) => { st.applyFuture = e.target.checked; } }), 'Apply caption, media and channels to the next occurrences too'),
+            h('button', { type: 'button', class: 'btn small ghost danger', onclick: stopSeries }, 'Stop repeating')])
+        : r.frequency ? h('div', { class: 'repeat-note' }, 'Each occurrence becomes its own post; the next three are scheduled ahead so they show in the calendar.') : null);
+  }
+  async function stopSeries() {
+    const keep = await confirmDialog('Stop repeating this post? The occurrences already scheduled after this one are deleted; published posts stay.', { ok: 'Stop repeating', danger: true });
+    if (!keep) return;
+    try { await api('POST', `/series/${st.series.id}/stop`, { delete_future: true }); toast('Stopped repeating'); st.series = (await api('GET', `/series/${st.series.id}`)).series; render(); onSaved(null); } catch (e) { toast(e.message, 'error'); }
+  }
+  const repeatBody = () => {
+    const r = st.repeat;
+    if (!r.frequency) return null;
+    return { frequency: r.frequency, ...(r.frequency === 'every_n_days' ? { interval_days: r.interval_days } : {}),
+      until: r.end === 'until' && r.until ? `${r.until}T23:59` : null, count: r.end === 'count' ? r.count : null };
+  };
+
   const body = (mode) => ({
     content: st.content,
     media_ids: st.media.map((x) => x.id),
@@ -505,8 +552,15 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
     if (!st.targets.size) return toast('Select at least one account', 'error');
     st.serverErrors = {};
     try {
-      const r = st.id ? await api('PATCH', `/posts/${st.id}`, body(mode)) : await api('POST', '/posts', body(mode));
-      toast(mode === 'draft' ? 'Draft saved' : mode === 'now' ? 'Publishing now…' : `Scheduled for ${fmtDateTime(r.post.publish_at)}`, 'success');
+      const rep = repeatBody();
+      const b = { ...body(mode), ...(rep && !st.series && mode === 'schedule' ? { repeat: rep } : {}) };
+      const r = st.id ? await api('PATCH', `/posts/${st.id}`, b) : await api('POST', '/posts', b);
+      if (st.series && st.series.status === 'active') {
+        const ruleChanged = rep && JSON.stringify(rep) !== JSON.stringify(formToRule(ruleToForm(st.series)));
+        if (!rep) await api('POST', `/series/${st.series.id}/stop`, { delete_future: true });
+        else if (ruleChanged || st.applyFuture) await api('PATCH', `/series/${st.series.id}`, { ...(st.applyFuture ? { content: b.content, media_ids: b.media_ids, targets: b.targets, tags: b.tags } : {}), ...(ruleChanged ? rep : {}) });
+      }
+      toast(mode === 'draft' ? 'Draft saved' : mode === 'now' ? 'Publishing now…' : `${b.repeat ? 'Repeating from' : 'Scheduled for'} ${fmtDateTime(r.post.publish_at)}`, 'success');
       m.close();
       onSaved(r.post);
     } catch (e) {

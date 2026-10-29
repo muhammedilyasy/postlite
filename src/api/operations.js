@@ -14,6 +14,7 @@ import { APP_IDS } from '../apps.js';
 import { PLATFORM_PROVIDERS, MEDIA_TYPES } from '../posts.js';
 import { RETENTION_MODES, RETENTION_LABELS } from '../retention.js';
 import { appendSignature } from '../snippets.js';
+import { cleanRule, FREQUENCIES } from '../series.js';
 
 const DAY = 86400000;
 const S = (o) => ({ type: 'object', additionalProperties: false, ...o });
@@ -88,7 +89,19 @@ const BRAND_PARAM = { type: ['array', 'string'], items: { type: 'string' }, desc
 
 const TAG_PARAM = { type: ['array', 'string'], items: { type: 'string' }, description: 'Tag id(s) or name(s) (list_tags); matches posts with any of them.' };
 
+const REPEAT = {
+  type: 'object', additionalProperties: false, required: ['frequency'],
+  description: 'Repeat this post. Each occurrence becomes its own scheduled post, created 3 ahead so the calendar shows them. Needs mode "schedule" (or next_slot): publish_at is the first occurrence. Example: {"frequency":"weekly","count":8} or {"frequency":"every_n_days","interval_days":3,"until":"2026-12-31"}. Manage with list_series / update_series / stop_series.',
+  properties: {
+    frequency: { type: 'string', enum: FREQUENCIES, description: 'daily, every_n_days (+interval_days 2-6), weekly, biweekly (every two weeks) or monthly (same day; the 31st becomes the month\'s last day).' },
+    interval_days: { type: 'integer', minimum: 2, maximum: 6 },
+    until: { type: ['string', 'integer', 'null'], description: 'Optional end: no occurrence after this time.' },
+    count: { type: ['integer', 'null'], minimum: 2, maximum: 1000, description: 'Optional total number of occurrences, including the first.' },
+  },
+};
+
 const POST_BODY = {
+  repeat: REPEAT,
   template_id: str('Start from a saved template (list_templates; id or name): its caption, targets/brand, per-channel settings and tags fill in whatever you do not pass. Media is never stored in templates.'),
   signature: str('Append this saved signature (list_signatures; id or name) to content.'),
   auto_signatures: { type: 'boolean', description: 'Append the signatures marked auto-add that apply to the selected channels (what the web composer does for new posts).' },
@@ -524,6 +537,37 @@ export const operations = [
     input: S({ required: ['post_id', 'tags'], properties: { post_id: id('Post'), tags: { type: 'array', items: { type: 'string' } }, mode: { type: 'string', enum: ['replace', 'add', 'remove'] } } }),
     handler: async (core, i) => { await groupOrThrow(core, i.post_id); await core.tags.setForGroup(i.post_id, i.tags, i.mode || 'replace'); return { post: await core.posts.getGroup(i.post_id) }; },
   },
+  // ---- repeating posts ----
+  {
+    name: 'list_series', method: 'GET', path: '/series', scope: 'read', tags: ['posts'], readOnly: true,
+    summary: 'List repeating posts', description: 'Repeating series (active first): rule, next_at, generated, status active|stopped|ended, last_error (e.g. a channel needs reconnecting; that occurrence was kept as a draft). Create one with create_post {repeat}.',
+    input: S({ properties: { status: { type: 'string', enum: ['active', 'stopped', 'ended'] } } }),
+    handler: async (core, i) => ({ series: await core.series.list({ status: i.status }) }),
+  },
+  {
+    name: 'get_series', method: 'GET', path: '/series/{series_id}', scope: 'read', tags: ['posts'], readOnly: true,
+    summary: 'Get a repeating series', description: 'The series with its occurrences (post ids, index, publish_at, status). Posts carry series_id/series_index too.',
+    input: S({ required: ['series_id'], properties: { series_id: id('Series') } }),
+    handler: async (core, i) => ({ series: await core.series.get(i.series_id) }),
+  },
+  {
+    name: 'update_series', method: 'PATCH', path: '/series/{series_id}', scope: 'publish', tags: ['posts'],
+    summary: 'Edit a repeating series', description: 'Content changes (content, media_ids, targets [{account_id, content?, settings?}], tags) are applied to every future occurrence that has not published, and to the ones created later. Rule changes (frequency, interval_days, until, count) drop the future unpublished occurrences and continue from now with the new rule, keeping the original time of day. Past and published occurrences never change.',
+    input: S({ required: ['series_id'], properties: { series_id: id('Series'), content: str('Caption.'), media_ids: { type: 'array', items: { type: 'string' } }, targets: { type: 'array', items: TARGET }, tags: { type: 'array', items: { type: 'string' } }, frequency: { type: 'string', enum: FREQUENCIES }, interval_days: { type: 'integer', minimum: 2, maximum: 6 }, until: { type: ['string', 'integer', 'null'] }, count: { type: ['integer', 'null'] } } }),
+    handler: async (core, i, p) => {
+      const tz = (await core.settings.get()).timezone;
+      const out = { series: await core.series.update(i.series_id, i, { principal: p, parseTime: (v) => parseTime(v, tz, 'until') }) };
+      core.scheduler.poke();
+      return out;
+    },
+    wrapError: true,
+  },
+  {
+    name: 'stop_series', method: 'POST', path: '/series/{series_id}/stop', scope: 'write', tags: ['posts'], destructive: true,
+    summary: 'Stop a repeating post', description: 'No more occurrences are created. delete_future (default true) also deletes the occurrences already created that have not published; false keeps them as normal scheduled posts. Published posts stay.',
+    input: S({ required: ['series_id'], properties: { series_id: id('Series'), delete_future: { type: 'boolean' } } }),
+    handler: async (core, i) => core.series.stop(i.series_id, { delete_future: i.delete_future !== false }),
+  },
   // ---- signatures & templates ----
   {
     name: 'list_signatures', method: 'GET', path: '/signatures', scope: 'read', tags: ['content'], readOnly: true,
@@ -766,8 +810,15 @@ export const operations = [
       needTargets(i);
       const bt = await brandTargets(core, i);
       const tagOps = i.tags?.length ? await core.tags.resolve(i.tags, { create: true }) : null;
+      const tz = (await core.settings.get()).timezone;
+      const rule = i.repeat ? cleanRule(i.repeat, { parseTime: (v) => parseTime(v, tz, 'repeat.until') }) : null;
+      if (rule && !['schedule', 'next_slot'].includes(i.mode)) throw new HttpError(400, 'A repeating post needs mode "schedule" (with publish_at for the first occurrence) or "next_slot".');
       const gid = await core.posts.saveGroup(await toSaveInput(core, bt ? { ...i, targets: bt.targets } : i, null, p), null, { principal: p });
       if (tagOps) await core.tags.setForGroup(gid, tagOps.map((t) => t.id));
+      if (rule) {
+        // A rule the first occurrence cannot satisfy (e.g. until before publish_at) must not leave a one-off post behind.
+        try { await core.series.createFromGroup(gid, rule, { principal: p }); } catch (e) { await core.posts.deleteGroup(gid).catch(() => {}); throw e; }
+      }
       const g = await core.posts.getGroup(gid);
       if (g.status === 'pending_approval') await core.webhooks.emit('post.pending_approval', { post_id: gid, requested_by: p.name });
       core.scheduler.poke();
@@ -782,8 +833,12 @@ export const operations = [
     handler: async (core, i, p) => {
       const g = await groupOrThrow(core, i.post_id);
       const bt = await brandTargets(core, i);
+      const tz = (await core.settings.get()).timezone;
+      const rule = i.repeat ? cleanRule(i.repeat, { parseTime: (v) => parseTime(v, tz, 'repeat.until') }) : null;
+      if (rule && g.series_id) throw new HttpError(409, 'This post is part of a repeating series. Change the rule with update_series.');
       await core.posts.saveGroup(await toSaveInput(core, bt ? { ...i, targets: bt.targets } : i, g, p), g.id, { principal: p });
       if (i.tags !== undefined) await core.tags.setForGroup(g.id, i.tags, 'replace');
+      if (rule) await core.series.createFromGroup(g.id, rule, { principal: p });
       const ng = await core.posts.getGroup(g.id);
       if (ng.status === 'pending_approval' && g.status !== 'pending_approval') await core.webhooks.emit('post.pending_approval', { post_id: g.id, requested_by: p.name });
       core.scheduler.poke();
@@ -1245,7 +1300,7 @@ export async function execute(rootCore, op, input, principal, via) {
   }
 }
 
-const targetOf = (input, result) => input?.app || input?.template_id || input?.signature_id || input?.tag_id || input?.brand_id || result?.brand?.id || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
+const targetOf = (input, result) => input?.app || input?.series_id || input?.template_id || input?.signature_id || input?.tag_id || input?.brand_id || result?.brand?.id || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
 function summarize(input) {
   if (!input) return null;
   const out = {};

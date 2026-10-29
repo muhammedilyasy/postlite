@@ -86,6 +86,13 @@ A brand is a named set of channels across platforms (for example "North Star" = 
 - Assign: `create_post {..., tags: ["launch", "promo"]}` (unknown names are created), `update_post {tags}` replaces them, `set_post_tags {post_id, tags, mode: replace|add|remove}` works on published posts too. Posts carry `tags: [{id, name, color}]`.
 - Filter: `list_posts {tag}`, `get_calendar {tag}`, `get_top_posts {tag}` (only posts published through postlite carry tags) and the CSV export (`&tag=`).
 
+## Repeating posts
+
+- `create_post {..., mode: "schedule", publish_at, repeat: {frequency, interval_days?, until?, count?}}`. frequency: `daily`, `every_n_days` (+`interval_days` 2-6), `weekly`, `biweekly`, `monthly` (the 31st becomes the month's last day). The wall-clock time is kept across DST in the workspace timezone. `count` includes the first post; `until` is the last allowed time. `update_post {repeat}` turns an existing scheduled post into a series.
+- Each occurrence is its own post (`series_id`, `series_index`; index 0 is the original), created so the next 3 are always scheduled ahead (calendar shows them). New ones are created by the background loop (Node, every 10 min) or the cron (Workers). Missed occurrences (server down) are skipped, never posted late.
+- `list_series` (each with `next_post_at`), `get_series` (with occurrences), `update_series` (content/media/targets/tags rewrite future unpublished occurrences; a rule change drops them and continues from now), `stop_series {delete_future?: true}`. If an occurrence cannot be scheduled (e.g. a channel needs reconnecting) it is kept as a draft and `last_error` says why.
+- Media used by an active series is never purged and cannot be deleted; stop the series first.
+
 ## Signatures and templates
 
 - Signatures are saved snippets: `list_signatures`, `create_signature {name, content, auto_add?, platforms?, account_ids?}`, `update_signature`, `delete_signature`. Add one to a post with `create_post {signature: "Sign-off"}`; `create_post {auto_signatures: true}` appends every auto-add signature whose platforms/account_ids match the selected channels (empty scope = every channel), like the web composer does for new posts. A signature already at the end is never added twice.

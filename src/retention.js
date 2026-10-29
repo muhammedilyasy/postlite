@@ -40,7 +40,7 @@ export function targetMediaIds(t) {
 /** Message used when a post needs bytes that were already removed. */
 export const purgedMessage = (names, { retry = false } = {}) => `${retry ? 'Cannot retry: t' : 'T'}he original file${names.length > 1 ? 's' : ''} ${names.map((n) => `"${n}"`).join(', ')} ${names.length > 1 ? 'were' : 'was'} deleted after publishing to save storage (Settings → General → Storage). ${retry ? 'Duplicate the post, re-upload the file and publish the copy.' : 'Re-upload the file (the post keeps a thumbnail) before scheduling.'}`;
 
-export function createRetention({ db, cfg, storage, ws, hooks = {}, audit = null, log = () => {} }) {
+export function createRetention({ db, cfg, storage, ws, hooks = {}, audit = null, log = () => {}, seriesMedia = async () => [] }) {
   if (!ws) throw new Error('createRetention: workspace id required');
   const store = wsSettings(db, ws);
   const P = () => cfg.mediaPurge;
@@ -80,6 +80,7 @@ export function createRetention({ db, cfg, storage, ws, hooks = {}, audit = null
     const targets = await db.all(`SELECT p.id, p.group_id, p.status, p.media_override, p.settings, p.published_at, p.updated_at, g.media AS gmedia, j.state AS job_state
       FROM posts p JOIN groups g ON g.id = p.group_id AND g.workspace_id = p.workspace_id LEFT JOIN jobs j ON j.post_id = p.id WHERE p.workspace_id = ?`, ws);
     const rows = await db.all('SELECT * FROM media WHERE workspace_id = ? AND purged_at IS NULL ORDER BY created_at, id', ws);
+    const inSeries = new Set(await seriesMedia());
     const refs = new Map();
     for (const t of targets) for (const id of targetMediaIds(t)) (refs.get(id) || refs.set(id, []).get(id)).push(t);
     const eligible = [];
@@ -88,6 +89,7 @@ export function createRetention({ db, cfg, storage, ws, hooks = {}, audit = null
       const base = { media_id: m.id, name: m.original_name, kind: m.kind, bytes: m.size };
       const ts = refs.get(m.id) || [];
       const keep = (reason, extra = {}) => kept.push({ ...base, reason, posts: [...new Set(ts.map((t) => t.group_id))], ...extra });
+      if (inSeries.has(m.id)) { keep('used by an active repeating post'); continue; }
       if (!ts.length) { keep('not used by any post (library upload)'); continue; }
       const states = ts.map((t) => classify(t, now));
       const blocker = states.find((s) => s.block);
@@ -106,6 +108,7 @@ export function createRetention({ db, cfg, storage, ws, hooks = {}, audit = null
   /** Still blocked right now? (one indexed query per file, just before deleting it) */
   async function blockedNow(id, now) {
     const like = `%${id}%`;
+    if (await db.get("SELECT id FROM series WHERE workspace_id = ? AND status = 'active' AND (media LIKE ? OR targets LIKE ?) LIMIT 1", ws, like, like)) return true;
     return db.get(`SELECT p.id FROM posts p JOIN groups g ON g.id = p.group_id AND g.workspace_id = p.workspace_id LEFT JOIN jobs j ON j.post_id = p.id
       WHERE p.workspace_id = ? AND (g.media LIKE ? OR p.media_override LIKE ? OR p.settings LIKE ?)
         AND (p.status NOT IN ('published','failed') OR j.state IN ('queued','running') OR (p.status = 'failed' AND p.updated_at > ?)) LIMIT 1`,

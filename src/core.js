@@ -24,6 +24,7 @@ import { createWipe } from './wipe.js';
 import { createLibrary } from './library.js';
 import { createTags } from './tags.js';
 import { createSignatures, createTemplates } from './snippets.js';
+import { createSeries } from './series.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -116,9 +117,10 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     sc.tags = createTags({ db, ws });
     sc.signatures = createSignatures({ db, ws });
     sc.templates = createTemplates({ db, ws });
+    sc.series = createSeries({ db, ws, posts, tags: sc.tags, settings, log });
     sc.wipe = createWipe({ db, storage, ws, workspaces });
     sc.library = createLibrary({ db, ws, media, extraRefs: async () => (sc.series ? sc.series.activeMediaIds() : []) });
-    sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log });
+    sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log, seriesMedia: () => sc.series.activeMediaIds() });
     sc.oauth = createOAuth(sc);
     scopes.set(ws, sc);
     return sc;
@@ -165,6 +167,17 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       return out;
     },
 
+    /** Repeating posts: keep the next occurrences of every active series created (all workspaces). */
+    async fillSeries({ budget = null } = {}) {
+      let n = 0;
+      const rows = await db.all("SELECT DISTINCT workspace_id FROM series WHERE status = 'active' /* ws:system */");
+      for (const { workspace_id: ws } of rows) {
+        if (budget && !budget.has({ fetches: 0, queries: 20 })) break;
+        n += await scope(ws).series.fill().catch((e) => { log('warn', `series ${ws}: ${e.message}`); return 0; });
+      }
+      return n;
+    },
+
     /** Housekeeping: token refresh/health (per workspace), audit pruning, expired upload sessions. */
     async maintenance({ budget = null } = {}) {
       for (const ws of await allWorkspaceIds()) {
@@ -183,6 +196,11 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
      */
     async cron({ budget }) {
       const out = { scheduler: await scheduler.runOnce({ budget }) };
+      const lastSeries = Number((await db.getSetting('series_at', '0')) || 0);
+      if (Date.now() - lastSeries >= 10 * 60000 && budget.has({ fetches: 0, queries: 30 })) {
+        await db.setSetting('series_at', String(Date.now()));
+        out.series = await core.fillSeries({ budget });
+      }
       out.webhooks = await delivery.deliverDue({ limit: cfg.budget.webhooks, budget });
       if (budget.has({ fetches: 15, queries: 15 })) out.analytics = Object.keys(await analyticsLoop.syncDue({ budget })).length;
       if (cfg.mediaPurge?.enabled && budget.has({ fetches: 6, queries: 14 })) {
@@ -211,10 +229,15 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
         const maint = setInterval(() => { core.maintenance().catch(() => {}); }, 12 * 3600000);
         maint.unref?.();
         core._maint = maint;
+        await core.fillSeries().catch(() => {});
+        const rep = setInterval(() => { core.fillSeries().catch(() => {}); }, 10 * 60000);
+        rep.unref?.();
+        core._series = rep;
       })();
     },
     async stop() {
       clearInterval(core._maint);
+      clearInterval(core._series);
       analyticsLoop.stop();
       delivery.stop();
       await scheduler.stop();

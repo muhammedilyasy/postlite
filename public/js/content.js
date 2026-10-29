@@ -143,7 +143,7 @@ export async function signaturesSection(rerender) {
   const list = await loadSignatures();
   return section('Signatures', { sub: 'Saved sign-offs, links and hashtag blocks. Insert them from the composer, or add them automatically per platform or channel.', actions: h('button', { class: 'btn small', onclick: () => signatureDialog(null, rerender) }, icon('plus', 13), 'New signature') },
     list.length ? h('div', { class: 'plist' }, list.map((sg) => h('div', { class: 'plist-row' },
-      h('div', { class: 'plist-text' }, h('div', { class: 'plist-name' }, sg.name, sg.auto_add ? h('span', { class: 'pl-note' }, 'Auto') : null), h('div', { class: 'plist-desc' }, `${scopeText(sg)} · “${sg.content.replace(/\s+/g, ' ').slice(0, 60)}${sg.content.length > 60 ? '…' : ''}”`)),
+      h('div', { class: 'plist-text' }, h('div', { class: 'plist-name' }, sg.name, sg.auto_add ? h('span', { class: 'pl-note' }, 'Auto') : null), h('div', { class: 'plist-desc keep-sm' }, `${scopeText(sg)} · “${sg.content.replace(/\s+/g, ' ').slice(0, 60)}${sg.content.length > 60 ? '…' : ''}”`)),
       h('button', { class: 'icon-btn', 'aria-label': `Actions for signature ${sg.name}`, 'aria-haspopup': 'menu', onclick: (e) => dropdown(e.currentTarget, [
         { label: 'Edit', icon: 'edit', onClick: () => signatureDialog(sg, rerender) },
         { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog(`Delete the signature “${sg.name}”? Posts that already contain it keep their text.`, { ok: 'Delete', danger: true })) { await api('DELETE', `/signatures/${sg.id}`); toast('Signature deleted'); rerender(); } } },

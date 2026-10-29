@@ -109,7 +109,7 @@ export function createPosts({ db, media, integrations, ws, tagsFor = async () =>
       content_override: p.content_override, media_override: parse(p.media_override, null), settings: c.settings,
       caption: c.caption, media: c.media.map(media.view), publish_at: p.publish_at, status: p.status, external_id: p.external_id,
       published_url: p.published_url, published_at: p.published_at, error: p.error, warning: p.warning, attempts: p.attempts, account_paused: !!p.idisabled,
-      job_state: p.job_state || null, next_run_at: p.run_at || null, created_at: p.created_at, updated_at: p.updated_at,
+      series_id: g?.series_id || null, job_state: p.job_state || null, next_run_at: p.run_at || null, created_at: p.created_at, updated_at: p.updated_at,
     };
   };
 
@@ -140,7 +140,7 @@ export function createPosts({ db, media, integrations, ws, tagsFor = async () =>
       const tv = byGroup.get(id) || [];
       return {
         id: g.id, content: g.content, media: parse(g.media, []).map((m) => mediaMap.get(String(m))).filter(Boolean).map(media.view), publish_at: g.publish_at, status: aggregateStatus(tv),
-        created_by: g.created_by, approval_note: g.approval_note, tags: tagMap.get(id) || [], created_at: g.created_at, updated_at: g.updated_at, targets: tv,
+        created_by: g.created_by, approval_note: g.approval_note, tags: tagMap.get(id) || [], series_id: g.series_id || null, series_index: g.series_index ?? null, created_at: g.created_at, updated_at: g.updated_at, targets: tv,
       };
     });
   }
@@ -156,6 +156,7 @@ export function createPosts({ db, media, integrations, ws, tagsFor = async () =>
   }
 
   const api = {
+    loadGroups: (ids) => loadGroups(ids),
     composed,
     validateComposed,
     event,

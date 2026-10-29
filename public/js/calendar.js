@@ -155,6 +155,7 @@ function chip(e, tz, refresh, { compact = false } = {}) {
   avatar({ provider: e.provider, name: e.account_name, picture: e.account_picture }, compact ? 16 : 18),
   e.media?.[0] ? listThumb(e.media[0], { cls: 'chip-thumb', size: 10 }) : null,
   h('span', { class: 'chip-text' }, e.caption.slice(0, 60) || (e.settings?.title ?? '') || '(no caption)'),
+  e.series_id ? h('span', { class: 'series-ic', title: 'Repeating post', 'aria-label': 'Repeating post' }, icon('repeat', 12)) : null,
   h('button', { class: 'chip-menu', 'aria-label': 'Post actions', 'aria-haspopup': 'menu', onclick: (ev) => { ev.stopPropagation(); chipMenu(ev.currentTarget, e, refresh); } }, icon('more', 14)));
   return el;
 }

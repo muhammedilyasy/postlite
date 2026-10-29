@@ -1,6 +1,6 @@
 // Posts: Render-style list table (all targets, filters, search) and a post detail page with tabs
 // (Overview · Events timeline of publish attempts · Metrics).
-import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum, relTime, STATUS_LABEL, refreshCommon, debounce, MARKS, fmtDateTime } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum, relTime, STATUS_LABEL, refreshCommon, debounce, MARKS, fmtDateTime, modal } from './core.js';
 import { openComposer, duplicatePost, retryTargets } from './composer.js';
 import { pageHeader, emptyState, skeleton, dropdown, idChip, setCrumbs, tabs, section, closeMenus } from './ui.js';
 import { lineChart } from './charts.js';
@@ -85,7 +85,9 @@ function checkMenu(anchor, options, selected, onChange, { width = 220, header = 
 
 export async function renderPosts(root, params = {}) {
   const f = readFilters(params);
-  const head = pageHeader({ title: 'Posts', sub: 'Every post, per account, with its publish status.', actions: h('button', { class: 'btn primary', onclick: () => openComposer({ onSaved: () => load() }) }, icon('plus', 15), 'New post') });
+  const head = pageHeader({ title: 'Posts', sub: 'Every post, per account, with its publish status.', actions: [
+    h('button', { class: 'btn', onclick: () => seriesDialog(() => load()) }, icon('repeat', 15), 'Repeating'),
+    h('button', { class: 'btn primary', onclick: () => openComposer({ onSaved: () => load() }) }, icon('plus', 15), 'New post')] });
   mount(root, head, skeleton('table', 8));
   await refreshCommon();
   let keys = [];
@@ -190,7 +192,7 @@ function postRow(g, t, refresh) {
       listThumb(g.media?.[0]),
       h('div', { class: 'cp-text' },
         h('a', { class: 'cp-title ellipsis', href: `#/posts/${g.id}`, onclick: (e) => e.stopPropagation() }, t.settings?.title || t.caption || '(no caption)'),
-        h('div', { class: 'cp-sub' }, idChip(g.id), (g.tags || []).length ? h('span', { class: 'row-tags hide-sm' }, g.tags.slice(0, 3).map((x) => tagChip(x))) : null, h('span', { class: 'dot-sep' }), h('span', { class: 'show-sm' }, t.account_name), h('span', { class: 'hide-sm' }, at ? relTime(at) : 'no date')),
+        h('div', { class: 'cp-sub' }, idChip(g.id), g.series_id ? h('span', { class: 'series-ic', title: 'Repeating post' }, icon('repeat', 12)) : null, (g.tags || []).length ? h('span', { class: 'row-tags hide-sm' }, g.tags.slice(0, 3).map((x) => tagChip(x))) : null, h('span', { class: 'dot-sep' }), h('span', { class: 'show-sm' }, t.account_name), h('span', { class: 'hide-sm' }, at ? relTime(at) : 'no date')),
         t.error ? h('div', { class: 'err small ellipsis' }, t.error) : t.warning ? h('div', { class: 'warn small ellipsis' }, t.warning) : null))),
     h('td', { class: 'hide-sm' }, h('div', { class: 'row gap' }, avatar({ provider: t.provider, name: t.account_name, picture: t.account_picture }, 22), h('span', { class: 'ellipsis' }, t.account_name))),
     h('td', {}, statusBadge(t.status)),
@@ -241,6 +243,8 @@ export async function renderPostDetail(root, id, params = {}) {
 }
 
 function overview(post, refresh) {
+  const seriesLabel = h('span', {}, `post ${Number(post.series_index) + 1} of a series`);
+  if (post.series_id) api('GET', `/series/${post.series_id}`).then(({ series: sr }) => mount(seriesLabel, `${sr.rule}${sr.status !== 'active' ? ` (${sr.status})` : ''} · post ${Number(post.series_index) + 1}`)).catch(() => {});
   const targets = section('Accounts', { sub: `${post.targets.length} target${post.targets.length === 1 ? '' : 's'}` },
     h('div', { class: 'table-wrap flush' }, h('table', { class: 'table' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Account'), h('th', {}, 'Status'), h('th', { class: 'hide-sm' }, 'Attempts'), h('th', { class: 'hide-sm' }, 'Time'), h('th', { class: 'w-act' }, h('span', { class: 'sr-only' }, 'Actions')))),
@@ -262,7 +266,9 @@ function overview(post, refresh) {
     h('dt', {}, 'Publish at'), h('dd', { class: 'mono' }, fmtTime(post.publish_at)),
     h('dt', {}, 'Created by'), h('dd', {}, post.created_by || 'web UI'),
     post.approval_note ? [h('dt', {}, 'Approval note'), h('dd', {}, post.approval_note)] : null,
-    h('dt', {}, 'Media'), h('dd', {}, `${post.media.length} file${post.media.length === 1 ? '' : 's'}`)));
+    h('dt', {}, 'Media'), h('dd', {}, `${post.media.length} file${post.media.length === 1 ? '' : 's'}`),
+    (post.tags || []).length ? [h('dt', {}, 'Tags'), h('dd', { class: 'row-tags wrap' }, post.tags.map((t) => h('a', { href: `#/posts?tag=${t.id}` }, tagChip(t))))] : null,
+    post.series_id ? [h('dt', {}, 'Repeats'), h('dd', { class: 'series-dd' }, h('span', { class: 'series-ic', 'aria-hidden': 'true' }, icon('repeat', 13)), ' ', seriesLabel)] : null));
   return h('div', { class: 'detail-grid' }, h('div', { class: 'stack' }, targets, content), h('div', { class: 'stack' }, info, section('Latest events', { actions: h('a', { class: 'btn small ghost', href: `#/posts/${post.id}?tab=events` }, 'View all') }, eventsTimeline(post, 5))));
 }
 
@@ -308,4 +314,26 @@ async function metricsTab(body, post) {
       ] : emptyState({ icon: 'analytics', compact: true, title: m.note || 'No metrics yet', body: m.status && m.status !== 'published' ? `Status: ${STATUS_LABEL[m.status] || m.status}` : 'Metrics are fetched by the analytics sync.' }));
   });
   mount(body, h('div', { class: 'stack' }, cards));
+}
+
+/** Repeating posts: every series with its rule, next occurrence, and Open / Stop. */
+async function seriesDialog(refresh) {
+  const { series } = await api('GET', '/series');
+  const body = h('div', { class: 'plist' });
+  const draw = (list) => mount(body, list.length ? list.map((sr) => {
+    const chans = sr.targets.map((t) => state.accounts.find((a) => a.id === t.account_id)).filter(Boolean);
+    return h('div', { class: 'plist-row' },
+      h('span', { class: 'series-ic', 'aria-hidden': 'true' }, icon('repeat', 15)),
+      h('div', { class: 'plist-text' },
+        h('div', { class: 'plist-name' }, (sr.content || '').replace(/\s+/g, ' ').slice(0, 70) || '(no caption)', sr.status !== 'active' ? h('span', { class: 'pl-note' }, sr.status === 'stopped' ? 'Stopped' : 'Ended') : null),
+        h('div', { class: 'plist-desc keep-sm' }, [sr.rule, sr.count ? `${sr.count} posts` : null, sr.until ? `until ${fmtDateTime(sr.until)}` : null, chans.map((a) => a.name).join(', ') || null, sr.next_post_at ? `next post ${fmtDateTime(sr.next_post_at)}` : null].filter(Boolean).join(' · '),
+          sr.last_error ? h('div', { class: 'small err' }, sr.last_error) : null)),
+      sr.status === 'active' ? h('button', { class: 'btn small ghost danger', onclick: async () => {
+        if (!(await confirmDialog('Stop repeating? Occurrences already scheduled that have not published are deleted; published posts stay.', { ok: 'Stop repeating', danger: true }))) return;
+        try { await api('POST', `/series/${sr.id}/stop`, { delete_future: true }); toast('Stopped repeating'); draw((await api('GET', '/series')).series); refresh(); } catch (e) { toast(e.message, 'error'); }
+      } }, 'Stop') : null);
+  }) : emptyState({ icon: 'repeat', compact: true, title: 'No repeating posts', body: 'In the composer, pick “Repeat” under Schedule to post the same thing every day, week or month.' }));
+  draw(series);
+  const m = modal(h('div', { class: 'confirm wide-confirm' }, h('h3', { class: 'confirm-title' }, 'Repeating posts'), body,
+    h('div', { class: 'row end' }, h('button', { class: 'btn', onclick: () => m.close() }, 'Close'))), { label: 'Repeating posts' });
 }

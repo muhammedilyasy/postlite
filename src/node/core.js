@@ -10,6 +10,7 @@ import { createFsStorage } from './storage.js';
 import { ffprobe, makePoster, makeThumb } from './ffmpeg.js';
 import { ROOT } from './config.js';
 import { hashPasswordPbkdf2, verifyPasswordPbkdf2 } from '../crypto.js';
+import { smtpSend } from './smtp.js';
 
 export const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 
@@ -49,6 +50,7 @@ export const nodeRuntime = {
     return (await dns.lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
   },
   uptime: () => process.uptime(),
+  smtpSend,
 };
 
 /** Node core: SQLite file + data/uploads. */

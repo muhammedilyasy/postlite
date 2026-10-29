@@ -265,6 +265,15 @@ export function startFake({ port = 0, host = '127.0.0.1', state = createFakeStat
       }
     }
 
+    // Fake Resend (https://resend.com/docs/api-reference/emails/send-email): POST /resend/emails
+    if (url.pathname === '/resend/emails' && req.method === 'POST') {
+      if (req.headers.authorization !== 'Bearer re_test_key') return json(res, 401, { statusCode: 401, name: 'validation_error', message: 'API key is invalid' });
+      if (!body?.from || !Array.isArray(body.to) || !body.subject || !body.text || !body.html) return json(res, 422, { statusCode: 422, name: 'validation_error', message: 'missing field' });
+      const id = `re_${++state.seq}`;
+      (state.emails ||= []).push({ id, ...body });
+      return json(res, 200, { id });
+    }
+    if (url.pathname === '/__emails') return json(res, 200, { emails: state.emails || [] });
     if (url.pathname === '/__state') return json(res, 200, { published: state.published, calls: state.calls.length, fetchedMedia: state.fetchedMedia });
 
     // Consent screens: auto-approve and redirect back with a code.

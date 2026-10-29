@@ -25,6 +25,8 @@ import { createLibrary } from './library.js';
 import { createTags } from './tags.js';
 import { createSignatures, createTemplates } from './snippets.js';
 import { createSeries } from './series.js';
+import { createNotifications } from './notifications.js';
+import { createMailer } from './email.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -49,6 +51,14 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
   const rootMedia = createMedia({ db, cfg, storage, hooks: runtime.hooks || {} }); // token-authorized paths only
   const apiKeys = createApiKeys({ db }); // authenticate() + rateLimit() only
   const scopes = new Map();
+  const mailer = createMailer(cfg, runtime);
+  // Node: send batched alert emails shortly after an alert (Workers: the cron does it every minute).
+  let flushTimer = null;
+  const kickEmail = () => {
+    if (workers || flushTimer) return;
+    flushTimer = setTimeout(() => { flushTimer = null; core.deliverNotifications().catch((e) => log('warn', `alerts: ${e.message}`)); }, (cfg.notify?.batchMs ?? 60000) + 50);
+    flushTimer.unref?.();
+  };
 
   /** Services of one workspace. Cached per process/isolate. */
   function scope(ws) {
@@ -61,7 +71,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     const apps = createApps({ db, cfg: wcfg, cipher, ws, envCfg: cfg });
     const webhooks = createWebhooks({ db, cipher, ws, delivery, deliverOnEmit: !workers });
     const media = createMedia({ db, cfg: wcfg, storage, hooks: runtime.hooks || {}, ws });
-    const integrations = createIntegrations({ db, cfg: wcfg, cipher, ws, log, onNeedsReconnect: (d) => webhooks.emit('account.needs_reconnect', d) });
+    const integrations = createIntegrations({ db, cfg: wcfg, cipher, ws, log, onNeedsReconnect: async (d) => { await webhooks.emit('account.needs_reconnect', d); await sc.notifications.accountReconnect(d).catch((e) => log('warn', `alert: ${e.message}`)); } });
     const posts = createPosts({ db, media, integrations, ws, tagsFor: (ids) => sc.tags.forGroups(ids) });
     const analytics = createAnalytics({ db, cfg: wcfg, integrations, ws, log, onSynced: (r) => webhooks.emit('analytics.synced', { accounts: r }) });
     analytics.start = () => analyticsLoop.start();
@@ -117,6 +127,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     sc.tags = createTags({ db, ws });
     sc.signatures = createSignatures({ db, ws });
     sc.templates = createTemplates({ db, ws });
+    sc.notifications = createNotifications({ db, ws, cfg: wcfg, settings, mailer, kick: kickEmail, log });
     sc.series = createSeries({ db, ws, posts, tags: sc.tags, settings, log });
     sc.wipe = createWipe({ db, storage, ws, workspaces });
     sc.library = createLibrary({ db, ws, media, extraRefs: async () => (sc.series ? sc.series.activeMediaIds() : []) });
@@ -134,14 +145,24 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     db, cfg, scopeFor: scope, log, workerTag: workers ? 'cf' : 'w',
     // Node: the media retention purge runs from the scheduler loop (Workers: a cron step, see cron()).
     housekeeping: !workers && cfg.mediaPurge?.enabled ? { intervalMs: cfg.mediaPurge.intervalMs, run: () => core.purgeMedia() } : null,
-    onPublished: async (id, ws) => { if (ws) { const sc = scope(ws); await sc.webhooks.emit('post.published', await postPayload(sc, id)); } },
-    onFailed: async (id, ws) => { if (ws) { const sc = scope(ws); await sc.webhooks.emit('post.failed', await postPayload(sc, id)); } },
+    onPublished: async (id, ws) => {
+      if (!ws) return;
+      const sc = scope(ws); const p = await postPayload(sc, id);
+      await sc.webhooks.emit('post.published', p);
+      await sc.notifications.postPublished(p).catch((e) => log('warn', `alert: ${e.message}`));
+    },
+    onFailed: async (id, ws) => {
+      if (!ws) return;
+      const sc = scope(ws); const p = await postPayload(sc, id);
+      await sc.webhooks.emit('post.failed', p);
+      await sc.notifications.postFailed(p).catch((e) => log('warn', `alert: ${e.message}`));
+    },
   });
   const analyticsLoop = createAnalyticsLoop({ db, cfg, scopeFor: scope, log });
   const allWorkspaceIds = async () => (await db.all('SELECT id FROM workspaces ORDER BY created_at')).map((r) => r.id);
 
   const core = {
-    cfg, db, storage, runtime, cipher, log, workspaces, scheduler, apiKeys, passwords: runtime.passwords,
+    cfg, db, storage, runtime, cipher, log, workspaces, scheduler, apiKeys, mailer, passwords: runtime.passwords,
     media: { serve: rootMedia.serve, putPart: rootMedia.putPart, cleanupUploads: rootMedia.cleanupUploads },
     webhooks: delivery,
     analytics: analyticsLoop,
@@ -178,6 +199,26 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       return n;
     },
 
+    /**
+     * Alerts: send pending emails (one message per user, after the batching window) and due daily digests.
+     * Bounded per call; safe to run concurrently (rows are claimed atomically).
+     */
+    async deliverNotifications({ budget = null, now = Date.now(), force = false } = {}) {
+      const out = { emails: 0, digests: 0 };
+      const users = await db.all(`SELECT DISTINCT workspace_id, user_email FROM notifications WHERE (email_state = 'pending' AND created_at <= ?) OR (email_state = 'sending' AND emailed_at < ?) LIMIT 20 /* ws:system */`,
+        force ? now : now - (cfg.notify?.batchMs ?? 60000), now - 15 * 60000);
+      for (const u of users) {
+        if (budget && !budget.has({ fetches: 2, queries: 6 })) break;
+        out.emails += await scope(u.workspace_id).notifications.flushEmail(u.user_email, { now, force }).catch((e) => { log('warn', `alerts ${u.workspace_id}: ${e.message}`); return 0; });
+      }
+      const due = await db.all(`SELECT workspace_id, user_email FROM notification_prefs WHERE digest = 1 /* ws:system */`);
+      for (const u of due) {
+        if (budget && !budget.has({ fetches: 2, queries: 12 })) break;
+        if (await scope(u.workspace_id).notifications.digestIfDue(u.user_email, { now }).catch((e) => { log('warn', `digest ${u.workspace_id}: ${e.message}`); return false; })) out.digests++;
+      }
+      return out;
+    },
+
     /** Housekeeping: token refresh/health (per workspace), audit pruning, expired upload sessions. */
     async maintenance({ budget = null } = {}) {
       for (const ws of await allWorkspaceIds()) {
@@ -187,6 +228,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
         await sc.integrations.maintain({ budget }).catch((e) => log('warn', `maintenance ${ws}: ${e.message}`));
       }
       await createAudit({ db }).prune();
+      await db.run('DELETE FROM notifications WHERE created_at < ? /* ws:system */', Date.now() - (cfg.notify?.retentionDays ?? 90) * 86400000).catch(() => {});
       await rootMedia.cleanupUploads().catch(() => {});
     },
 
@@ -202,6 +244,10 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
         out.series = await core.fillSeries({ budget });
       }
       out.webhooks = await delivery.deliverDue({ limit: cfg.budget.webhooks, budget });
+      if (budget.has({ fetches: 2, queries: 8 })) {
+        const a = await core.deliverNotifications({ budget }).catch((e) => { log('warn', `alerts: ${e.message}`); return null; });
+        if (a && (a.emails || a.digests)) out.alerts = a;
+      }
       if (budget.has({ fetches: 15, queries: 15 })) out.analytics = Object.keys(await analyticsLoop.syncDue({ budget })).length;
       if (cfg.mediaPurge?.enabled && budget.has({ fetches: 6, queries: 14 })) {
         const lastPurge = Number((await db.getSetting('media_purge_at', '0')) || 0);
@@ -233,11 +279,16 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
         const rep = setInterval(() => { core.fillSeries().catch(() => {}); }, 10 * 60000);
         rep.unref?.();
         core._series = rep;
+        const alerts = setInterval(() => { core.deliverNotifications().catch(() => {}); }, 60000);
+        alerts.unref?.();
+        core._alerts = alerts;
       })();
     },
     async stop() {
       clearInterval(core._maint);
       clearInterval(core._series);
+      clearInterval(core._alerts);
+      clearTimeout(flushTimer);
       analyticsLoop.stop();
       delivery.stop();
       await scheduler.stop();

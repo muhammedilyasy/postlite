@@ -36,5 +36,8 @@
     "PUBLIC_URL": "",
     "DEFAULT_TIMEZONE": "UTC"
   },
+  // Optional alert emails: either the RESEND_API_KEY secret + an EMAIL_FROM var, or Cloudflare Email Routing's
+  // send_email binding (destination addresses must be verified in Email Routing):
+  // "send_email": [{ "name": "SEND_EMAIL" }],
   "observability": { "enabled": true }
 }

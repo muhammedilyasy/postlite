@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { startWorker, hasWrangler } from './harness.js';
 import { hashPasswordPbkdf2 } from '../src/crypto.js';
 import { makeJpeg } from '../test/helpers.js';
+import { startFake } from '../test/fake/server.js';
 
 const PASSWORD = 'workers features correct horse';
 const skip = !hasWrangler() && 'wrangler devDependency not installed (npm install)';
@@ -19,7 +20,9 @@ async function oauth(provider) {
 
 before(async () => {
   if (skip) return;
-  w = await startWorker({ profile: false, vars: { ADMIN_PASSWORD_HASH: await hashPasswordPbkdf2(PASSWORD) } });
+  const fake = await startFake();
+  // Alerts by email through Resend (fake endpoint); password mode → ADMIN_EMAIL is the recipient.
+  w = await startWorker({ fake, profile: false, vars: { ADMIN_PASSWORD_HASH: await hashPasswordPbkdf2(PASSWORD), RESEND_API_KEY: 're_test_key', RESEND_API_URL: `${fake.url}/resend`, EMAIL_FROM: 'postlite <alerts@example.com>', ADMIN_EMAIL: 'owner@example.com', NOTIFY_BATCH_SECONDS: '0' } });
   const r1 = await fetch(`${w.base}/login`);
   const csrfCookie = /pl_lcsrf=([^;]+)/.exec(r1.headers.get('set-cookie'))[1];
   const csrf = /name="csrf" value="([^"]+)"/.exec(await r1.text())[1];
@@ -125,6 +128,33 @@ test('Workers/D1: repeating posts — create with repeat, rolling occurrences, c
   assert.equal(st.json.removed_occurrences, 2);
   s = (await w.api('GET', '/series', { key: admin })).json.series;
   assert.equal(s[0].status, 'stopped');
+});
+
+test('Workers/D1: alerts — failed post via cron → in-app notification + one Resend email (deduped), mark read, prefs, test email, digest', { skip }, async () => {
+  const p0 = (await w.api('GET', '/notifications/prefs', { key: admin })).json;
+  assert.deepEqual([p0.email.configured, p0.email.transport, p0.email.to], [true, 'resend', 'owner@example.com']);
+  const before = (w.fake.state.emails || []).length;
+  // A permanent platform error (no token side effects): the post fails once, for good.
+  w.fake.state.failNext['/page1/feed$'] = { status: 400, body: { error: { message: '(#100) Invalid parameter', type: 'OAuthException', code: 100 } }, times: 1 };
+  const r = await w.api('POST', '/posts', { key: admin, body: { content: 'cf alert', targets: [{ account_id: fb, settings: { post_type: 'post' } }], mode: 'now' } });
+  assert.equal(r.status, 200, r.text);
+  const gid = r.json.post.id;
+  const n = await w.cronUntil(async () => (await w.api('GET', '/notifications', { key: admin })).json.notifications.find((x) => x.kind === 'post_failed' && x.link === `#/posts/${gid}`), { tries: 30 });
+  assert.match(n.title, /Post failed on/);
+  await w.cronUntil(async () => (w.fake.state.emails || []).length > before, { tries: 10 });
+  await w.cron(); await w.cron();
+  const mails = w.fake.state.emails.slice(before);
+  assert.equal(mails.filter((m) => m.text.includes(`#/posts/${gid}`)).length, 1, 'one email per failure');
+  assert.deepEqual(mails[0].to, ['owner@example.com']);
+  const all = await w.api('POST', '/notifications/read', { key: admin, body: { all: true } });
+  assert.deepEqual([all.status, all.json.unread], [200, 0]);
+  const up = await w.api('PATCH', '/notifications/prefs', { key: admin, body: { digest: true, digest_time: '00:00' } });
+  assert.equal(up.status, 200, up.text);
+  await w.cronUntil(async () => (await w.api('GET', '/notifications', { key: admin })).json.notifications.find((x) => x.kind === 'digest'), { tries: 5 });
+  const te = await w.api('POST', '/notifications/test', { key: admin, body: {} });
+  assert.equal(te.status, 200, te.text);
+  assert.ok(w.fake.state.emails.some((m) => m.subject === 'postlite: Test email from postlite'));
+  await w.api('PATCH', '/notifications/prefs', { key: admin, body: { digest: false } });
 });
 
 // Runs last: wipes the workspace.

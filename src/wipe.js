@@ -11,7 +11,7 @@ import { normEmail } from './tenant.js';
  * Tables with a workspace_id column, children first. Feature migrations add their tables here
  * (tests check that every tenant table is listed).
  */
-export const WIPE_TABLES = ['series', 'group_tags', 'tags', 'signatures', 'post_templates', 'brand_channels', 'brands', 'remote_posts', 'posts', 'groups', 'media', 'uploads', 'oauth_states', 'api_keys', 'webhooks', 'integrations', 'audit_log', 'workspace_settings'];
+export const WIPE_TABLES = ['notifications', 'notification_prefs', 'series', 'group_tags', 'tags', 'signatures', 'post_templates', 'brand_channels', 'brands', 'remote_posts', 'posts', 'groups', 'media', 'uploads', 'oauth_states', 'api_keys', 'webhooks', 'integrations', 'audit_log', 'workspace_settings'];
 
 // Child rows reached through a parent of this workspace (no workspace_id column of their own).
 const CHILDREN = [

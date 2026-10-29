@@ -113,4 +113,12 @@ test('workspaces on D1: each Access email gets its own workspace; the other one\
   assert.equal((await b.call('DELETE', `/webhooks/${hook.json.webhook.id}`)).status, 404);
   assert.notEqual((await b.call('GET', '/settings')).json.settings.timezone, 'Pacific/Auckland');
   assert.equal((await a.call('GET', '/webhooks')).json.webhooks.length, 1);
+  // Alerts: preferences and notifications are per person (D1 notification_prefs / notifications).
+  const ap = await a.call('PATCH', '/notifications/prefs', { digest: true, digest_time: '07:30', post_published: true });
+  assert.equal(ap.status, 200);
+  const bp = (await b.call('GET', '/notifications/prefs')).json;
+  assert.deepEqual([bp.prefs.digest, bp.prefs.post_published, bp.email.to, bp.email.configured], [false, false, FRIEND, false]);
+  assert.equal((await a.call('GET', '/notifications/prefs')).json.email.to, OWNER);
+  assert.equal((await b.call('POST', '/notifications/test', {})).status, 409);
+  assert.deepEqual((await b.call('GET', '/notifications')).json, { notifications: [], unread: 0 });
 });

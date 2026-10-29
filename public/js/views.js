@@ -8,6 +8,7 @@ import { lineChart } from './charts.js';
 import { mediaVisual, removedNote } from './media.js';
 import { brandsSection, brandTags, brandSelect, brandDot } from './brands.js';
 import { channelMenu } from './channels.js';
+import { renderNotificationSettings } from './alerts.js';
 import { tagsSection, tagSelect, signaturesSection, templatesSection } from './content.js';
 
 const fmtTime = fmtDateTime;
@@ -250,6 +251,7 @@ const SETTINGS_TABS = [
   { id: '', label: 'General', href: '#/settings', icon: 'settings' },
   { id: 'api-keys', label: 'API keys', href: '#/settings/api-keys', icon: 'key' },
   { id: 'webhooks', label: 'Webhooks', href: '#/settings/webhooks', icon: 'webhook' },
+  { id: 'notifications', label: 'Notifications', href: '#/settings/notifications', icon: 'bell' },
   { id: 'content', label: 'Content', href: '#/settings/content', icon: 'tag' },
   { id: 'audit', label: 'Audit log', href: '#/settings/audit', icon: 'audit' },
   { id: 'apps', label: 'Platform apps', href: '#/settings/apps', icon: 'apps' },
@@ -267,6 +269,7 @@ export async function renderSettings(root, { tab = '', focus = null } = {}) {
   if (tab === 'webhooks') return renderHooks(body);
   if (tab === 'audit') return renderAudit(body);
   if (tab === 'content') return renderContent(body);
+  if (tab === 'notifications') return renderNotificationSettings(body);
   return renderGeneral(body);
 }
 

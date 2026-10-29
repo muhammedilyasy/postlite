@@ -93,7 +93,12 @@ function instance(env) {
   } else {
     const db = createD1(env.DB);
     const storage = createR2Storage(env.MEDIA);
-    const core = createCore({ cfg, db, storage, runtime, log });
+    // Alerts by email through a Cloudflare send_email binding named SEND_EMAIL (optional; see wrangler.jsonc).
+    const rt = env.SEND_EMAIL ? { ...runtime, sendEmailBinding: async (from, to, raw) => {
+      const { EmailMessage } = await import('cloudflare:email');
+      await env.SEND_EMAIL.send(new EmailMessage(from, to, raw));
+    } } : runtime;
+    const core = createCore({ cfg, db, storage, runtime: rt, log });
     inst = { cfg, core, log, app: null, files: assetFiles(env) };
   }
   instances.set(env, inst);

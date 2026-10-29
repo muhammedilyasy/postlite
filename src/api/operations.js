@@ -568,6 +568,49 @@ export const operations = [
     input: S({ required: ['series_id'], properties: { series_id: id('Series'), delete_future: { type: 'boolean' } } }),
     handler: async (core, i) => core.series.stop(i.series_id, { delete_future: i.delete_future !== false }),
   },
+  // ---- alerts (notifications) ----
+  {
+    name: 'list_notifications', method: 'GET', path: '/notifications', scope: 'read', tags: ['alerts'], readOnly: true,
+    summary: 'List your notifications', description: 'In-app alerts of the signed-in user in this workspace (API keys act for the workspace owner), newest first: failed posts, published posts, accounts that need reconnecting, daily digests. Each has title, body, link (an in-app route such as #/posts/<id>), read, email (null | pending | sent | failed). unread = total unread count; limit 0 returns only the count.',
+    input: S({ properties: { limit: { type: 'integer', minimum: 0, maximum: 200 }, unread_only: { type: 'boolean' }, before: { type: 'integer', description: 'Paging: created_at of the last item you have.' } } }),
+    handler: async (core, i, p) => core.notifications.list(await core.notifications.userFor(p), { limit: i.limit ?? 20, unread_only: !!i.unread_only, before: i.before ?? null }),
+  },
+  {
+    name: 'mark_read', method: 'POST', path: '/notifications/read', scope: 'read', tags: ['alerts'], quiet: true,
+    summary: 'Mark notifications read', description: 'Mark your notifications as read: {ids: [...]} or {all: true}. Returns how many changed.',
+    input: S({ properties: { ids: { type: 'array', items: { type: 'string' }, maxItems: 200 }, all: { type: 'boolean' } } }),
+    handler: async (core, i, p) => {
+      const user = await core.notifications.userFor(p);
+      const marked = await core.notifications.markRead(user, { ids: i.ids, all: !!i.all });
+      return { marked, unread: (await core.notifications.list(user, { limit: 0 })).unread };
+    },
+  },
+  {
+    name: 'get_notification_prefs', method: 'GET', path: '/notifications/prefs', scope: 'read', tags: ['alerts'], readOnly: true,
+    summary: 'Your alert preferences and email status', description: 'prefs: post_failed (default true), post_published (false), account_reconnect (true), digest (false) + digest_time "HH:MM" in the workspace timezone, email (also send alerts by email when the server has email set up). email: {configured, transport smtp|resend|cloudflare|null, to, can_send, reason}.',
+    input: S({ properties: {} }),
+    handler: async (core, i, p) => {
+      const user = await core.notifications.userFor(p);
+      const prefs = await core.notifications.getPrefs(user);
+      return { prefs, email: core.notifications.emailStatus(user, prefs), timezone: (await core.settings.get()).timezone };
+    },
+  },
+  {
+    name: 'update_notification_prefs', method: 'PATCH', path: '/notifications/prefs', scope: 'write', tags: ['alerts'],
+    summary: 'Change your alert preferences', description: 'Any of post_failed, post_published, account_reconnect, digest, email (booleans) and digest_time ("HH:MM", workspace timezone). Applies to the signed-in user only.',
+    input: S({ properties: { post_failed: { type: 'boolean' }, post_published: { type: 'boolean' }, account_reconnect: { type: 'boolean' }, digest: { type: 'boolean' }, digest_time: { type: 'string', pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$' }, email: { type: 'boolean' } } }),
+    handler: async (core, i, p) => {
+      const user = await core.notifications.userFor(p);
+      const prefs = await core.notifications.updatePrefs(user, i);
+      return { prefs, email: core.notifications.emailStatus(user, prefs) };
+    },
+  },
+  {
+    name: 'send_test_email', method: 'POST', path: '/notifications/test', scope: 'write', tags: ['alerts'],
+    summary: 'Send yourself a test email', description: 'Sends a test alert to your own address (the signed-in email; ADMIN_EMAIL in password mode). 409 when email is not set up on the server.',
+    input: S({ properties: {} }),
+    handler: async (core, i, p) => core.notifications.sendTest(await core.notifications.userFor(p)),
+  },
   // ---- signatures & templates ----
   {
     name: 'list_signatures', method: 'GET', path: '/signatures', scope: 'read', tags: ['content'], readOnly: true,
@@ -1284,18 +1327,18 @@ export async function execute(rootCore, op, input, principal, via) {
   const errs = validate(op.input, input || {});
   if (errs.length) {
     const e = new HttpError(400, `Invalid input for ${op.name}:\n• ${errs.join('\n• ')}`, { errors: errs, input_schema: op.input });
-    if (!op.readOnly) await core.audit.record({ principal, via, operation: op.name, status: 400, detail: { errors: errs } });
+    if (!op.readOnly && !op.quiet) await core.audit.record({ principal, via, operation: op.name, status: 400, detail: { errors: errs } });
     throw e;
   }
   try {
     const result = await op.handler(core, input || {}, principal);
     if (!op.readOnly || principal.type === 'api_key') {
-      if (!op.readOnly) await core.audit.record({ principal, via, operation: op.name, target: targetOf(input, result), status: 200, detail: summarize(input) });
+      if (!op.readOnly && !op.quiet) await core.audit.record({ principal, via, operation: op.name, target: targetOf(input, result), status: 200, detail: summarize(input) });
     }
     return result;
   } catch (e0) {
     const e = op.wrapError ? await friendlyValidation(core, e0) : e0;
-    if (!op.readOnly) await core.audit.record({ principal, via, operation: op.name, target: targetOf(input), status: e.status || 500, detail: { error: e.message } });
+    if (!op.readOnly && !op.quiet) await core.audit.record({ principal, via, operation: op.name, target: targetOf(input), status: e.status || 500, detail: { error: e.message } });
     throw e;
   }
 }

@@ -1,6 +1,7 @@
 // Portable configuration: turns an env-like object (process.env on Node, the Worker `env` on
 // Cloudflare) into a config object. No filesystem access here; src/node/config.js adds the paths.
 import { normalizeTeamDomain, parseEmails } from './access.js';
+import { emailConfig } from './email.js';
 
 const num = (v, d) => (v === undefined || v === null || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 const trimSlash = (s) => String(s || '').replace(/\/+$/, '');
@@ -124,5 +125,8 @@ export function getConfig(env = {}, { platform = 'node' } = {}) {
     youtubeChunkBytes: num(E('YOUTUBE_CHUNK_BYTES'), (workers ? 64 : 8) * 1024 * 1024),
     youtubeMaxBytesPerStep: num(E('YOUTUBE_MAX_BYTES_PER_STEP'), workers ? 512 * 1024 * 1024 : 0), // 0 = unlimited
     fetchTimeoutMs: num(E('FETCH_TIMEOUT_MS'), 120000),
+    // Alerts: email transports (SMTP on Node, Resend, Cloudflare send_email) + batching window.
+    email: emailConfig(E),
+    notify: { batchMs: num(E('NOTIFY_BATCH_SECONDS'), 60) * 1000, retentionDays: num(E('NOTIFY_RETENTION_DAYS'), 90) },
   };
 }

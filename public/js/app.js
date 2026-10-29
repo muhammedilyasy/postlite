@@ -7,6 +7,7 @@ import { renderPosts, renderPostDetail } from './posts.js';
 import { renderAccounts, renderApprovals, renderAnalytics, renderSettings } from './views.js';
 import { renderBrand } from './brands.js';
 import { renderMedia } from './library.js';
+import { bellButton, refreshBell } from './alerts.js';
 
 const NAV = [
   ['dashboard', 'Dashboard', 'dashboard'],
@@ -93,6 +94,7 @@ function shell() {
         h('button', { class: 'icon-btn hamburger', 'aria-label': 'Open menu', 'aria-controls': 'sidebar', onclick: openDrawer }, icon('menu', 18)),
         h('nav', { class: 'crumbs', id: 'crumbs', 'aria-label': 'Breadcrumb' }),
         h('div', { class: 'top-actions' },
+          bellButton(),
           h('button', { class: 'btn primary', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (e) => newMenu(e.currentTarget) }, icon('plus', 15), h('span', { class: 'hide-xs' }, 'New'), icon('chevron-down', 14, 'caret')),
           h('button', { class: 'user-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': `Account menu${email ? ` for ${email}` : ''}`, onclick: (e) => userMenu(e.currentTarget) },
             h('span', { class: 'user-av' }, initial), h('span', { class: 'user-email' }, email || 'admin'), icon('chevron-down', 14)))),
@@ -132,6 +134,7 @@ export async function route() {
 }
 
 export async function updateBadge() {
+  refreshBell();
   try {
     const { posts } = await api('GET', '/approvals');
     const b = document.getElementById('approval-badge');

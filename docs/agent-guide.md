@@ -86,6 +86,13 @@ A brand is a named set of channels across platforms (for example "North Star" = 
 - Assign: `create_post {..., tags: ["launch", "promo"]}` (unknown names are created), `update_post {tags}` replaces them, `set_post_tags {post_id, tags, mode: replace|add|remove}` works on published posts too. Posts carry `tags: [{id, name, color}]`.
 - Filter: `list_posts {tag}`, `get_calendar {tag}`, `get_top_posts {tag}` (only posts published through postlite carry tags) and the CSV export (`&tag=`).
 
+## Alerts (notifications)
+
+- Each signed-in person has their own alerts in each workspace (API keys act for the workspace owner). Events: a post target failed (`post_failed`, on by default), a post published (`post_published`, off), an account needs reconnecting (`account_reconnect`, on), and a daily digest (`digest`, off) at `digest_time` ("HH:MM", workspace timezone).
+- `list_notifications {limit?, unread_only?, before?}` → `{notifications: [{id, kind, title, body, link, read, email, created_at}], unread}`. `link` is an in-app route (`#/posts/<id>`, `#/accounts`). `mark_read {ids}` or `{all: true}`.
+- `get_notification_prefs` → `{prefs, email: {configured, transport, to, can_send, reason}, timezone}`; `update_notification_prefs {post_failed?, post_published?, account_reconnect?, digest?, digest_time?, email?}`; `send_test_email` (409 when the server has no email transport).
+- Email is optional and set up by the server owner (Node: `SMTP_HOST/PORT/USER/PASS/FROM`, STARTTLS on 587 or implicit TLS on 465; or `RESEND_API_KEY` + `EMAIL_FROM`; Workers: Resend or a `send_email` binding named `SEND_EMAIL` + `EMAIL_FROM`). Emails go to the signed-in email (password mode: `ADMIN_EMAIL`). Alerts that arrive together are bundled into one email (`NOTIFY_BATCH_SECONDS`, default 60); each failure is emailed at most once. Without email, alerts stay in-app.
+
 ## Repeating posts
 
 - `create_post {..., mode: "schedule", publish_at, repeat: {frequency, interval_days?, until?, count?}}`. frequency: `daily`, `every_n_days` (+`interval_days` 2-6), `weekly`, `biweekly`, `monthly` (the 31st becomes the month's last day). The wall-clock time is kept across DST in the workspace timezone. `count` includes the first post; `until` is the last allowed time. `update_post {repeat}` turns an existing scheduled post into a series.

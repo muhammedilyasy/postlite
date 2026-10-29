@@ -73,6 +73,13 @@ A brand is a named set of channels across platforms (for example "North Star" = 
 - Manage: `list_brands` (also returns `suggestions` from account names that share a prefix; nothing is created automatically), `create_brand {name, color?, account_ids}`, `update_brand {brand_id, name?, color?}`, `set_brand_channels {brand_id, account_ids, mode: replace|add|remove}`, `delete_brand` (the accounts, posts and analytics stay).
 - CLI: `postlite brands list`, `postlite brands create --name "North Star" --accounts id1,id2`, `postlite posts create --brand "North Star" --content "..." --next-slot`.
 
+## Channel preferences (the channel ⋮ menu)
+
+- `update_account {account_id, display_name?, disabled?, posting_slots?}`:
+  - `display_name` renames the channel inside postlite (`null` = platform name). `list_accounts` returns `name` (what to show), `platform_name` and `display_name`.
+  - `disabled: true` pauses publishing without disconnecting (admin scope). Due posts wait: they are not published and not failed. `publish_post_now` and `create_post {mode:"now"}` are refused for that channel, and brand posting skips it (`brand.skipped[].reason = "publishing paused"`). `disabled: false` resumes, and anything that came due meanwhile publishes right away. Targets show `account_paused`.
+  - `posting_slots` sets the channel's own weekly slots (same shape as `update_settings`; `null` = workspace slots). `list_free_slots {account_id}` and `mode: "next_slot"` use the selected channels' slots, and only those channels' posts count as taken.
+
 ## Media library
 
 - `list_media {q?, kind?: image|video|document, usage?: used|unused|purged, limit?, offset?, counts?}` pages through uploads newest first. Each item has `used_by_posts`, `in_use` (an unfinished post or an active repeating post needs it), `deletable` and `purged`. `total` is the number of matches; `counts` (with `counts: true`) gives totals per kind and usage.

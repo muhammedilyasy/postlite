@@ -12,7 +12,7 @@ import { formatLocal, parseLocal } from '/assets/shared/time.js';
 export { relTime };
 const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.name });
 
-export async function openComposer({ groupId = null, at = null, media = null, onSaved = () => {} } = {}) {
+export async function openComposer({ groupId = null, at = null, media = null, accountIds = null, onSaved = () => {} } = {}) {
   const tz = state.settings.timezone;
   const st = { id: null, focusEl: null, content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
   if (groupId) {
@@ -32,6 +32,11 @@ export async function openComposer({ groupId = null, at = null, media = null, on
     const lastBrand = (state.brands || []).find((b) => b.id === localStorage.getItem(LAST_BRAND));
     if (lastBrand) selectBrand(lastBrand);
     if (Array.isArray(media)) st.media = media.filter((m) => m && !m.purged); // "Use in new post" from the media library
+    if (Array.isArray(accountIds)) { // "Create post" from a channel menu: exactly these channels
+      st.targets.clear();
+      for (const id of accountIds) { const a = state.accounts.find((x) => x.id === id); if (a) st.targets.set(a.id, { content_override: null, settings: defaultSettings(a.provider) }); }
+      st.active = accountIds[0] || null;
+    }
   }
 
   const root = h('div', { class: 'composer' });
@@ -47,6 +52,7 @@ export async function openComposer({ groupId = null, at = null, media = null, on
     const thread = a.provider === 'x' ? (t.settings.thread || []).map((x) => ({ text: x.text || '', media: (x.media || []).map((id) => info(st.thumbs.get(id))).filter(Boolean) })) : null;
     const v = validatePost(a.provider, { caption: captionFor(aid), media: st.media.map(info), settings: t.settings, thumbnail: info(thumb), thread, account: { premium: !!a.meta?.premium } });
     if (a.status !== 'active') v.errors.unshift('Account needs to be reconnected.');
+    if (a.disabled) v.warnings.unshift('Publishing to this channel is paused: a scheduled post waits until you resume it, and “Post now” is not possible.');
     if (st.media.some((m) => m?.purged)) v.errors.unshift('Re-upload the media that was removed after publishing.');
     if (st.serverErrors[aid]) v.errors.push(...st.serverErrors[aid].filter((e) => !v.errors.includes(e)));
     return v;
@@ -70,13 +76,13 @@ export async function openComposer({ groupId = null, at = null, media = null, on
           h('div', { class: 'acc-picker' }, state.accounts.length ? state.accounts.map((a) => {
             const on = st.targets.has(a.id);
             return h('button', {
-              type: 'button', class: `acc-pill ${on ? 'on' : ''} ${a.status !== 'active' ? 'warn' : ''}`, disabled: st.locked.has(a.id), 'aria-pressed': on ? 'true' : 'false', title: a.status !== 'active' ? `${a.name}: needs reconnect` : a.name,
+              type: 'button', class: `acc-pill ${on ? 'on' : ''} ${a.status !== 'active' ? 'warn' : ''} ${a.disabled ? 'paused' : ''}`, disabled: st.locked.has(a.id), 'aria-pressed': on ? 'true' : 'false', title: a.status !== 'active' ? `${a.name}: needs reconnect` : a.disabled ? `${a.name}: publishing paused` : a.name,
               onclick: () => {
                 if (on) { st.targets.delete(a.id); if (st.active === a.id) st.active = [...st.targets.keys()][0] || null; }
                 else { st.targets.set(a.id, { content_override: null, settings: defaultSettings(a.provider) }); st.active = a.id; }
                 render();
               },
-            }, avatar(a, 22), h('span', {}, a.name), on ? icon('check-circle', 14, 'pill-check') : null);
+            }, avatar(a, 22), h('span', {}, a.name), a.disabled ? h('span', { class: 'pill-note' }, 'paused') : null, on ? icon('check-circle', 14, 'pill-check') : null);
           }) : h('p', { class: 'muted' }, 'No accounts connected yet. ', h('a', { href: '#/accounts', onclick: () => m.close() }, 'Connect one'), '.')),
           h('div', { class: 'cap-head' }, h('label', { class: 'label', for: 'pl-caption' }, 'Caption'), captionTools({ target: () => (st.focusEl?.isConnected ? st.focusEl : root.querySelector('#pl-caption')), styled: styledTargets() })),
           captionBox(),
@@ -181,7 +187,7 @@ export async function openComposer({ groupId = null, at = null, media = null, on
     return h('div', { class: 'brand-picker', role: 'group', 'aria-label': 'Brands' },
       h('span', { class: 'muted small' }, 'Brand'),
       ordered.map((b) => {
-        const usable = b.channel_ids.filter((id) => state.accounts.some((a) => a.id === id && a.status === 'active') && !st.locked.has(id));
+        const usable = b.channel_ids.filter((id) => state.accounts.some((a) => a.id === id && a.status === 'active' && !a.disabled) && !st.locked.has(id));
         const on = usable.length > 0 && usable.every((id) => st.targets.has(id));
         return h('button', {
           type: 'button', class: `brand-chip ${on ? 'on' : ''}`, 'aria-pressed': on ? 'true' : 'false', disabled: !usable.length,
@@ -191,7 +197,7 @@ export async function openComposer({ groupId = null, at = null, media = null, on
       }));
   }
   function selectBrand(b, select = true) {
-    const accs = state.accounts.filter((a) => b.channel_ids.includes(a.id) && a.status === 'active' && !st.locked.has(a.id));
+    const accs = state.accounts.filter((a) => b.channel_ids.includes(a.id) && a.status === 'active' && !a.disabled && !st.locked.has(a.id));
     for (const a of accs) {
       if (select && !st.targets.has(a.id)) st.targets.set(a.id, { content_override: null, settings: defaultSettings(a.provider) });
       if (!select) st.targets.delete(a.id);

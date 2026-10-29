@@ -62,8 +62,8 @@ export function createBrands({ db, ws }) {
   async function list() {
     const [brands, links] = await Promise.all([
       db.all('SELECT * FROM brands WHERE workspace_id = ? ORDER BY name COLLATE NOCASE', ws),
-      db.all(`SELECT bc.brand_id, i.id, i.provider, i.name, i.picture, i.status FROM brand_channels bc
-        JOIN integrations i ON i.id = bc.integration_id AND i.workspace_id = bc.workspace_id WHERE bc.workspace_id = ? ORDER BY i.provider, i.name`, ws),
+      db.all(`SELECT bc.brand_id, i.id, i.provider, COALESCE(i.display_name, i.name) AS name, i.picture, i.status, i.disabled_at FROM brand_channels bc
+        JOIN integrations i ON i.id = bc.integration_id AND i.workspace_id = bc.workspace_id WHERE bc.workspace_id = ? ORDER BY i.provider, COALESCE(i.display_name, i.name)`, ws),
     ]);
     return brands.map((b) => {
       const channels = links.filter((l) => l.brand_id === b.id).map(({ brand_id, ...c }) => c);

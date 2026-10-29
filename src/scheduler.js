@@ -18,6 +18,10 @@ import { getProvider } from './providers/index.js';
 import { eventStmt, composedMedia } from './posts.js';
 import { purgedMessage } from './retention.js';
 
+// Jobs of a paused channel (integrations.disabled_at) that have not started yet are held: never claimed,
+// never failed as missed. In-flight jobs (phase past 'start') still finish.
+const HELD = "(jobs.phase = 'start' AND EXISTS (SELECT 1 FROM posts hp JOIN integrations hi ON hi.id = hp.integration_id WHERE hp.id = jobs.post_id AND hi.disabled_at IS NOT NULL))";
+
 // Worst-case cost of one job step, used to stop before a Workers invocation runs out of budget.
 const STEP_COST = { fetches: 14, queries: 14 };
 
@@ -53,7 +57,7 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
     const lock = `${workerId}:${randomToken(4)}`;
     const [jobs] = await db.batch([
       [`UPDATE jobs SET state='running', locked_by=?, locked_until=?, updated_at=?
-        WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND run_at <= ? ORDER BY run_at, id LIMIT 1) AND state='queued' RETURNING * /* ws:system */`, lock, t + S.lockTtlMs, t, t],
+        WHERE id = (SELECT id FROM jobs WHERE state = 'queued' AND run_at <= ? AND NOT ${HELD} ORDER BY run_at, id LIMIT 1) AND state='queued' RETURNING * /* ws:system */`, lock, t + S.lockTtlMs, t, t],
       ["UPDATE posts SET status='publishing', updated_at=? WHERE id IN (SELECT post_id FROM jobs WHERE locked_by = ? AND state='running') /* ws:system */", t, lock],
     ]);
     const row = jobs.rows[0];
@@ -79,7 +83,7 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
   /** Fail scheduled posts that are older than the grace window (server down / cron not running). */
   async function failMissed() {
     const cutoff = now() - S.graceMinutes * 60000;
-    const rows = await db.all("SELECT * FROM jobs WHERE state = 'queued' AND phase = 'start' AND attempts = 0 AND run_at < ? /* ws:system */", cutoff);
+    const rows = await db.all(`SELECT * FROM jobs WHERE state = 'queued' AND phase = 'start' AND attempts = 0 AND run_at < ? AND NOT ${HELD} /* ws:system */`, cutoff);
     for (const j of rows) {
       await fail(j, `Missed: the server was not running at the scheduled time (more than ${S.graceMinutes} minutes ago). Use Retry to publish now.`, { onlyIfQueued: true });
     }
@@ -305,7 +309,7 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
     const end = now() + maxMs;
     while (now() < end) {
       await tick();
-      const open = (await db.get("SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running') /* ws:system */")).n;
+      const open = (await db.get(`SELECT COUNT(*) AS n FROM jobs WHERE state IN ('queued','running') AND NOT (state = 'queued' AND ${HELD}) /* ws:system */`)).n;
       if (!active.size && !open) return;
       await new Promise((r) => setTimeout(r, 20));
     }

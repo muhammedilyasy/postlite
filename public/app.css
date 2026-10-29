@@ -905,3 +905,27 @@ code.uri, .uri-row code.uri { border: 0; font: 12.5px var(--mono); word-break: b
   .lib-toolbar .search { width: 100%; }
   .lib-toolbar > .row { width: 100%; }
 }
+
+/* Calendar channel list (desktop): quiet rows, ⋮ on hover/focus */
+.cal-layout.with-rail { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; align-items: start; }
+.cal-main { min-width: 0; }
+.cal-channels { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); padding: 6px; position: sticky; top: 12px; max-height: calc(100vh - 140px); overflow-y: auto; }
+.cc-label { font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); padding: 6px 8px 8px; }
+.cc-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 6px 5px 8px; border: 0; border-radius: var(--r); background: transparent; color: var(--text); text-align: left; cursor: pointer; min-height: 34px; font: inherit; font-size: 13px; }
+.cc-row:hover, .cc-row:focus-visible { background: var(--surface-2); outline: none; }
+.cc-row.on { background: var(--surface-3, var(--surface-2)); }
+.cc-row.paused .avatar { opacity: .5; }
+.cc-all { width: 22px; height: 22px; display: grid; place-items: center; color: var(--text-2); flex: none; }
+.cc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-paused { display: inline-grid; place-items: center; flex: none; color: var(--warn-text); }
+.cc-paused.err { color: var(--err-text); }
+.cc-n { font-size: 11px; color: var(--text-3); flex: none; }
+.cc-more { width: 24px; height: 24px; opacity: 0; flex: none; }
+.cc-row:hover .cc-more, .cc-row:focus-within .cc-more, .cc-row.on .cc-more { opacity: 1; }
+.acc-pill.paused { opacity: .75; }
+.pill-note { font-size: 11px; color: var(--warn-text); }
+.muted-block { opacity: .5; }
+.wide-confirm { max-width: 560px; }
+@media (max-width: 1100px) { .cal-layout.with-rail { grid-template-columns: minmax(0, 1fr); } .cal-channels { display: none; } }
+@media (min-width: 1101px) { .cal-acc-filter { display: none; } }
+@media (hover: none) { .cc-more { opacity: 1; } }

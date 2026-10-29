@@ -5,6 +5,7 @@ import { pageHeader, segmented, emptyState, skeleton, dropdown } from './ui.js';
 import { zonedParts, zonedToUtc, formatLocal } from '/assets/shared/time.js';
 import { listThumb, platformName } from './media.js';
 import { brandSelect } from './brands.js';
+import { channelMenu } from './channels.js';
 
 /** Brand filter lives in the URL hash (#/dashboard?brand=<id>). */
 const hashBrand = () => { const id = new URLSearchParams(location.hash.split('?')[1] || '').get('brand') || ''; return (state.brands || []).find((b) => b.id === id) || null; };
@@ -95,7 +96,7 @@ export async function renderCalendar(root) {
       h('h2', { class: 'toolbar-title' }, title)),
     h('div', { class: 'row gap wrap' },
       (state.brands || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Brand'), brandSelect(brand?.id || '', (v) => { setHashBrand(v); if (v && view.filter && !state.brands.find((b) => b.id === v)?.channel_ids.includes(view.filter)) view.filter = ''; renderCalendar(root); })) : null,
-      h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Account'),
+      h('label', { class: 'select-wrap cal-acc-filter' }, h('span', { class: 'sr-only' }, 'Account'),
         h('select', { class: 'input slim', onchange: (e) => { view.filter = e.target.value; renderCalendar(root); } },
           h('option', { value: '' }, brand ? `All ${brand.name} channels` : 'All accounts'), state.accounts.filter((a) => !brand || brand.channel_ids.includes(a.id)).map((a) => h('option', { value: a.id, selected: view.filter === a.id }, `${a.name} · ${PROVIDER_META[a.provider].label}`)))),
       segmented([['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['list', 'List']], view.mode, (m) => { view.mode = m; localStorage.setItem('pl_view', m); renderCalendar(root); }, { label: 'Calendar view' })));
@@ -106,7 +107,21 @@ export async function renderCalendar(root) {
   const entries = data.entries.filter((e) => inBrand(e) && (!view.filter || e.integration_id === view.filter));
   const refresh = () => renderCalendar(root);
   const body = view.mode === 'week' ? weekView(from, entries, tz, refresh) : view.mode === 'day' ? dayView(from, entries, tz, refresh) : view.mode === 'month' ? monthView(from, entries, tz, refresh) : listView(entries, data.undated_drafts.filter((e) => inBrand(e) && (!view.filter || e.integration_id === view.filter)), tz, refresh);
-  mount(root, toolbar, body);
+  // Channel list (desktop): click to filter, ⋮ for the channel menu.
+  const chans = state.accounts.filter((a) => !brand || brand.channel_ids.includes(a.id));
+  const rail = chans.length ? h('aside', { class: 'cal-channels', 'aria-label': 'Channels' },
+    h('div', { class: 'cc-label' }, 'Channels'),
+    h('button', { type: 'button', class: `cc-row ${!view.filter ? 'on' : ''}`, onclick: () => { view.filter = ''; renderCalendar(root); } }, h('span', { class: 'cc-all' }, icon('grid', 14)), h('span', { class: 'cc-name' }, brand ? `All ${brand.name}` : 'All channels'), h('span', { class: 'cc-n mono' }, entries.length && !view.filter ? entries.length : '')),
+    chans.map((a) => {
+      const n = data.entries.filter((e) => e.integration_id === a.id).length;
+      return h('div', { class: `cc-row ${view.filter === a.id ? 'on' : ''} ${a.disabled ? 'paused' : ''}`, role: 'button', tabindex: '0', title: a.disabled ? `${a.name} · publishing paused` : a.name,
+        onclick: () => { view.filter = view.filter === a.id ? '' : a.id; renderCalendar(root); },
+        onkeydown: (ev) => { if (ev.key === 'Enter') { view.filter = view.filter === a.id ? '' : a.id; renderCalendar(root); } } },
+      avatar(a, 22), h('span', { class: 'cc-name' }, a.name), a.disabled ? h('span', { class: 'cc-paused', title: 'Publishing paused' }, icon('pause', 12)) : a.status !== 'active' ? h('span', { class: 'cc-paused err', title: 'Needs reconnect' }, icon('alert', 12)) : null,
+      h('span', { class: 'cc-n mono' }, n || ''),
+      h('button', { type: 'button', class: 'icon-btn cc-more', 'aria-label': `Channel actions for ${a.name}`, 'aria-haspopup': 'menu', onclick: (ev) => { ev.stopPropagation(); channelMenu(ev.currentTarget, a, { refresh }); } }, icon('more', 14)));
+    })) : null;
+  mount(root, toolbar, h('div', { class: `cal-layout ${rail ? 'with-rail' : ''}` }, rail, h('div', { class: 'cal-main' }, body)));
   if (view.mode === 'week' || view.mode === 'day') {
     const sc = root.querySelector('.week-scroll');
     // Day view opens at the first post (or the current hour today); week view at 07:00.

@@ -55,6 +55,26 @@ test('Workers/D1: media library filters, usage and bulk delete', { skip }, async
   assert.equal(r.json.skipped[0].media_id, used);
 });
 
+test('Workers/D1: channel preferences — rename, pause holds due posts through the cron, resume publishes, own slots', { skip }, async () => {
+  const r = await w.api('PATCH', `/accounts/${fb}`, { key: admin, body: { display_name: 'CF Page', posting_slots: { mon: ['06:45'], tue: ['06:45'], wed: ['06:45'], thu: ['06:45'], fri: ['06:45'], sat: ['06:45'], sun: ['06:45'] } } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.account.name, 'CF Page');
+  const slots = await w.api('GET', `/slots?count=2&account_id=${fb}`, { key: admin });
+  assert.ok(slots.json.channel_slots && slots.json.slots.every((x) => x.local.endsWith('06:45')), slots.text);
+  await w.api('PATCH', `/accounts/${fb}`, { key: admin, body: { disabled: true } });
+  const p = await w.api('POST', '/posts', { key: admin, body: { content: 'held while paused', targets: [{ account_id: fb }], mode: 'schedule', publish_at: Date.now() + 1000 } });
+  assert.equal(p.status, 200, p.text);
+  await new Promise((res) => setTimeout(res, 1500));
+  await w.cron();
+  await w.cron();
+  let g = (await w.api('GET', `/posts/${p.json.post.id}`, { key: admin })).json.post;
+  assert.equal(g.targets[0].status, 'scheduled');
+  assert.equal(g.targets[0].account_name, 'CF Page');
+  await w.api('PATCH', `/accounts/${fb}`, { key: admin, body: { disabled: false } });
+  await w.cronUntil(async () => (await w.api('GET', `/posts/${p.json.post.id}`, { key: admin })).json.post.targets[0].status === 'published');
+  await w.api('PATCH', `/accounts/${fb}`, { key: admin, body: { posting_slots: null } });
+});
+
 // Runs last: wipes the workspace.
 test('Workers/D1: delete workspace data removes accounts, posts and keys, then the key stops working', { skip }, async () => {
   const p = await w.api('POST', '/posts', { key: admin, body: { content: 'to be wiped', targets: [{ account_id: fb }], mode: 'schedule', publish_at: Date.now() + 86400000 } });

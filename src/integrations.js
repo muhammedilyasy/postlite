@@ -17,13 +17,13 @@ export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeed
   if (!ws) throw new Error('createIntegrations: workspace id required');
   const safeMeta = (m) => ({ page_id: m.page_id, page_name: m.page_name, user_token_expires_at: m.user_token_expires_at, premium: m.premium, has_refresh: m.has_refresh, refresh_expires_at: m.refresh_expires_at, urn: m.urn });
   const publicRow = (r) => r && {
-    id: r.id, provider: r.provider, external_id: r.external_id, name: r.name, username: r.username, picture: r.picture,
-    status: r.status, status_message: r.status_message, token_expires_at: r.token_expires_at, meta: safeMeta(JSON.parse(r.meta || '{}')),
+    id: r.id, provider: r.provider, external_id: r.external_id, name: r.display_name || r.name, platform_name: r.name, display_name: r.display_name || null, username: r.username, picture: r.picture,
+    status: r.status, status_message: r.status_message, disabled: !!r.disabled_at, disabled_at: r.disabled_at || null, posting_slots: r.posting_slots ? JSON.parse(r.posting_slots) : null, token_expires_at: r.token_expires_at, meta: safeMeta(JSON.parse(r.meta || '{}')),
     created_at: r.created_at, updated_at: r.updated_at, last_checked_at: r.last_checked_at,
   };
 
   const api = {
-    list: async () => (await db.all('SELECT * FROM integrations WHERE workspace_id = ? ORDER BY provider, name', ws)).map(publicRow),
+    list: async () => (await db.all('SELECT * FROM integrations WHERE workspace_id = ? ORDER BY provider, COALESCE(display_name, name)', ws)).map(publicRow),
     get: async (id) => publicRow(await db.get('SELECT * FROM integrations WHERE id = ? AND workspace_id = ?', String(id ?? ''), ws)),
     rawGet: (id) => db.get('SELECT * FROM integrations WHERE id = ? AND workspace_id = ?', String(id ?? ''), ws),
 
@@ -53,6 +53,28 @@ export function createIntegrations({ db, cfg, cipher, ws, log = () => {}, onNeed
               VALUES(?,?,?,?,?,?,?,?,?,?,'active',?,?,?)`,
         id, ws, provider, a.external_id, a.name || '', a.username || '', a.picture || '', enc[0], enc[1], a.token_expires_at ?? null, JSON.stringify(a.meta || {}), now, now);
       return id;
+    },
+
+    /** Channel preferences: rename (null = platform name), pause publishing, own posting slots (null = workspace slots). */
+    async setPrefs(id, { display_name, disabled, posting_slots } = {}) {
+      const r = await api.rawGet(id);
+      if (!r) throw new HttpError(404, 'Account not found.');
+      const sets = [], args = [];
+      if (display_name !== undefined) {
+        const n = display_name === null ? null : String(display_name).replace(/\s+/g, ' ').trim();
+        if (n !== null && n.length > 80) throw new HttpError(400, 'display_name must be at most 80 characters.');
+        sets.push('display_name = ?'); args.push(n || null);
+      }
+      if (disabled !== undefined) { sets.push('disabled_at = ?'); args.push(disabled ? (r.disabled_at || Date.now()) : null); }
+      if (posting_slots !== undefined) { sets.push('posting_slots = ?'); args.push(posting_slots === null ? null : JSON.stringify(posting_slots)); }
+      if (!sets.length) return api.get(id);
+      await db.run(`UPDATE integrations SET ${sets.join(', ')}, updated_at = ? WHERE id = ? AND workspace_id = ?`, ...args, Date.now(), id, ws);
+      // Resumed: posts that came due while paused publish now (instead of being failed as missed).
+      if (disabled === false && r.disabled_at) {
+        const t = Date.now();
+        await db.run("UPDATE jobs SET run_at = ?, updated_at = ? WHERE state = 'queued' AND phase = 'start' AND run_at < ? AND post_id IN (SELECT id FROM posts WHERE integration_id = ? AND workspace_id = ?)", t, t, t, id, ws);
+      }
+      return api.get(id);
     },
 
     async remove(id) {

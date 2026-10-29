@@ -307,7 +307,7 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
       const metrics = await latestPostMetrics(id);
       const rows = await db.all('SELECT * FROM remote_posts WHERE workspace_id = ? AND integration_id = ? AND (published_at IS NULL OR (published_at >= ? AND published_at <= ?))', ws, id, from, to);
       for (const r of rows) {
-        out.push({ integration_id: id, provider: integ.provider, account: integ.name, external_id: r.external_id, post_id: r.post_id, kind: r.kind, caption: r.caption, permalink: r.permalink, thumbnail: r.thumbnail || (integ.provider === 'youtube' ? ytThumb(null, r.external_id) : ''), published_at: r.published_at, via_postlite: !!r.post_id, metrics: metrics[r.external_id] || {} });
+        out.push({ integration_id: id, provider: integ.provider, account: integ.display_name || integ.name, external_id: r.external_id, post_id: r.post_id, kind: r.kind, caption: r.caption, permalink: r.permalink, thumbnail: r.thumbnail || (integ.provider === 'youtube' ? ytThumb(null, r.external_id) : ''), published_at: r.published_at, via_postlite: !!r.post_id, metrics: metrics[r.external_id] || {} });
       }
     }
     out.sort((a, b) => (b.metrics[sort] ?? -1) - (a.metrics[sort] ?? -1));
@@ -331,7 +331,7 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
     const integ = await integrations.rawGet(integrationId);
     if (!integ) throw new HttpError(404, 'Account not found.');
     const rows = await db.all(`SELECT day, metric, value FROM account_metrics WHERE integration_id = ? AND ${OWN} AND day >= ? AND day <= ? ORDER BY day, metric`, integrationId, ws, dayStr(from), dayStr(to));
-    return ['account,provider,day,metric,value', ...rows.map((r) => [integ?.name, integ?.provider, r.day, r.metric, r.value].map(csvCell).join(','))].join('\n') + '\n';
+    return ['account,provider,day,metric,value', ...rows.map((r) => [integ?.display_name || integ?.name, integ?.provider, r.day, r.metric, r.value].map(csvCell).join(','))].join('\n') + '\n';
   }
 
   async function csvPosts(opts) {

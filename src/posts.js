@@ -65,7 +65,7 @@ export function createPosts({ db, media, integrations, ws }) {
   if (!ws) throw new Error('createPosts: workspace id required');
   const event = (postId, level, message) => db.run(...eventStmt(postId, level, message));
 
-  const SELECT = `SELECT p.*, i.provider, i.name, i.picture, i.status AS istatus, i.meta AS imeta, j.state AS job_state, j.run_at
+  const SELECT = `SELECT p.*, i.provider, COALESCE(i.display_name, i.name) AS name, i.picture, i.status AS istatus, i.disabled_at AS idisabled, i.meta AS imeta, j.state AS job_state, j.run_at
                   FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id LEFT JOIN jobs j ON j.post_id = p.id`;
   // Every use is `${SELECT} WHERE p.workspace_id = ? AND …`.
 
@@ -108,7 +108,7 @@ export function createPosts({ db, media, integrations, ws }) {
       id: p.id, group_id: p.group_id, integration_id: p.integration_id, account_id: p.integration_id, provider: p.provider, account_name: p.name, account_picture: p.picture, account_status: p.istatus,
       content_override: p.content_override, media_override: parse(p.media_override, null), settings: c.settings,
       caption: c.caption, media: c.media.map(media.view), publish_at: p.publish_at, status: p.status, external_id: p.external_id,
-      published_url: p.published_url, published_at: p.published_at, error: p.error, warning: p.warning, attempts: p.attempts,
+      published_url: p.published_url, published_at: p.published_at, error: p.error, warning: p.warning, attempts: p.attempts, account_paused: !!p.idisabled,
       job_state: p.job_state || null, next_run_at: p.run_at || null, created_at: p.created_at, updated_at: p.updated_at,
     };
   };
@@ -204,6 +204,7 @@ export function createPosts({ db, media, integrations, ws }) {
         const c = composeWith(fake, g0, mediaMap);
         if (action !== 'draft') {
           if (ig.status !== 'active') (errors[ig.id] ||= []).push(`${ig.name}: account needs to be reconnected.`);
+          if (ig.disabled_at && action === 'now') (errors[ig.id] ||= []).push(`${ig.display_name || ig.name}: publishing to this channel is paused. Resume it (channel menu → Enable) or schedule the post; scheduled posts wait until it is resumed.`);
           const v = validateComposed(ig.provider, c, ig.meta);
           if (v.errors.length) (errors[ig.id] ||= []).push(...v.errors);
         }
@@ -330,8 +331,8 @@ export function createPosts({ db, media, integrations, ws }) {
       const needle = String(q || '').trim();
       if (needle) {
         const like = `%${needle.replace(/[!%_]/g, (c) => `!${c}`)}%`;
-        where.push("(g.content LIKE ? ESCAPE '!' OR COALESCE(p.content_override, '') LIKE ? ESCAPE '!' OR COALESCE(json_extract(p.settings, '$.title'), '') LIKE ? ESCAPE '!' OR i.name LIKE ? ESCAPE '!')");
-        args.push(like, like, like, like);
+        where.push("(g.content LIKE ? ESCAPE '!' OR COALESCE(p.content_override, '') LIKE ? ESCAPE '!' OR COALESCE(json_extract(p.settings, '$.title'), '') LIKE ? ESCAPE '!' OR i.name LIKE ? ESCAPE '!' OR COALESCE(i.display_name, '') LIKE ? ESCAPE '!')");
+        args.push(like, like, like, like, like);
       }
       const dir = sort === 'asc' || sort === 'desc' ? sort.toUpperCase() : from !== null && from !== undefined ? 'ASC' : 'DESC';
       const rows = await db.all(`SELECT p.group_id, ${dir === 'ASC' ? 'MIN' : 'MAX'}(COALESCE(p.published_at, p.publish_at, p.updated_at)) AS t, GROUP_CONCAT(p.id) AS ids
@@ -388,11 +389,12 @@ export function createPosts({ db, media, integrations, ws }) {
 
     /** Retry a failed post, or publish a draft/scheduled post immediately. */
     async publishNow(postId, { retry = false, principal = null } = {}) {
-      const p = await db.get('SELECT p.*, i.provider, i.status AS istatus, i.meta AS imeta FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.id = ? AND p.workspace_id = ?', postId, ws);
+      const p = await db.get('SELECT p.*, i.provider, i.status AS istatus, i.meta AS imeta, i.disabled_at AS idisabled FROM posts p JOIN integrations i ON i.id = p.integration_id AND i.workspace_id = p.workspace_id WHERE p.id = ? AND p.workspace_id = ?', postId, ws);
       if (!p) throw new HttpError(404, 'Not found');
       if (LOCKED.has(p.status)) throw new HttpError(409, `Post is already ${p.status}.`);
       if (retry && p.status !== 'failed') throw new HttpError(409, 'Only failed posts can be retried.');
       if (p.istatus !== 'active') throw new HttpError(409, 'Reconnect the account first.');
+      if (p.idisabled) throw new HttpError(409, 'Publishing to this channel is paused. Enable the channel first (channel menu → Enable publishing).');
       const c = await composed(p);
       assertNotPurged(composedMedia(c), { retry });
       const v = validateComposed(p.provider, c, p.imeta);

@@ -134,11 +134,35 @@ async function friendlyValidation(core, e) {
   return e;
 }
 
-async function nextSlotTime(core, from = Date.now()) {
+/**
+ * Effective weekly slots for a set of channels: each channel's own slots (channel ⋮ → Edit time slots) or the
+ * workspace slots; several channels → the union. Taken = a scheduled/pending post on any of them that minute
+ * (no channels = workspace slots, any post counts).
+ */
+async function slotPlan(core, accountIds = []) {
   const s = await core.settings.get();
-  const taken = new Set((await core.db.all("SELECT publish_at FROM posts WHERE workspace_id = ? AND status IN ('scheduled','pending_approval') AND publish_at >= ?", core.workspaceId, from)).map((r) => Math.floor(r.publish_at / 60000)));
-  const [t] = nextSlots(s.posting_slots, s.timezone, { from, count: 1, isTaken: (ms) => taken.has(Math.floor(ms / 60000)) });
-  if (!t) throw new HttpError(409, 'No free posting slot in the next 60 days. Add slots with update_settings(posting_slots).');
+  const ids = [...new Set((accountIds || []).filter(Boolean).map(String))];
+  let slots = s.posting_slots;
+  let own = false;
+  if (ids.length) {
+    const accs = (await core.integrations.list()).filter((a) => ids.includes(a.id));
+    if (accs.some((a) => a.posting_slots)) {
+      own = true;
+      slots = {};
+      for (const a of accs) for (const [d, times] of Object.entries(a.posting_slots || s.posting_slots)) slots[d] = [...new Set([...(slots[d] || []), ...times])].sort();
+    }
+  }
+  const rows = ids.length
+    ? await core.db.all(`SELECT publish_at FROM posts WHERE workspace_id = ? AND status IN ('scheduled','pending_approval') AND publish_at >= ? AND integration_id IN (${ids.map(() => '?').join(',')})`, core.workspaceId, Date.now() - 60000, ...ids)
+    : await core.db.all("SELECT publish_at FROM posts WHERE workspace_id = ? AND status IN ('scheduled','pending_approval') AND publish_at >= ?", core.workspaceId, Date.now() - 60000);
+  const taken = new Set(rows.map((r) => Math.floor(r.publish_at / 60000)));
+  return { tz: s.timezone, slots, own, isTaken: (ms) => taken.has(Math.floor(ms / 60000)) };
+}
+
+async function nextSlotTime(core, from = Date.now(), accountIds = []) {
+  const plan = await slotPlan(core, accountIds);
+  const [t] = nextSlots(plan.slots, plan.tz, { from, count: 1, isTaken: plan.isTaken });
+  if (!t) throw new HttpError(409, 'No free posting slot in the next 60 days. Add slots with update_settings(posting_slots) or the channel\'s own slots (update_account posting_slots).');
   return t;
 }
 
@@ -153,8 +177,8 @@ async function brandTargets(core, input) {
   if (!input.brand_id) return null;
   const b = await core.brands.mustFind(input.brand_id);
   const explicit = new Map((input.targets || []).map((t) => [t.account_id, t]));
-  const active = b.channels.filter((c) => c.status === 'active');
-  const skipped = b.channels.filter((c) => c.status !== 'active').map((c) => ({ account_id: c.id, name: c.name, provider: c.provider, reason: 'needs reconnect' }));
+  const active = b.channels.filter((c) => c.status === 'active' && !c.disabled_at);
+  const skipped = b.channels.filter((c) => c.status !== 'active' || c.disabled_at).map((c) => ({ account_id: c.id, name: c.name, provider: c.provider, reason: c.status !== 'active' ? 'needs reconnect' : 'publishing paused' }));
   const targets = [...active.map((c) => explicit.get(c.id) || { account_id: c.id }), ...(input.targets || []).filter((t) => !active.some((c) => c.id === t.account_id))];
   if (!targets.length) throw new HttpError(409, `Brand "${b.name}" has no connected channels${skipped.length ? ' (all need a reconnect)' : ''}. Add channels with set_brand_channels.`);
   return { targets, brand: { id: b.id, name: b.name, channels: active.length, ...(skipped.length ? { skipped } : {}) } };
@@ -197,7 +221,7 @@ async function toSaveInput(core, input, existing, principal) {
   }
   if (mode !== 'draft') need(principal, 'publish');
   let publish_at = parseTime(input.publish_at, tz) ?? existing?.publish_at ?? null;
-  if (mode === 'next_slot') { publish_at = await nextSlotTime(core); mode = 'schedule'; }
+  if (mode === 'next_slot') { publish_at = await nextSlotTime(core, Date.now(), (input.targets || existing?.targets?.map((t) => ({ account_id: t.integration_id })) || []).map((t) => t.account_id)); mode = 'schedule'; }
   if (mode === 'schedule' && !publish_at) throw new HttpError(400, 'mode "schedule" needs publish_at. Or use mode "next_slot" / "now".');
   const prevTargets = Object.fromEntries((existing?.targets || []).map((t) => [t.integration_id, t]));
   const accounts = new Map((await core.integrations.list()).map((a) => [a.id, a]));
@@ -383,6 +407,28 @@ export const operations = [
       if (!(await core.integrations.get(i.account_id))) throw new HttpError(404, 'Account not found.');
       await core.integrations.remove(i.account_id);
       return { deleted: true };
+    },
+  },
+  {
+    name: 'update_account', method: 'PATCH', path: '/accounts/{account_id}', scope: 'write', tags: ['accounts'],
+    summary: 'Channel preferences: rename, pause publishing, own time slots',
+    description: 'display_name renames the channel inside postlite (null = the platform name again; reconnecting never overwrites it). disabled=true pauses publishing without disconnecting: due posts wait (they are neither published nor failed) and post-now is refused; disabled=false resumes and publishes anything that came due meanwhile right away. Pausing needs the admin scope. posting_slots sets this channel\'s own weekly slots used by next_slot / list_free_slots (same shape as update_settings posting_slots; null = workspace slots). Example: {"account_id":"<id>","display_name":"North Star · IG","posting_slots":{"mon":["08:00","19:30"],"sat":[]}}.',
+    input: S({ required: ['account_id'], properties: { account_id: id('Account'), display_name: { type: ['string', 'null'], description: 'Name shown in postlite (≤ 80 chars); null resets.' }, disabled: { type: 'boolean', description: 'Pause (true) or resume (false) publishing to this channel.' }, posting_slots: { type: ['object', 'null'], additionalProperties: { type: 'array', items: { type: 'string' } }, description: 'Weekday → ["HH:MM", ...] (24h, workspace timezone); null = use the workspace slots.' } } }),
+    handler: async (core, i, p) => {
+      if (i.disabled !== undefined) need(p, 'admin');
+      let slots = i.posting_slots;
+      if (slots) {
+        const clean = {};
+        for (const [d, times] of Object.entries(slots)) {
+          if (!['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].includes(d)) throw new HttpError(400, `Unknown weekday "${d}". Use mon..sun.`);
+          for (const t of times) if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) throw new HttpError(400, `Invalid time "${t}" for ${d}; use 24h "HH:MM".`);
+          clean[d] = [...new Set(times)].sort();
+        }
+        slots = clean;
+      }
+      const account = await core.integrations.setPrefs(i.account_id, { display_name: i.display_name, disabled: i.disabled, posting_slots: slots });
+      core.scheduler.poke?.();
+      return { account };
     },
   },
   // ---- brands (named sets of channels; not post groups) ----
@@ -805,14 +851,15 @@ export const operations = [
   },
   {
     name: 'list_free_slots', method: 'GET', path: '/slots', scope: 'read', tags: ['settings'], readOnly: true,
-    summary: 'Next free posting slots', description: 'Next N posting slots not already taken by a scheduled/pending post. Use for "plan a week of posts".',
-    input: S({ properties: { count: { type: 'integer', minimum: 1, maximum: 100 }, from: timeInput('Start searching from (default now).') } }),
+    summary: 'Next free posting slots', description: 'Next N posting slots not already taken by a scheduled/pending post. With account_id (one or more, comma-separated), uses those channels\' own time slots (update_account posting_slots; workspace slots when a channel has none) and only their posts count as taken. Use for "plan a week of posts" or "add to the queue of this channel".',
+    input: S({ properties: { count: { type: 'integer', minimum: 1, maximum: 100 }, from: timeInput('Start searching from (default now).'), account_id: { type: ['array', 'string'], items: { type: 'string' }, description: 'Channel id(s) whose slots to use.' } } }),
     handler: async (core, i) => {
       const s = await core.settings.get();
       const from = parseTime(i.from, s.timezone, 'from') ?? Date.now();
-      const taken = new Set((await core.db.all("SELECT publish_at FROM posts WHERE workspace_id = ? AND status IN ('scheduled','pending_approval') AND publish_at >= ?", core.workspaceId, from)).map((r) => Math.floor(r.publish_at / 60000)));
-      const slots = nextSlots(s.posting_slots, s.timezone, { from, count: i.count || 7, isTaken: (ms) => taken.has(Math.floor(ms / 60000)) });
-      return { timezone: s.timezone, slots: slots.map((t) => ({ at: new Date(t).toISOString(), local: formatLocal(t, s.timezone), epoch_ms: t })) };
+      const ids = i.account_id ? (Array.isArray(i.account_id) ? i.account_id : String(i.account_id).split(',')).map((x) => x.trim()).filter(Boolean) : [];
+      const plan = await slotPlan(core, ids);
+      const slots = nextSlots(plan.slots, plan.tz, { from, count: i.count || 7, isTaken: plan.isTaken });
+      return { timezone: s.timezone, channel_slots: plan.own, slots: slots.map((t) => ({ at: new Date(t).toISOString(), local: formatLocal(t, s.timezone), epoch_ms: t })) };
     },
   },
   // ---- analytics ----

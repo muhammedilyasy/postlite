@@ -7,6 +7,7 @@ import { pageHeader, tabs, segmented, emptyState, skeleton, dropdown, idChip, co
 import { lineChart } from './charts.js';
 import { mediaVisual, removedNote } from './media.js';
 import { brandsSection, brandTags, brandSelect, brandDot } from './brands.js';
+import { channelMenu } from './channels.js';
 
 const fmtTime = fmtDateTime;
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
@@ -20,22 +21,17 @@ export async function renderAccounts(root, params = {}) {
   const refresh = () => renderAccounts(root);
   const connect = connectList(state.providers);
 
-  const menuFor = (a) => (e) => dropdown(e.currentTarget, [
-    { label: 'Check token', icon: 'refresh', onClick: async () => { const r = await api('POST', `/accounts/${a.id}/check`, {}); toast(r.ok ? 'Token OK' : `Problem: ${r.error}`, r.ok ? 'success' : 'error'); refresh(); } },
-    { label: 'Reconnect', icon: 'accounts', href: `/oauth/${a.provider}/start?reconnect=${a.id}` },
-    { label: 'Analytics', icon: 'analytics', href: `#/analytics?account=${a.id}` },
-    { sep: true },
-    { label: 'Disconnect', icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog(`Disconnect ${a.name}? Its unpublished posts and analytics will be removed.`, { ok: 'Disconnect', danger: true })) { await api('DELETE', `/accounts/${a.id}`); toast('Disconnected'); refresh(); } } },
-  ], { align: 'right' });
+  const menuFor = (a) => (e) => channelMenu(e.currentTarget, a, { refresh });
 
   const table = state.accounts.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Account'), h('th', { class: 'hide-sm' }, 'Platform'), h('th', {}, 'Status'), h('th', { class: 'hide-sm' }, 'Last checked'), h('th', { class: 'w-act' }, h('span', { class: 'sr-only' }, 'Actions')))),
     h('tbody', {}, state.accounts.map((a) => h('tr', {},
-      h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name, brandTags(a.id)), h('div', { class: 'muted small ellipsis' }, a.username ? (a.provider.startsWith('linkedin') ? String(a.username) : `@${String(a.username).replace(/^@/, '')}`) : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
+      h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name, brandTags(a.id)), h('div', { class: 'muted small ellipsis' }, a.display_name ? `${a.platform_name} · ` : '', a.username ? (a.provider.startsWith('linkedin') ? String(a.username) : `@${String(a.username).replace(/^@/, '')}`) : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
       h('td', { class: 'hide-sm' }, PROVIDER_META[a.provider].label, a.provider === 'instagram-standalone' ? h('span', { class: 'muted small' }, ' · Instagram Login') : a.provider === 'instagram' ? h('span', { class: 'muted small' }, ' · via Facebook') : a.provider === 'x' && a.meta?.premium ? h('span', { class: 'muted small' }, ' · Premium') : null),
-      h('td', {}, a.status === 'active' ? pill('s-published', 'Connected') : pill('s-failed', 'Needs reconnect'), a.status !== 'active' && a.status_message ? h('div', { class: 'err small' }, a.status_message) : null,
-        a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small' }, `Token renews before ${fmtDate(a.token_expires_at)}`) : null,
-        a.status === 'active' && a.token_expires_at && a.provider.startsWith('linkedin') && !a.meta?.has_refresh ? h('div', { class: 'muted small' }, `Reconnect before ${fmtDate(a.token_expires_at)}`) : null),
+      h('td', {}, a.status !== 'active' ? pill('s-failed', 'Needs reconnect') : a.disabled ? pill('s-pending_approval', 'Paused') : pill('s-published', 'Connected'),
+        a.disabled && a.status === 'active' ? h('div', { class: 'muted small hide-sm' }, 'Publishing paused; posts wait') : null, a.status !== 'active' && a.status_message ? h('div', { class: 'err small' }, a.status_message) : null,
+        a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small hide-sm' }, `Token renews before ${fmtDate(a.token_expires_at)}`) : null,
+        a.status === 'active' && a.token_expires_at && a.provider.startsWith('linkedin') && !a.meta?.has_refresh ? h('div', { class: 'muted small hide-sm' }, `Reconnect before ${fmtDate(a.token_expires_at)}`) : null),
       h('td', { class: 'small muted hide-sm' }, a.last_checked_at ? relTime(a.last_checked_at) : 'never'),
       h('td', { class: 'w-act' }, h('div', { class: 'row gap end' },
         a.status !== 'active' ? h('a', { class: 'btn small primary', href: `/oauth/${a.provider}/start?reconnect=${a.id}` }, 'Reconnect') : null,

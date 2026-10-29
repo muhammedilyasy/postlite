@@ -5,6 +5,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startWorker, hasWrangler } from './harness.js';
 import { hashPasswordPbkdf2 } from '../src/crypto.js';
+import { makeJpeg } from '../test/helpers.js';
 
 const PASSWORD = 'workers features correct horse';
 const skip = !hasWrangler() && 'wrangler devDependency not installed (npm install)';
@@ -37,6 +38,21 @@ test('Workers/D1: time format setting', { skip }, async () => {
   const r = await w.api('PATCH', '/settings', { key: admin, body: { time_format: '12h' } });
   assert.equal(r.status, 200, r.text);
   assert.equal((await w.api('GET', '/settings', { key: admin })).json.settings.time_format, '12h');
+});
+
+test('Workers/D1: media library filters, usage and bulk delete', { skip }, async () => {
+  const up = async (name) => (await w.api('POST', '/media/base64', { key: admin, body: { data: makeJpeg(640, 640).toString('base64'), filename: name } })).json.media.id;
+  const used = await up('used-one.jpg');
+  const free = await up('free-one.jpg');
+  const d = await w.api('POST', '/posts', { key: admin, body: { content: 'draft with media', media_ids: [used], targets: [{ account_id: fb }], mode: 'draft' } });
+  assert.equal(d.status, 200, d.text);
+  const all = await w.api('GET', '/media?counts=true', { key: admin });
+  assert.equal(all.status, 200, all.text);
+  assert.ok(all.json.counts.used >= 1 && all.json.counts.unused >= 1);
+  assert.deepEqual((await w.api('GET', '/media?usage=unused&q=free-one', { key: admin })).json.media.map((m) => m.id), [free]);
+  const r = await w.api('POST', '/media/delete', { key: admin, body: { media_ids: [used, free] } });
+  assert.deepEqual(r.json.deleted, [free]);
+  assert.equal(r.json.skipped[0].media_id, used);
 });
 
 // Runs last: wipes the workspace.

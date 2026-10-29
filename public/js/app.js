@@ -6,10 +6,12 @@ import { openComposer } from './composer.js';
 import { renderPosts, renderPostDetail } from './posts.js';
 import { renderAccounts, renderApprovals, renderAnalytics, renderSettings } from './views.js';
 import { renderBrand } from './brands.js';
+import { renderMedia } from './library.js';
 
 const NAV = [
   ['dashboard', 'Dashboard', 'dashboard'],
   ['posts', 'Posts', 'posts'],
+  ['media', 'Media', 'image'],
   ['new', 'New post', 'plus'],
   ['accounts', 'Accounts', 'accounts'],
   ['analytics', 'Analytics', 'analytics'],
@@ -91,7 +93,7 @@ function shell() {
       h('main', { id: 'view', tabindex: '-1' })));
 }
 
-const CRUMB = { dashboard: 'Dashboard', posts: 'Posts', accounts: 'Accounts', analytics: 'Analytics', approvals: 'Approvals', settings: 'Settings' };
+const CRUMB = { dashboard: 'Dashboard', posts: 'Posts', media: 'Media', accounts: 'Accounts', analytics: 'Analytics', approvals: 'Approvals', settings: 'Settings' };
 
 export async function route() {
   closeMenus();
@@ -110,6 +112,7 @@ export async function route() {
     switch (parts[0]) {
       case 'posts': return parts[1] ? await renderPostDetail(view, parts[1], params) : await renderPosts(view, params);
       case 'accounts': return parts[1] === 'brands' && parts[2] ? await renderBrand(view, parts[2]) : await renderAccounts(view, parts[1] === 'select' ? { select: parts[2] } : params);
+      case 'media': return await renderMedia(view, params);
       case 'approvals': return await renderApprovals(view);
       case 'analytics': return await renderAnalytics(view, params);
       case 'settings': return await renderSettings(view, { tab: parts[1] || '', focus: parts[2] || null });

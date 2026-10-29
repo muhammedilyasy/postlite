@@ -423,9 +423,20 @@ export const operations = [
   // ---- media ----
   {
     name: 'list_media', method: 'GET', path: '/media', scope: 'read', tags: ['media'], readOnly: true,
-    summary: 'List uploaded media', description: 'Recently uploaded media with kind, mime, size, width/height and duration (seconds).',
-    input: S({ properties: { limit: { type: 'integer', minimum: 1, maximum: 500 } } }),
-    handler: async (core, i) => ({ media: (await core.media.rows(i.limit || 100)).map((m) => mediaOut(core, m)) }),
+    summary: 'Media library: search, filter and page through uploads',
+    description: 'Uploads newest first with kind, mime, size, width/height, duration, poster and how each one is used: used_by_posts (posts that reference it), in_use (a draft/scheduled/pending/publishing/failed post or an active repeating post needs it, so it cannot be deleted), purged (original deleted after publishing; the thumbnail stays). Filters: q (file name contains), kind (image|video|document), usage (used|unused|purged). Paging: limit (≤ 200, default 48) + offset; total is the number of matches. counts (with counts=true) gives totals per filter.',
+    input: S({ properties: { q: str('File name contains (case-insensitive).'), kind: { type: 'string', enum: ['image', 'video', 'document'] }, usage: { type: 'string', enum: ['used', 'unused', 'purged'] }, limit: { type: 'integer', minimum: 1, maximum: 500 }, offset: { type: 'integer', minimum: 0 }, counts: { type: 'boolean', description: 'Also return counts per kind/usage.' } } }),
+    handler: async (core, i) => {
+      const r = await core.library.list({ q: i.q, kind: i.kind, usage: i.usage, limit: Math.min(i.limit || 48, 200), offset: i.offset });
+      return { media: r.media.map((m) => ({ ...m, public_url: m.purged ? null : `${core.cfg.publicUrl}${m.url}` })), total: r.total, limit: r.limit, offset: r.offset, ...(i.counts ? { counts: await core.library.counts() } : {}) };
+    },
+  },
+  {
+    name: 'delete_media_bulk', method: 'POST', path: '/media/delete', scope: 'write', tags: ['media'], destructive: true,
+    summary: 'Delete several media items',
+    description: 'Deletes up to 200 media items. Items an unfinished post (draft, scheduled, pending approval, publishing, failed) or an active repeating post still needs are skipped and listed with the reason. Example: list_media {usage:"unused"} then delete_media_bulk {media_ids:[...]}.',
+    input: S({ required: ['media_ids'], properties: { media_ids: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 200 } } }),
+    handler: async (core, i) => core.library.deleteMany(i.media_ids),
   },
   {
     name: 'get_media', method: 'GET', path: '/media/{media_id}', scope: 'read', tags: ['media'], readOnly: true,
@@ -463,6 +474,7 @@ export const operations = [
     handler: async (core, i) => {
       if (!(await core.media.get(i.media_id))) throw new HttpError(404, 'Media not found.');
       if (await mediaInUse(core, i.media_id)) throw new HttpError(409, 'This media is used by an unpublished post. Remove it from the post first.');
+      if ((await core.library.usageMap()).get(i.media_id)?.series) throw new HttpError(409, 'This media is used by an active repeating post. Stop or edit the series first.');
       await core.media.remove(i.media_id);
       return { deleted: true };
     },

@@ -73,6 +73,12 @@ A brand is a named set of channels across platforms (for example "North Star" = 
 - Manage: `list_brands` (also returns `suggestions` from account names that share a prefix; nothing is created automatically), `create_brand {name, color?, account_ids}`, `update_brand {brand_id, name?, color?}`, `set_brand_channels {brand_id, account_ids, mode: replace|add|remove}`, `delete_brand` (the accounts, posts and analytics stay).
 - CLI: `postlite brands list`, `postlite brands create --name "North Star" --accounts id1,id2`, `postlite posts create --brand "North Star" --content "..." --next-slot`.
 
+## Media library
+
+- `list_media {q?, kind?: image|video|document, usage?: used|unused|purged, limit?, offset?, counts?}` pages through uploads newest first. Each item has `used_by_posts`, `in_use` (an unfinished post or an active repeating post needs it), `deletable` and `purged`. `total` is the number of matches; `counts` (with `counts: true`) gives totals per kind and usage.
+- Reuse media: pass its id in `create_post {media_ids}` (not when `purged`: re-upload first).
+- Clean up: `list_media {usage: "unused"}` → `delete_media_bulk {media_ids}`; items still needed are skipped with a reason.
+
 ## Media is deleted after publishing
 
 Each workspace deletes the original file of an upload once every post that uses it is finished (setting `delete_media_after`: `immediate` = 30 minutes after the last target published, `7d`, `30d` or `never`; `get_storage` / `update_storage_settings` with an admin key). Drafts, posts awaiting approval, scheduled, publishing (YouTube resumable sessions, X/LinkedIn chunked uploads, Instagram/Facebook containers that fetch `/m/` URLs) and failed posts with a retry queued (or failed in the last 24 h) keep the file. Media that never went live is never deleted.

@@ -12,7 +12,7 @@ import { formatLocal, parseLocal } from '/assets/shared/time.js';
 export { relTime };
 const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.width, height: m.height, duration: m.duration, name: m.name });
 
-export async function openComposer({ groupId = null, at = null, onSaved = () => {} } = {}) {
+export async function openComposer({ groupId = null, at = null, media = null, onSaved = () => {} } = {}) {
   const tz = state.settings.timezone;
   const st = { id: null, focusEl: null, content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
   if (groupId) {
@@ -31,6 +31,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     // New post: start with the last brand used (its connected channels); untick any of them freely.
     const lastBrand = (state.brands || []).find((b) => b.id === localStorage.getItem(LAST_BRAND));
     if (lastBrand) selectBrand(lastBrand);
+    if (Array.isArray(media)) st.media = media.filter((m) => m && !m.purged); // "Use in new post" from the media library
   }
 
   const root = h('div', { class: 'composer' });

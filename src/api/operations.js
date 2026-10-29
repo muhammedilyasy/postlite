@@ -12,6 +12,7 @@ import { WEBHOOK_EVENTS } from '../webhooks.js';
 import { providers } from '../providers/index.js';
 import { APP_IDS } from '../apps.js';
 import { PLATFORM_PROVIDERS, MEDIA_TYPES } from '../posts.js';
+import { RETENTION_MODES, RETENTION_LABELS } from '../retention.js';
 
 const DAY = 86400000;
 const S = (o) => ({ type: 'object', additionalProperties: false, ...o });
@@ -230,7 +231,13 @@ function mediaInUse(core, mediaId) {
     AND (g.media LIKE ? OR p.media_override LIKE ? OR p.settings LIKE ?) LIMIT 1`, core.workspaceId, core.workspaceId, like, like, like);
 }
 
-const mediaOut = (core, m) => m && { ...core.media.view(m), public_url: core.media.publicUrl(m) };
+const mediaOut = (core, m) => m && { ...core.media.view(m), public_url: m.purged_at ? null : core.media.publicUrl(m) };
+
+async function storageInfo(core) {
+  const mode = await core.retention.getMode();
+  return { delete_media_after: mode, label: RETENTION_LABELS[mode], options: RETENTION_MODES.map((v) => ({ value: v, label: RETENTION_LABELS[v] })), safety_grace_minutes: core.cfg.mediaPurge.graceMinutes, failed_retry_window_hours: core.cfg.mediaPurge.failedGraceHours, ...(await core.retention.stats()) };
+}
+const reportOut = (r) => ({ mode: r.mode, dry_run: r.dry_run, eligible_files: r.eligible_files, eligible_bytes: r.eligible_bytes, purged_files: r.files, freed_bytes: r.bytes, purged: r.purged, ...(r.eligible ? { eligible: r.eligible } : {}), kept: r.kept.map(({ media_id, name, kind, bytes, reason }) => ({ media_id, name, kind, bytes, reason })), skipped: r.skipped });
 
 async function platformInfo(core) {
   const accounts = await core.integrations.list();
@@ -569,9 +576,13 @@ export const operations = [
   },
   {
     name: 'duplicate_post', method: 'POST', path: '/posts/{post_id}/duplicate', scope: 'write', tags: ['posts'],
-    summary: 'Duplicate a post as a draft', description: 'Copies content, media, targets and settings into a new draft.',
+    summary: 'Duplicate a post as a draft', description: 'Copies content, media, targets and settings into a new draft. Media whose original was deleted after publishing comes back as a placeholder (media[].purged = true, listed in needs_reupload): upload the file again and update_post with the new media_ids before scheduling.',
     input: S({ required: ['post_id'], properties: { post_id: id('Post') } }),
-    handler: async (core, i) => ({ post: await core.posts.getGroup(await core.posts.duplicateGroup(i.post_id)) }),
+    handler: async (core, i) => {
+      const post = await core.posts.getGroup(await core.posts.duplicateGroup(i.post_id));
+      const gone = [...new Map([...post.media, ...post.targets.flatMap((t) => t.media)].filter((m) => m.purged).map((m) => [m.id, m])).values()];
+      return { post, ...(gone.length ? { needs_reupload: gone.map((m) => ({ media_id: m.id, name: m.name, kind: m.kind })), note: 'Some originals were deleted after publishing. Re-upload them and replace these media ids before scheduling.' } : {}) };
+    },
   },
   {
     name: 'delete_post', method: 'DELETE', path: '/posts/{post_id}', scope: 'write', tags: ['posts'], destructive: true,
@@ -645,6 +656,30 @@ export const operations = [
     input: S({ properties: { timezone: str('IANA timezone, e.g. "Asia/Kolkata".'), posting_slots: { type: 'object', description: 'Map weekday → ["HH:MM", ...].', additionalProperties: { type: 'array', items: { type: 'string' } } } } }),
     handler: async (core, i) => {
       try { return { settings: await core.settings.update(i) }; } catch (e) { throw new HttpError(400, e.message); }
+    },
+  },
+  {
+    name: 'get_storage', method: 'GET', path: '/storage', scope: 'read', tags: ['settings'], readOnly: true,
+    summary: 'Storage used and the delete-after-publishing setting',
+    description: 'This workspace\'s media storage: files and bytes still stored, files purged and bytes freed so far, and delete_media_after (immediate | 7d | 30d | never). Originals are deleted once every post using them is finished; the poster/thumbnail JPEG and the published links stay.',
+    input: S({ properties: {} }),
+    handler: async (core) => ({ storage: await storageInfo(core) }),
+  },
+  {
+    name: 'update_storage_settings', method: 'PATCH', path: '/storage', scope: 'admin', tags: ['settings'],
+    summary: 'Set when media is deleted after publishing',
+    description: 'delete_media_after: "immediate" (default; after a 30-minute safety window), "7d", "30d" or "never". Applies to this workspace only.',
+    input: S({ required: ['delete_media_after'], properties: { delete_media_after: { type: 'string', enum: RETENTION_MODES, description: 'immediate | 7d | 30d | never' } } }),
+    handler: async (core, i) => { await core.retention.setMode(i.delete_media_after); return { storage: await storageInfo(core) }; },
+  },
+  {
+    name: 'cleanup_media', method: 'POST', path: '/storage/cleanup', scope: 'write', tags: ['settings'],
+    summary: 'Delete media originals that are eligible now',
+    description: 'Runs the delete-after-publishing cleanup for this workspace right away (the scheduler also runs it every few minutes). dry_run=true only reports what is eligible and why the rest is kept. Never touches media that a draft, scheduled, publishing, pending or retrying post still needs.',
+    input: S({ properties: { dry_run: { type: 'boolean', description: 'Report only; delete nothing.' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Max files to delete in this call (default 100).' } } }),
+    handler: async (core, i, p) => {
+      const r = await core.retention.run({ dryRun: !!i.dry_run, limit: i.limit || 100, principal: p, via: 'api' });
+      return { report: reportOut(r), storage: await storageInfo(core) };
     },
   },
   {

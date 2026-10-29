@@ -21,3 +21,10 @@ export function makePoster(bin, file, out) {
     execFile(bin, ['-y', '-v', 'error', '-ss', '1', '-i', file, '-frames:v', '1', '-vf', 'scale=480:-2', out], { timeout: 60000 }, (err) => resolve(!err && fs.existsSync(out)));
   });
 }
+
+/** Small JPEG preview of an image (max 480 px on the long side), kept after the original is deleted. */
+export function makeThumb(bin, file, out) {
+  return new Promise((resolve) => {
+    execFile(bin, ['-y', '-v', 'error', '-i', file, '-frames:v', '1', '-vf', "scale=w='min(480,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease", '-q:v', '4', out], { timeout: 60000 }, (err) => resolve(!err && fs.existsSync(out)));
+  });
+}

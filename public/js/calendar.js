@@ -1,9 +1,9 @@
 // Dashboard: KPI strip + calendar (week / month / list) with drag & drop rescheduling.
 import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum } from './core.js';
-import { openComposer } from './composer.js';
+import { openComposer, duplicatePost, retryTargets } from './composer.js';
 import { pageHeader, segmented, emptyState, skeleton, dropdown } from './ui.js';
 import { zonedParts, zonedToUtc, formatLocal } from '/assets/shared/time.js';
-import { listThumb } from './media.js';
+import { listThumb, platformName } from './media.js';
 
 const DAY = 86400000;
 const view = { mode: localStorage.getItem('pl_view') || (matchMedia('(max-width: 760px)').matches ? 'list' : 'week'), anchor: Date.now(), filter: '' };
@@ -120,10 +120,10 @@ function chipMenu(anchor, e, refresh) {
   dropdown(anchor, [
     { label: 'Edit', icon: 'edit', onClick: () => openComposer({ groupId: e.group_id, onSaved: refresh }) },
     { label: 'Details & events', icon: 'audit', onClick: () => openPost(e.group_id) },
-    { label: 'Duplicate', icon: 'copy', onClick: async () => { await api('POST', `/posts/${e.group_id}/duplicate`, {}); toast('Duplicated as draft', 'success'); refresh(); } },
+    { label: 'Duplicate', icon: 'copy', onClick: async () => { await duplicatePost(e.group_id, { onSaved: () => refresh() }); } },
     !locked && e.status !== 'pending_approval' ? { label: 'Post now', icon: 'send', onClick: async () => { await api('POST', `/posts/${e.group_id}/publish-now`, { target_ids: [e.id] }); toast('Publishing…', 'success'); setTimeout(refresh, 800); } } : null,
-    e.status === 'failed' ? { label: 'Retry', icon: 'refresh', onClick: async () => { await api('POST', `/posts/${e.group_id}/retry`, { target_ids: [e.id] }); toast('Retrying…', 'success'); setTimeout(refresh, 800); } } : null,
-    e.published_url ? { label: 'Open live post', icon: 'external', href: e.published_url, target: '_blank' } : null,
+    e.status === 'failed' ? { label: 'Retry', icon: 'refresh', onClick: () => retryTargets(e.group_id, [e.id], refresh) } : null,
+    e.published_url ? { label: `View on ${platformName(e.provider)}`, icon: 'external', href: e.published_url, target: '_blank' } : null,
     { sep: true },
     { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog('Delete this post on all accounts? Already-published content stays live.', { ok: 'Delete', danger: true })) { await api('DELETE', `/posts/${e.group_id}`); toast('Deleted'); refresh(); } } },
   ], { align: 'right' });

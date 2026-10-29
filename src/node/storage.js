@@ -13,7 +13,7 @@ const safeKey = (key) => {
   return k;
 };
 
-export function createFsStorage(dir) {
+export function createFsStorage(dir, { trashDir = '' } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const full = (key) => path.join(dir, safeKey(key));
   const mpDir = (id) => path.join(dir, '.mp', String(id).replace(/[^\w-]/g, ''));
@@ -55,6 +55,13 @@ export function createFsStorage(dir) {
       } finally { fs.closeSync(fd); }
     },
     async delete(key) { fs.rmSync(full(key), { force: true }); },
+    /** Remove media bytes for good (retention purge); with a trash dir they are moved there instead. */
+    async discard(key) {
+      if (!trashDir) return api.delete(key);
+      const dest = path.join(trashDir, safeKey(key));
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      try { fs.renameSync(full(key), dest); } catch (e) { if (e.code === 'EXDEV') { fs.copyFileSync(full(key), dest); fs.rmSync(full(key), { force: true }); } else if (e.code !== 'ENOENT') throw e; }
+    },
     async rename(from, to) { fs.renameSync(full(from), full(to)); },
 
     // ---- multipart (upload sessions) ----

@@ -27,5 +27,6 @@ export function getConfig(env = process.env) {
   cfg.dataDir = dataDir;
   cfg.dbFile = path.join(dataDir, 'postlite.sqlite');
   cfg.uploadDir = path.join(dataDir, 'uploads');
+  if (cfg.mediaPurge.trashDir) cfg.mediaPurge.trashDir = path.resolve(dataDir, cfg.mediaPurge.trashDir);
   return cfg;
 }

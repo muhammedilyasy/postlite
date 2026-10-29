@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createCore } from '../core.js';
 import { openDb } from './db.js';
 import { createFsStorage } from './storage.js';
-import { ffprobe, makePoster } from './ffmpeg.js';
+import { ffprobe, makePoster, makeThumb } from './ffmpeg.js';
 import { ROOT } from './config.js';
 import { hashPasswordPbkdf2, verifyPasswordPbkdf2 } from '../crypto.js';
 
@@ -42,7 +42,7 @@ export async function verifyPassword(password, stored) {
 export const nodeRuntime = {
   platform: 'node',
   version: VERSION,
-  hooks: { ffprobe, makePoster },
+  hooks: { ffprobe, makePoster, makeThumb },
   passwords: { hash: async (pw) => hashPassword(pw), verify: verifyPassword, hashPortable: hashPasswordPbkdf2 },
   async resolveHost(host) {
     if (net.isIP(host)) return [host];
@@ -55,6 +55,6 @@ export const nodeRuntime = {
 export function createNodeCore(cfg, { log = makeLogger() } = {}) {
   fs.mkdirSync(cfg.dataDir, { recursive: true });
   const db = openDb(cfg.dbFile);
-  const storage = createFsStorage(cfg.uploadDir);
+  const storage = createFsStorage(cfg.uploadDir, { trashDir: cfg.mediaPurge.trashDir });
   return createCore({ cfg, db, storage, runtime: nodeRuntime, log });
 }

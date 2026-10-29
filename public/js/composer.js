@@ -1,7 +1,7 @@
 // Composer: global caption + per-account overrides/settings, media upload, live validation, previews.
 import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime } from './core.js';
 import { segmented } from './ui.js';
-import { mediaVisual, ensurePoster } from './media.js';
+import { mediaVisual, ensurePoster, viewOnLink, REMOVED_NOTE } from './media.js';
 import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, captionLength, xWeightedLength } from '/assets/shared/validate.js';
 import { formatLocal, parseLocal } from '/assets/shared/time.js';
 
@@ -38,6 +38,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     const thread = a.provider === 'x' ? (t.settings.thread || []).map((x) => ({ text: x.text || '', media: (x.media || []).map((id) => info(st.thumbs.get(id))).filter(Boolean) })) : null;
     const v = validatePost(a.provider, { caption: captionFor(aid), media: st.media.map(info), settings: t.settings, thumbnail: info(thumb), thread, account: { premium: !!a.meta?.premium } });
     if (a.status !== 'active') v.errors.unshift('Account needs to be reconnected.');
+    if (st.media.some((m) => m?.purged)) v.errors.unshift('Re-upload the media that was removed after publishing.');
     if (st.serverErrors[aid]) v.errors.push(...st.serverErrors[aid].filter((e) => !v.errors.includes(e)));
     return v;
   };
@@ -168,23 +169,41 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
           st.media.push(media);
           row.remove();
           render();
-          // No server-side poster (Workers / no ffmpeg): grab a frame from the local file and store it.
-          if (media.kind === 'video' && !media.poster) ensurePoster(media, f).then((p) => { if (p) render(); });
+          // No server-side poster (Workers / no ffmpeg): grab a frame / make a small thumbnail from the local
+          // file and store it (it is what stays visible after the original is deleted post-publishing).
+          if ((media.kind === 'video' || media.kind === 'image') && !media.poster) ensurePoster(media, f).then((p) => { if (p && media.kind === 'video') render(); });
         } catch (e) {
           row.classList.add('error');
           row.append(h('span', { class: 'err small' }, e.message));
         }
       }
     }
+    /** Replace a media item whose original was removed after publishing with a fresh upload. */
+    function reupload(i) {
+      const one = h('input', { type: 'file', accept: input.accept, hidden: true });
+      one.onchange = async () => {
+        const f = one.files[0];
+        if (!f) return;
+        try {
+          const media = await uploadFile(f);
+          if ((media.kind === 'video' || media.kind === 'image') && !media.poster) ensurePoster(media, f);
+          st.media.splice(i, 1, media);
+          render();
+          toast('Media replaced', 'success');
+        } catch (e) { toast(e.message, 'error'); }
+      };
+      one.click();
+    }
     let dragIdx = null;
     const grid = h('div', { class: 'media-grid' }, st.media.map((md, i) => h('div', {
-      class: 'media-item', draggable: 'true',
+      class: `media-item${md.purged ? ' reupload' : ''}`, draggable: 'true',
       ondragstart: (e) => { dragIdx = i; e.dataTransfer.effectAllowed = 'move'; },
       ondragover: (e) => e.preventDefault(),
       ondrop: (e) => { e.preventDefault(); e.stopPropagation(); if (dragIdx === null || dragIdx === i) return; const [x] = st.media.splice(dragIdx, 1); st.media.splice(i, 0, x); dragIdx = null; render(); },
     },
     mediaVisual(md),
-    h('span', { class: 'media-meta mono' }, `${md.kind === 'video' ? `▶ ${md.duration ? `${Math.round(md.duration)}s` : ''}` : ''} ${md.width && md.height ? `${md.width}×${md.height}` : ''}`),
+    md.purged ? h('div', { class: 'reupload-slot', title: REMOVED_NOTE }, h('span', { class: 'small' }, 'Removed after publishing'), h('button', { type: 'button', class: 'btn small', 'aria-label': `Re-upload media (${REMOVED_NOTE})`, onclick: (e) => { e.stopPropagation(); reupload(i); } }, icon('upload', 13), 'Re-upload')) : null,
+    md.purged ? null : h('span', { class: 'media-meta mono' }, `${md.kind === 'video' ? `▶ ${md.duration ? `${Math.round(md.duration)}s` : ''}` : ''} ${md.width && md.height ? `${md.width}×${md.height}` : ''}`),
     h('span', { class: 'media-idx mono' }, i + 1),
     h('button', { type: 'button', class: 'icon-btn remove', 'aria-label': `Remove ${md.name || 'media'}`, onclick: (e) => { e.stopPropagation(); st.media.splice(i, 1); render(); } }, icon('x', 14)))));
     return h('div', {}, st.media.length ? grid : null, drop, input, progress);
@@ -200,7 +219,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     const locked = st.locked.has(aid);
     return h('div', { class: 'side-inner' },
       tabsBar(accs),
-      t.status && t.status !== 'draft' ? h('div', { class: 'row gap small side-status' }, statusBadge(t.status), t.published_url ? h('a', { href: t.published_url, target: '_blank', rel: 'noopener' }, 'View live', icon('external', 12)) : null) : null,
+      t.status && t.status !== 'draft' ? h('div', { class: 'row gap small side-status' }, statusBadge(t.status), viewOnLink({ ...t, provider: a?.provider }, { cls: 'view-on' })) : null,
       t.error ? h('div', { class: 'notice error' }, icon('x-circle', 15), h('span', {}, t.error)) : null,
       t.warning ? h('div', { class: 'notice warn' }, icon('alert', 15), h('span', {}, t.warning)) : null,
       locked ? h('p', { class: 'muted' }, 'This account was already published and can no longer be edited.') : [
@@ -404,7 +423,8 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     try { await api('DELETE', `/posts/${st.id}`); toast('Deleted'); m.close(); onSaved(null); } catch (e) { toast(e.message, 'error'); }
   }
   async function dup() {
-    try { const r = await api('POST', `/posts/${st.id}/duplicate`, {}); toast('Duplicated as draft', 'success'); m.close(); onSaved(r.post); openComposer({ groupId: r.post.id, onSaved }); } catch (e) { toast(e.message, 'error'); }
+    m.close();
+    await duplicatePost(st.id, { onSaved, open: true });
   }
   async function approve() {
     try {
@@ -418,4 +438,30 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     try { await api('POST', `/posts/${st.id}/reject`, { reason }); toast('Rejected'); m.close(); onSaved(null); } catch (e) { toast(e.message, 'error'); }
   }
   render();
+}
+
+/**
+ * Duplicate a post as a draft. When some originals were deleted after publishing, the copy opens in the
+ * composer with a "Re-upload media" slot for each of them (always, or when open=true).
+ */
+export async function duplicatePost(groupId, { onSaved = () => {}, open = false } = {}) {
+  try {
+    const r = await api('POST', `/posts/${groupId}/duplicate`, {});
+    const needs = r.needs_reupload?.length || 0;
+    toast(needs ? `Duplicated as draft. Re-upload ${needs === 1 ? 'the removed file' : `${needs} removed files`} before scheduling.` : 'Duplicated as draft', needs ? 'info' : 'success', needs ? 6000 : undefined);
+    onSaved(r.post);
+    if (open || needs) openComposer({ groupId: r.post.id, onSaved });
+    return r;
+  } catch (e) { toast(e.message, 'error'); return null; }
+}
+
+/** Retry failed targets; shows the server's per-target reason (e.g. media removed after publishing). */
+export async function retryTargets(groupId, targetIds, refresh = () => {}) {
+  try {
+    const r = await api('POST', `/posts/${groupId}/retry`, { target_ids: targetIds });
+    const errs = (r.results || []).filter((x) => x.error);
+    if (errs.length) toast(errs[0].error, 'error', 9000);
+    else toast(targetIds.length > 1 ? 'Retrying failed accounts…' : 'Retrying…', 'success');
+    setTimeout(refresh, 1000);
+  } catch (e) { toast(e.message, 'error', 8000); }
 }

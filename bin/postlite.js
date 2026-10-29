@@ -48,6 +48,10 @@ Server / admin (run on the server, uses .env):
   postlite workspaces list                      Workspaces and the emails that own them
   postlite workspaces attribute --owner EMAIL [--apply] [--db FILE]
                                                 Dry-run report (or --apply) assigning existing rows to their owners
+  postlite media cleanup [--apply] [--json] [--db FILE] [--uploads DIR] [--trash DIR] [--email E | --workspace ID]
+                                         Delete-after-publishing report per workspace (dry run by default: nothing is
+                                         generated, marked, moved or deleted); --apply purges what is eligible now,
+                                         --trash moves the originals into DIR instead of deleting them
   postlite mcp                           MCP over stdio (needs POSTLITE_API_KEY; with POSTLITE_URL it bridges to a remote server)
 
 API client — local or remote instance, Node or Cloudflare Workers
@@ -168,6 +172,46 @@ function coerceFlags(flags) {
 
 const print = (j) => process.stdout.write(JSON.stringify(j, null, 2) + '\n');
 
+const fmtBytes = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
+
+/** Server-side delete-after-publishing report / purge (see `postlite help`). */
+async function mediaCleanup(a) {
+  const { createNodeCore, makeLogger } = await import('../src/node/core.js');
+  const cfg = getConfig();
+  if (a.db) cfg.dbFile = path.resolve(String(a.db));
+  if (a.uploads) cfg.uploadDir = path.resolve(String(a.uploads));
+  if (a.trash) cfg.mediaPurge.trashDir = path.resolve(String(a.trash));
+  const c = createNodeCore(cfg, { log: makeLogger(process.env.LOG_LEVEL || 'warn') });
+  try {
+    const all = await c.workspaces.list();
+    const only = a.email || a.workspace ? [(await cliScope(c, a)).workspaceId] : null;
+    const apply = !!a.apply;
+    const reports = await c.purgeMedia({ dryRun: !apply, limit: apply ? 100000 : undefined, workspaces: only });
+    if (a.json) return print(reports.map((r) => ({ ...r, kept: r.kept.map(({ media, ...k }) => k) })));
+    const lines = [`postlite media cleanup — ${apply ? 'APPLY' : 'DRY RUN (nothing changed)'} — ${new Date().toISOString()}`, `db: ${cfg.dbFile}`, `uploads: ${cfg.uploadDir}${apply && cfg.mediaPurge.trashDir ? `  →  trash: ${cfg.mediaPurge.trashDir}` : ''}`, ''];
+    for (const r of reports) {
+      const w = all.find((x) => x.id === r.workspace_id);
+      const st = await c.scope(r.workspace_id).retention.stats();
+      lines.push(`== workspace ${r.workspace_id} (${w?.emails || w?.name || '-'}) · setting: ${r.mode}`);
+      lines.push(`   stored now: ${st.files} files, ${fmtBytes(st.used_bytes)} · freed so far: ${st.purged_files} files, ${fmtBytes(st.freed_bytes)}`);
+      lines.push(`   eligible now: ${r.eligible_files} files, ${fmtBytes(r.eligible_bytes)}${apply ? ` · purged: ${r.files} files, ${fmtBytes(r.bytes)}` : ''}`);
+      for (const e of r.eligible || r.purged) lines.push(`     + ${e.media_id}  ${e.kind.padEnd(8)} ${fmtBytes(e.bytes).padStart(9)}  ${e.name || ''}${e.preview === 'generate' ? '  (thumbnail will be generated)' : ''}`);
+      const by = new Map();
+      for (const k of r.kept) { const key = k.reason.replace(/until \S+$/, 'until …'); const g = by.get(key) || by.set(key, { n: 0, b: 0, items: [] }).get(key); g.n++; g.b += k.bytes || 0; g.items.push(k); }
+      lines.push(`   kept: ${r.kept.length} files, ${fmtBytes(r.kept.reduce((n, k) => n + (k.bytes || 0), 0))}`);
+      for (const [reason, g] of by) {
+        lines.push(`     - ${reason}: ${g.n} files, ${fmtBytes(g.b)}`);
+        for (const k of g.items) lines.push(`         ${k.media_id}  ${k.kind.padEnd(8)} ${fmtBytes(k.bytes).padStart(9)}  ${k.name || ''}${/until /.test(k.reason) ? `  (${k.reason.split('until ')[1]})` : ''}`);
+      }
+      if (r.skipped?.length) lines.push(`   skipped: ${r.skipped.map((s) => `${s.media_id} (${s.reason})`).join(', ')}`);
+      lines.push('');
+    }
+    process.stdout.write(`${lines.join('\n')}\n`);
+  } finally {
+    await c.stop();
+  }
+}
+
 async function main() {
   const a = parseArgs(rest);
   switch (cmd) {
@@ -269,7 +313,8 @@ async function main() {
     case 'accounts':
       return print(await callTool('list_accounts', coerceFlags(a)));
     case 'media': {
-      if (a._[0] !== 'upload' || !a._[1]) throw new Error('Usage: postlite media upload <file>');
+      if (a._[0] === 'cleanup') return mediaCleanup(a);
+      if (a._[0] !== 'upload' || !a._[1]) throw new Error('Usage: postlite media upload <file> | postlite media cleanup [--apply]');
       const file = a._[1];
       const key = process.env.POSTLITE_API_KEY;
       if (!key) throw new Error('Set POSTLITE_API_KEY (or pass --key)');

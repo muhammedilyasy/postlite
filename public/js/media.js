@@ -1,4 +1,5 @@
-// Media visuals: every video shows a poster frame, never a blank/black box.
+// Media visuals: every video shows a poster frame, never a blank/black box. Media whose original was deleted
+// after publishing (md.purged) shows its kept poster/thumbnail JPEG, never a player.
 //   1. the stored poster (ffmpeg on Node at upload time) as <img> or as the <video poster>;
 //   2. no poster yet (Cloudflare Workers has no ffmpeg; old uploads): the browser grabs a frame (~1 s in),
 //      uploads it as the media's poster (POST /media/{id}/poster) and swaps it in — once per media item;
@@ -16,6 +17,30 @@ const once = (el, ev, ms = 15000) => new Promise((resolve, reject) => {
   el.addEventListener(ev, ok);
   el.addEventListener('error', bad);
 });
+
+export const REMOVED_NOTE = 'Original removed after publishing';
+
+/** Scale an image (URL or blob: URL) to a ≤ 480 px JPEG thumbnail. */
+async function captureThumb(src) {
+  const img = new Image();
+  img.decoding = 'async';
+  img.src = src;
+  await img.decode();
+  const w = img.naturalWidth;
+  const hh = img.naturalHeight;
+  if (!w || !hh) throw new Error('no image');
+  const scale = Math.min(1, 480 / Math.max(w, hh));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * scale));
+  c.height = Math.max(1, Math.round(hh * scale));
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.8));
+  if (!blob) throw new Error('canvas export failed');
+  return blob;
+}
 
 /** Grab one frame of a video (URL or blob: URL) as a JPEG Blob, scaled to at most 720 px. */
 export async function capturePoster(src, at = 1) {
@@ -57,14 +82,15 @@ const toBase64 = (blob) => new Promise((resolve, reject) => {
  * else the media URL) and store it on the server. Resolves with the poster URL (or null). Deduped.
  */
 export function ensurePoster(md, source = null) {
-  if (!md || md.kind !== 'video') return Promise.resolve(null);
+  // Videos get a poster frame; images a small thumbnail (kept when the original is deleted after publishing).
+  if (!md || (md.kind !== 'video' && md.kind !== 'image') || md.purged) return Promise.resolve(md?.poster || null);
   if (md.poster) return Promise.resolve(md.poster);
   if (failed.has(md.id)) return Promise.resolve(null);
   if (inflight.has(md.id)) return inflight.get(md.id);
   const p = (async () => {
     const url = source ? URL.createObjectURL(source) : md.url;
     try {
-      const blob = await capturePoster(url);
+      const blob = md.kind === 'image' ? await captureThumb(url) : await capturePoster(url);
       const { media } = await api('POST', `/media/${md.id}/poster`, { data: await toBase64(blob) });
       md.poster = media.poster;
       return md.poster;
@@ -88,8 +114,16 @@ export function ensurePoster(md, source = null) {
 export function mediaVisual(md, { playable = false, cls = null, alt = '' } = {}) {
   if (!md) return null;
   // PDF (LinkedIn document posts): a quiet file tile with the name, no browser PDF viewer.
+  if (md.purged) {
+    // Original deleted after publishing: the kept poster/thumbnail, or a quiet tile. Never a broken player.
+    if (md.poster) return h('img', { class: cls, src: md.poster, alt, loading: 'lazy', title: REMOVED_NOTE });
+    return h('span', { class: `${cls || ''} doc-tile removed-tile`, title: REMOVED_NOTE }, icon(md.kind === 'video' ? 'play' : md.kind === 'document' ? 'docs' : 'image', 18), h('span', { class: 'doc-name' }, md.name || 'Removed'));
+  }
   if (md.kind === 'document') return h('span', { class: `${cls || ''} doc-tile`, title: md.name || 'PDF' }, icon('docs', 18), h('span', { class: 'doc-name' }, md.name || 'PDF'));
-  if (md.kind !== 'video') return h('img', { class: cls, src: md.url, alt, loading: 'lazy' });
+  if (md.kind !== 'video') {
+    if (!md.poster) ensurePoster(md); // store a small thumbnail once (survives the original's deletion)
+    return h('img', { class: cls, src: !playable && md.poster ? md.poster : md.url, alt, loading: 'lazy' });
+  }
   if (md.poster && !playable) return h('img', { class: cls, src: md.poster, alt, loading: 'lazy' });
   const v = h('video', {
     class: cls, src: md.poster ? md.url : `${md.url}#t=0.5`, poster: md.poster || null, muted: true, playsinline: true,
@@ -110,7 +144,21 @@ export function mediaVisual(md, { playable = false, cls = null, alt = '' } = {})
 export function listThumb(md, { cls = 'lthumb', size = 14 } = {}) {
   if (!md) return h('span', { class: `${cls} ph` }, icon('image', size));
   const el = mediaVisual(md, { cls });
-  if (md.kind === 'document') return h('span', { class: `${cls} ph` }, icon('docs', size));
+  if (md.kind === 'document') return h('span', { class: `${cls} ph`, title: md.purged ? REMOVED_NOTE : null }, icon('docs', size));
+  if (el.tagName !== 'IMG' && el.tagName !== 'VIDEO') return h('span', { class: `${cls} ph`, title: REMOVED_NOTE }, icon(md.kind === 'video' ? 'play' : 'image', size));
   if (el.tagName === 'IMG') el.addEventListener('error', () => el.replaceWith(h('span', { class: `${cls} ph` }, icon(md.kind === 'video' ? 'play' : 'image', size))));
   return el;
 }
+
+/** "View on Instagram" etc. for one published target. */
+export function viewOnLink(t, { cls = 'btn small ghost', iconOnly = false } = {}) {
+  if (!t?.published_url) return null;
+  const label = `View on ${PLATFORM_NAME[t.provider] || t.provider}`;
+  return h('a', { class: cls, href: t.published_url, target: '_blank', rel: 'noopener', 'aria-label': label, title: label, onclick: (e) => e.stopPropagation() },
+    iconOnly ? null : h('span', {}, label), icon('external', 13));
+}
+const PLATFORM_NAME = { youtube: 'YouTube', facebook: 'Facebook', instagram: 'Instagram', 'instagram-standalone': 'Instagram', x: 'X', linkedin: 'LinkedIn', 'linkedin-page': 'LinkedIn' };
+export const platformName = (provider) => PLATFORM_NAME[provider] || provider;
+
+/** One quiet line under media when any original was removed after publishing. */
+export const removedNote = (list) => ((list || []).some((m) => m?.purged) ? h('p', { class: 'removed-note muted small' }, `${REMOVED_NOTE}. The thumbnail and the published links stay.`) : null);

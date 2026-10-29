@@ -1,11 +1,11 @@
 // Posts: Render-style list table (all targets, filters, search) and a post detail page with tabs
 // (Overview · Events timeline of publish attempts · Metrics).
 import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum, relTime, STATUS_LABEL, refreshCommon, debounce, MARKS } from './core.js';
-import { openComposer } from './composer.js';
+import { openComposer, duplicatePost, retryTargets } from './composer.js';
 import { pageHeader, emptyState, skeleton, dropdown, idChip, setCrumbs, tabs, section, closeMenus } from './ui.js';
 import { lineChart } from './charts.js';
 import { formatLocal } from '/assets/shared/time.js';
-import { mediaVisual, listThumb } from './media.js';
+import { mediaVisual, listThumb, viewOnLink, removedNote } from './media.js';
 
 const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
 // Filter bar (Render-style): compact dropdown buttons in a row, applied filters as removable chips.
@@ -189,8 +189,8 @@ function postRow(g, t, refresh) {
     h('td', {}, statusBadge(t.status)),
     h('td', { class: 'mono small nowrap hide-sm' }, fmtTime(at)),
     h('td', { class: 'w-act' }, h('div', { class: 'row gap end' },
-      t.status === 'failed' ? h('button', { class: 'btn small hide-sm', onclick: async (e) => { e.stopPropagation(); try { await api('POST', `/posts/${g.id}/retry`, { target_ids: [t.id] }); toast('Retrying…', 'success'); setTimeout(refresh, 1000); } catch (err) { toast(err.message, 'error'); } } }, icon('refresh', 13), 'Retry') : null,
-      t.published_url ? h('a', { class: 'icon-btn', href: t.published_url, target: '_blank', rel: 'noopener', 'aria-label': 'Open live post', onclick: (e) => e.stopPropagation() }, icon('external', 15)) : null)));
+      t.status === 'failed' ? h('button', { class: 'btn small hide-sm', onclick: (e) => { e.stopPropagation(); retryTargets(g.id, [t.id], refresh); } }, icon('refresh', 13), 'Retry') : null,
+      viewOnLink(t, { cls: 'icon-btn', iconOnly: true }))));
 }
 
 // ------------------------------------------------------------------ detail
@@ -205,7 +205,7 @@ export async function renderPostDetail(root, id, params = {}) {
   const failed = post.targets.filter((t) => t.status === 'failed');
   const canPostNow = post.targets.some((t) => !['published', 'publishing', 'pending_approval'].includes(t.status));
   const moreBtn = h('button', { class: 'btn icon', 'aria-label': 'More actions', 'aria-haspopup': 'menu', onclick: (e) => dropdown(e.currentTarget, [
-    { label: 'Duplicate as draft', icon: 'copy', onClick: async () => { const r = await api('POST', `/posts/${id}/duplicate`, {}); toast('Duplicated', 'success'); location.hash = `#/posts/${r.post.id}`; } },
+    { label: 'Duplicate as draft', icon: 'copy', onClick: () => duplicatePost(id, { onSaved: (p) => { if (p) location.hash = `#/posts/${p.id}`; } }) },
     canPostNow ? { label: 'Post now', icon: 'send', onClick: async () => { await api('POST', `/posts/${id}/publish-now`, {}); toast('Publishing…', 'success'); setTimeout(refresh, 1000); } } : null,
     { sep: true },
     { label: 'Delete post', icon: 'trash', danger: true, onClick: async () => { if (await confirmDialog('Delete this post on all accounts? Already-published content stays live on the platforms.', { ok: 'Delete', danger: true })) { await api('DELETE', `/posts/${id}`); toast('Deleted'); location.hash = '#/posts'; } } },
@@ -214,7 +214,7 @@ export async function renderPostDetail(root, id, params = {}) {
     eyebrow: 'Post', title,
     meta: [statusBadge(post.status), idChip(post.id, { short: 12 }), h('span', { class: 'muted small' }, post.publish_at ? `${post.publish_at > Date.now() ? 'Publishes' : 'Scheduled for'} ${fmtTime(post.publish_at)} · ${relTime(post.publish_at)}` : 'No publish time')],
     actions: [
-      failed.length ? h('button', { class: 'btn', onclick: async () => { try { await api('POST', `/posts/${id}/retry`, { target_ids: failed.map((t) => t.id) }); toast('Retrying failed accounts…', 'success'); setTimeout(refresh, 1000); } catch (e) { toast(e.message, 'error'); } } }, icon('refresh', 15), `Retry failed (${failed.length})`) : null,
+      failed.length ? h('button', { class: 'btn', onclick: () => retryTargets(id, failed.map((t) => t.id), refresh) }, icon('refresh', 15), `Retry failed (${failed.length})`) : null,
       post.status === 'pending_approval' ? h('a', { class: 'btn', href: '#/approvals' }, icon('approvals', 15), 'Review') : null,
       h('button', { class: 'btn primary', onclick: () => openComposer({ groupId: id, onSaved: (p) => (p ? refresh() : (location.hash = '#/posts')) }) }, icon('edit', 15), 'Edit'),
       moreBtn,
@@ -243,11 +243,12 @@ function overview(post, refresh) {
         h('td', { class: 'mono hide-sm' }, String(t.attempts ?? 0)),
         h('td', { class: 'mono small nowrap hide-sm' }, fmtTime(t.published_at || t.publish_at)),
         h('td', { class: 'w-act' }, h('div', { class: 'row gap end' },
-          t.status === 'failed' ? h('button', { class: 'btn small', onclick: async () => { try { await api('POST', `/posts/${post.id}/retry`, { target_ids: [t.id] }); toast('Retrying…', 'success'); setTimeout(refresh, 1000); } catch (e) { toast(e.message, 'error'); } } }, 'Retry') : null,
-          t.published_url ? h('a', { class: 'btn small ghost', href: t.published_url, target: '_blank', rel: 'noopener' }, 'Open', icon('external', 13)) : null))))))));
+          t.status === 'failed' ? h('button', { class: 'btn small', onclick: () => retryTargets(post.id, [t.id], refresh) }, 'Retry') : null,
+          viewOnLink(t, { cls: 'btn small ghost view-on' })))))))));
   const content = section('Content', {},
     h('div', { class: 'caption-box' }, post.content || h('span', { class: 'muted' }, '(no caption)')),
-    post.media.length ? h('div', { class: 'media-strip' }, post.media.map((m) => h('a', { href: m.url, target: '_blank', rel: 'noopener', class: 'ms-item' }, mediaVisual(m), h('span', { class: 'ms-meta mono' }, `${m.kind}${m.width ? ` · ${m.width}×${m.height}` : ''}`)))) : null);
+    post.media.length ? h('div', { class: 'media-strip' }, post.media.map((m) => h(m.purged ? 'div' : 'a', m.purged ? { class: 'ms-item' } : { href: m.url, target: '_blank', rel: 'noopener', class: 'ms-item' }, mediaVisual(m), h('span', { class: 'ms-meta mono' }, `${m.kind}${m.width ? ` · ${m.width}×${m.height}` : ''}`)))) : null,
+    removedNote(post.media));
   const info = section('Details', {}, h('dl', { class: 'kv-list' },
     h('dt', {}, 'Status'), h('dd', {}, statusBadge(post.status)),
     h('dt', {}, 'Post ID'), h('dd', {}, idChip(post.id, { short: 40 })),
@@ -293,7 +294,7 @@ async function metricsTab(body, post) {
     const t = post.targets.find((x) => x.id === m.target_id);
     const color = PROVIDER_META[m.provider]?.color;
     const latest = Object.entries(m.latest || {});
-    return section(t?.account_name || m.provider, { sub: PROVIDER_META[m.provider]?.label, actions: m.published_url ? h('a', { class: 'btn small ghost', href: m.published_url, target: '_blank', rel: 'noopener' }, 'Open', icon('external', 13)) : null },
+    return section(t?.account_name || m.provider, { sub: PROVIDER_META[m.provider]?.label, actions: viewOnLink(m, { cls: 'btn small ghost view-on' }) },
       latest.length ? [
         h('div', { class: 'kpis' }, latest.slice(0, 8).map(([k, v]) => h('div', { class: 'kpi' }, h('div', { class: 'kl' }, k.replace(/_/g, ' ')), h('div', { class: 'kv' }, fmtNum(v))))),
         h('div', { class: 'chart-grid' }, Object.entries(m.series || {}).filter(([, pts]) => pts.length > 1).slice(0, 4).map(([k, pts]) => h('div', { class: 'chart-card' }, h('div', { class: 'cc-head' }, h('strong', {}, k.replace(/_/g, ' '))), lineChart(pts.map((p) => ({ day: p.day || formatLocal(p.t ?? p.at, state.settings.timezone).replace('T', ' ').slice(0, 16), value: p.value })), { color, height: 120, label: k })))),

@@ -15,7 +15,8 @@
 import { randomToken } from './crypto.js';
 import { isProviderError } from './providers/http.js';
 import { getProvider } from './providers/index.js';
-import { eventStmt } from './posts.js';
+import { eventStmt, composedMedia } from './posts.js';
+import { purgedMessage } from './retention.js';
 
 // Worst-case cost of one job step, used to stop before a Workers invocation runs out of budget.
 const STEP_COST = { fetches: 14, queries: 14 };
@@ -24,7 +25,7 @@ const STEP_COST = { fetches: 14, queries: 14 };
  * Instance-wide scheduler. Jobs of every workspace share one queue (system work, marked ws:system);
  * each job runs with ITS workspace's services, tokens and platform-app credentials via scopeFor(ws).
  */
-export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished = () => {}, onFailed = () => {}, workerTag = 'w' }) {
+export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished = () => {}, onFailed = () => {}, workerTag = 'w', housekeeping = null }) {
   const posts = { event: (postId, level, message) => db.run(...eventStmt(postId, level, message)), eventStmt };
   const wsOf = async (postId) => (await db.get('SELECT workspace_id FROM posts WHERE id = ? /* ws:system */', postId))?.workspace_id || null;
   const S = cfg.scheduler;
@@ -32,6 +33,17 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
   const active = new Set();
   let timer = null;
   let ticking = false;
+  let lastHousekeeping = 0;
+  let housekeepingRun = null;
+
+  /** Node loop: periodic housekeeping (media retention purge) piggybacks on the tick, never overlapping. */
+  function maybeHousekeeping() {
+    if (!housekeeping || housekeepingRun || Date.now() - lastHousekeeping < housekeeping.intervalMs) return;
+    lastHousekeeping = Date.now();
+    housekeepingRun = Promise.resolve().then(() => housekeeping.run())
+      .catch((e) => log('warn', `housekeeping: ${e.stack || e}`))
+      .finally(() => { housekeepingRun = null; });
+  }
 
   const now = () => Date.now();
 
@@ -163,6 +175,8 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
           const integ = await integrations.fresh(post.integration_id);
           if (integ.status !== 'active') return fail(job, `${integ.name}: account needs to be reconnected (${integ.status_message || 'token invalid'}).`);
           c ||= await sc.posts.composed(post);
+          const gone = composedMedia(c).filter((m) => m.purged_at);
+          if (gone.length && job.phase === 'start') return fail(job, purgedMessage([...new Set(gone.map((m) => m.original_name || m.id))], { retry: true }));
           ctx = buildCtx(job, post, integ, c, budget, sc);
         }
         const data = job.pending_data ? JSON.parse(job.pending_data) : null;
@@ -261,6 +275,7 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
           .catch((e) => log('error', `job ${job.id}: ${e.stack || e}`))
           .finally(() => active.delete(job.id));
       }
+      maybeHousekeeping();
     } finally {
       ticking = false;
     }
@@ -321,7 +336,7 @@ export function createScheduler({ db, cfg, scopeFor, log = () => {}, onPublished
       if (timer) clearInterval(timer);
       timer = null;
       const end = now() + waitMs;
-      while (active.size && now() < end) await new Promise((r) => setTimeout(r, 50));
+      while ((active.size || housekeepingRun) && now() < end) await new Promise((r) => setTimeout(r, 50));
     },
     activeCount: () => active.size,
   };

@@ -1,11 +1,11 @@
 // Secondary views: accounts, approvals, analytics, settings (general, API keys, webhooks, audit log, platform apps).
-import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, fmtNum, refreshCommon, modal, icon, relTime } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, fmtNum, fmtBytes, refreshCommon, modal, icon, relTime } from './core.js';
 import { openComposer } from './composer.js';
 import { formatLocal } from '/assets/shared/time.js';
 import { renderPlatformApps } from './apps.js';
 import { pageHeader, tabs, segmented, emptyState, skeleton, dropdown, idChip, copyButton, section, setCrumbs } from './ui.js';
 import { lineChart } from './charts.js';
-import { mediaVisual } from './media.js';
+import { mediaVisual, removedNote } from './media.js';
 
 const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
@@ -105,6 +105,7 @@ export async function renderApprovals(root) {
         h('div', { class: 'row gap' }, g.targets.map((t) => avatar({ provider: t.provider, name: t.account_name, picture: t.account_picture }, 24)))),
       h('p', { class: 'caption-prev' }, g.content || h('span', { class: 'muted' }, '(no caption)')),
       g.media.length ? h('div', { class: 'media-strip' }, g.media.map((m) => h('div', { class: 'ms-item' }, mediaVisual(m)))) : null,
+      removedNote(g.media),
       h('div', { class: 'ap-foot' },
         h('a', { class: 'btn ghost', href: `#/posts/${g.id}` }, 'Details'),
         h('div', { class: 'row gap' },
@@ -226,11 +227,13 @@ async function renderGeneral(body) {
     } catch (e) { toast(e.message, 'error', 6000); }
   } }, 'Save changes');
   const me = state.me;
+  const storage = await storageSection(() => renderGeneral(body));
   mount(body, h('div', { class: 'stack' },
     section('Timezone', { sub: 'Used for the calendar, the composer and posting slots.' }, h('div', { class: 'form-row' }, h('label', { class: 'field grow' }, h('span', {}, 'Timezone'), tzSel))),
     section('Posting slots', { sub: 'Used by “Next free slot” and agents’ next_slot mode. 24h times, comma separated.' },
       h('div', { class: 'slots' }, days.map((d) => h('label', { class: 'slot-row' }, h('span', { class: 'mono' }, d.toUpperCase()), slotInputs[d])))),
     h('div', { class: 'row end' }, save),
+    storage,
     section('Instance', {}, h('dl', { class: 'kv-list' },
       h('dt', {}, 'Public URL'), h('dd', { class: 'mono' }, s.public_url),
       h('dt', {}, 'MCP endpoint'), h('dd', { class: 'mono' }, `${s.public_url}/mcp`),
@@ -238,6 +241,30 @@ async function renderGeneral(body) {
       h('dt', {}, 'Analytics sync'), h('dd', {}, `every ${s.analytics_interval_hours} h`),
       h('dt', {}, 'Sign-in'), h('dd', {}, me.auth_mode === 'cloudflare-access' ? ['Cloudflare Zero Trust Access · ', h('span', { class: 'mono' }, me.principal.email || '')] : ['Password · ', h('a', { href: '/docs/setup/cloudflare-access', target: '_blank', rel: 'noopener' }, 'switch to Cloudflare Access')]),
       h('dt', {}, 'Version'), h('dd', { class: 'mono' }, me.version)))));
+}
+
+/** General → Storage: delete-after-publishing policy, storage used / freed, clean up now. */
+async function storageSection(rerender) {
+  let s;
+  try { ({ storage: s } = await api('GET', '/storage')); } catch { return null; }
+  const sel = h('select', { class: 'input', 'aria-label': 'Delete media after publishing', onchange: async (e) => {
+    try { await api('PATCH', '/storage', { delete_media_after: e.target.value }); toast('Storage setting saved', 'success'); } catch (err) { toast(err.message, 'error'); e.target.value = s.delete_media_after; }
+  } }, s.options.map((o) => h('option', { value: o.value, selected: o.value === s.delete_media_after }, o.label)));
+  sel.value = s.delete_media_after;
+  const clean = h('button', { class: 'btn small', onclick: async () => {
+    clean.disabled = true;
+    try {
+      const { report } = await api('POST', '/storage/cleanup', {});
+      toast(report.purged_files ? `Freed ${fmtBytes(report.freed_bytes)} (${report.purged_files} file${report.purged_files === 1 ? '' : 's'})` : 'Nothing to clean up right now', report.purged_files ? 'success' : 'info');
+      rerender();
+    } catch (e) { toast(e.message, 'error'); clean.disabled = false; }
+  } }, 'Clean up now');
+  const files = (n) => `${n} file${n === 1 ? '' : 's'}`;
+  return section('Storage', { sub: `Uploaded files are deleted once every post using them is published, after a ${s.safety_grace_minutes}-minute safety window. Thumbnails and the published links stay.`, actions: clean },
+    h('dl', { class: 'kv-list' },
+      h('dt', {}, 'Delete media after publishing'), h('dd', {}, sel),
+      h('dt', {}, 'Stored'), h('dd', {}, `${fmtBytes(s.used_bytes)} · ${files(s.files)}`),
+      h('dt', {}, 'Freed so far'), h('dd', {}, `${fmtBytes(s.freed_bytes)} · ${files(s.purged_files)}`)));
 }
 
 async function renderKeys(body) {

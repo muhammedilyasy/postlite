@@ -23,6 +23,7 @@ postlite is a lightweight, self-hosted social media scheduler for YouTube, Faceb
 - get_analytics_overview, get_account_analytics, get_top_posts, get_post_metrics, sync_analytics (REST CSV: GET /api/v1/analytics/export.csv)
 - list_webhooks, create_webhook, update_webhook, delete_webhook, rotate_webhook_secret, list_webhook_deliveries, test_webhook
 - list_api_keys, create_api_key, update_api_key, revoke_api_key, list_audit_log
+- get_storage, update_storage_settings (admin), cleanup_media (write; dry_run=true reports only): media originals are deleted after publishing (default "immediate" = 30 min after every post using them finished; "7d", "30d", "never"). Purged media keeps its poster/thumbnail; media[].purged = true, url/public_url = null, /m/ original → 410. To reuse it, re-upload the file (duplicate_post lists needs_reupload)
 
 ## Platform rules (summary — call list_platforms for the authoritative list)
 - YouTube: exactly one video; settings.title required (2–100 chars); description ≤ 5000; Shorts = vertical/square ≤ 180 s (`isShort: true`); privacy public|unlisted|private.

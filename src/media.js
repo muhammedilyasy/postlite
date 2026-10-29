@@ -66,10 +66,13 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
   // and cleanupUploads(); every library method needs a workspace.
   const W = () => { if (!ws) throw new Error('media: workspace scope required'); return ws; };
   const keyOf = (m) => m.storage_key || m.filename;
+  // Purged media (original deleted after publishing): url is null, the poster/thumbnail JPEG stays.
   const view = (m) => m && {
     id: m.id, name: m.original_name, mime: m.mime, kind: m.kind, size: m.size, width: m.width, height: m.height, duration: m.duration,
-    url: `/m/${m.token}/${m.filename}`, poster: m.poster ? `/m/${m.token}/${m.poster}` : null, created_at: m.created_at,
+    url: m.purged_at ? null : `/m/${m.token}/${m.filename}`, poster: m.poster ? `/m/${m.token}/${m.poster}` : null, created_at: m.created_at,
+    purged: !!m.purged_at, purged_at: m.purged_at || null, purged_bytes: m.purged_at ? m.purged_bytes || 0 : null,
   };
+  const gone = (m) => new HttpError(410, `The original of "${m.original_name}" was deleted after publishing to save storage. Re-upload the file to use it again.`, { purged_media: [m.id] });
   const maxBytes = () => cfg.maxUploadMb * MiB;
   const tooBig = () => new HttpError(413, `File exceeds MAX_UPLOAD_MB (${cfg.maxUploadMb} MB)`);
   const reader = (key, total) => (pos, len) => storage.read(key, pos, Math.max(0, Math.min(len, total - pos)));
@@ -155,6 +158,7 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
     size: (m) => m.size,
     /** Web ReadableStream of bytes [start, end] (inclusive) — used for YouTube chunk uploads. */
     async open(m, start = 0, end = m.size - 1) {
+      if (m.purged_at) throw gone(m);
       const r = await storage.get(keyOf(m), { offset: start, length: end - start + 1 });
       if (!r) throw new Error(`Media file ${m.filename} is missing from storage`);
       return r.body;
@@ -289,14 +293,15 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
     async setPoster(id, bytes, { replace = false } = {}) {
       const m = await db.get('SELECT * FROM media WHERE id = ? AND workspace_id = ?', String(id ?? ''), W());
       if (!m) throw new HttpError(404, 'Media not found.');
-      if (m.kind !== 'video') throw new HttpError(400, 'Only videos have a poster frame.');
+      if (m.kind !== 'video' && m.kind !== 'image') throw new HttpError(400, 'Only videos and images have a poster/thumbnail.');
       if (m.poster && !replace) return m;
       const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
       if (b.length < 100 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) throw new HttpError(415, 'Poster must be a JPEG image.');
       if (b.length > 2 * MiB) throw new HttpError(413, 'Poster must be at most 2 MB.');
       const info = imageSize(b, 'image/jpeg');
       if (!info?.width || !info?.height) throw new HttpError(400, 'Could not read the poster image size.');
-      const pname = `${m.id}.poster.jpg`;
+      if (m.kind === 'image' && Math.max(info.width, info.height) > 1080) throw new HttpError(400, 'An image thumbnail must be at most 1080 px on its long side.');
+      const pname = m.kind === 'video' ? `${m.id}.poster.jpg` : `${m.id}.thumb.jpg`;
       await storage.put(pname, new ReadableStream({ start(c) { c.enqueue(b); c.close(); } }), { size: b.length });
       await db.run('UPDATE media SET poster = ? WHERE id = ? AND workspace_id = ?', pname, m.id, ws);
       return { ...m, poster: pname };
@@ -317,6 +322,7 @@ export function createMedia({ db, cfg, storage, hooks = {}, ws = null }) {
       const m = await db.get('SELECT * FROM media WHERE token = ? /* ws:system */', String(token || ''));
       if (!m || (name !== m.filename && name !== m.poster)) return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
       const isPoster = name === m.poster;
+      if (!isPoster && m.purged_at) return new Response('Gone: this file was deleted after it was published (the post keeps a thumbnail).', { status: 410, headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' } });
       const key = isPoster ? m.poster : keyOf(m);
       const st = isPoster || storage.kind === 'fs' ? await storage.head(key) : { size: m.size };
       if (!st) return new Response(null, { status: 404 });

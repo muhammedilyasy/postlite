@@ -5,6 +5,7 @@
 import { uid } from './crypto.js';
 import { HttpError } from './errors.js';
 import { validatePost, defaultSettings } from './shared/validate.js';
+import { purgedMessage } from './retention.js';
 
 const parse = (s, d) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 const LOCKED = new Set(['published', 'publishing']);
@@ -47,6 +48,14 @@ export const MEDIA_TYPE_SQL = `(CASE
   WHEN ${HAS_VIDEO} THEN 'video'
   WHEN json_array_length(${EFFECTIVE_MEDIA}) = 1 THEN 'image'
   ELSE 'text' END)`;
+
+/** Media rows of a composed post (media + custom thumbnail + thread media). */
+export const composedMedia = (c) => [...c.media, ...(c.thumbnail ? [c.thumbnail] : []), ...(c.thread || []).flatMap((t) => t.media)];
+/** Throw an actionable 409 when a post would need originals that were deleted after publishing. */
+export function assertNotPurged(rows, { retry = false } = {}) {
+  const gone = [...new Map(rows.filter((m) => m?.purged_at).map((m) => [m.id, m])).values()];
+  if (gone.length) throw new HttpError(409, purgedMessage(gone.map((m) => m.original_name || m.id), { retry }), { purged_media: gone.map((m) => m.id), action: retry ? 'duplicate_and_reupload' : 'reupload' });
+}
 
 /** Event-log statement for a post id the caller already verified (scheduler / this workspace's posts). */
 export const eventStmt = (postId, level, message) => ['INSERT INTO post_events(post_id, at, level, message) VALUES(?,?,?,?) /* ws:checked */', postId, Date.now(), level, String(message).slice(0, 2000)];
@@ -201,6 +210,8 @@ export function createPosts({ db, media, integrations, ws }) {
         plan.push({ integ: ig, settings, content_override, media_override });
       }
       if (Object.keys(errors).length) throw new HttpError(422, 'Please fix the validation errors.', { errors });
+      // Drafts may keep a removed original as a "re-upload" placeholder (duplicates); anything that publishes may not.
+      if (action !== 'draft') assertNotPurged(plan.flatMap((p) => composedMedia(composeWith({ provider: p.integ.provider, settings: JSON.stringify(p.settings), content_override: p.content_override, media_override: p.media_override && JSON.stringify(p.media_override) }, g0, mediaMap))));
 
       let gid = groupId;
       const ops = [];
@@ -259,6 +270,7 @@ export function createPosts({ db, media, integrations, ws }) {
         if (p.istatus !== 'active') (errors[p.integration_id] ||= []).push('Account needs to be reconnected.');
       }
       if (Object.keys(errors).length) throw new HttpError(422, 'Cannot approve: validation errors.', { errors });
+      assertNotPurged(pend.flatMap((p) => composedMedia(composeWith(p, g, mediaMap))));
       const now = Date.now();
       const ops = [];
       for (const p of pend) {
@@ -381,7 +393,9 @@ export function createPosts({ db, media, integrations, ws }) {
       if (LOCKED.has(p.status)) throw new HttpError(409, `Post is already ${p.status}.`);
       if (retry && p.status !== 'failed') throw new HttpError(409, 'Only failed posts can be retried.');
       if (p.istatus !== 'active') throw new HttpError(409, 'Reconnect the account first.');
-      const v = validateComposed(p.provider, await composed(p), p.imeta);
+      const c = await composed(p);
+      assertNotPurged(composedMedia(c), { retry });
+      const v = validateComposed(p.provider, c, p.imeta);
       if (v.errors.length) throw new HttpError(422, 'Please fix the validation errors.', { errors: { [p.integration_id]: v.errors } });
       const now = Date.now();
       if (principal?.approval) {

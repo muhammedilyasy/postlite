@@ -39,12 +39,16 @@ test('poster endpoint: a client-generated JPEG becomes the video poster (REST + 
   assert.equal(Buffer.from(await (await fetch(`${app.base}${r.json.media.poster}`)).arrayBuffer()).length, other.length);
 });
 
-test('poster endpoint rejects non-JPEG data, images and unknown media', async () => {
+test('poster endpoint rejects non-JPEG data, documents, oversized image thumbnails and unknown media', async () => {
   const vid = await app.upload(makeMp4({ seconds: 5 }), 'b.mp4');
   const png = await app.api('POST', `/media/${vid.id}/poster`, { key, body: { data: Buffer.from('89504e470d0a1a0a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000', 'hex').toString('base64') } });
   assert.equal(png.status, 415);
   const image = await app.upload(makeJpeg(100, 100), 'i.jpg');
-  assert.equal((await app.api('POST', `/media/${image.id}/poster`, { key, body: { data: makeJpeg(10, 10).toString('base64') } })).status, 400);
+  // images accept a small JPEG thumbnail (kept after the original is deleted post-publishing)
+  assert.equal((await app.api('POST', `/media/${image.id}/poster`, { key, body: { data: makeJpeg(2000, 2000).toString('base64') } })).status, 400);
+  const thumb = await app.api('POST', `/media/${image.id}/poster`, { key, body: { data: makeJpeg(100, 100).toString('base64') } });
+  assert.equal(thumb.status, 200, thumb.text);
+  assert.match(thumb.json.media.poster, /\.thumb\.jpg$/);
   assert.equal((await app.api('POST', '/media/nope/poster', { key, body: { data: makeJpeg(10, 10).toString('base64') } })).status, 404);
 });
 

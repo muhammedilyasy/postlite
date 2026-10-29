@@ -18,6 +18,7 @@ import { isValidTimezone, WEEKDAYS } from './shared/time.js';
 import { createOAuth } from './oauth.js';
 import { createApps } from './apps.js';
 import { guardDb, createWorkspaces, wsSettings, LEGACY_WORKSPACE } from './tenant.js';
+import { createRetention } from './retention.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -101,6 +102,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       async prepare() { await apps.sync(); },
       stop: () => core.stop(),
     };
+    sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log });
     sc.oauth = createOAuth(sc);
     scopes.set(ws, sc);
     return sc;
@@ -112,6 +114,8 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
   };
   const scheduler = createScheduler({
     db, cfg, scopeFor: scope, log, workerTag: workers ? 'cf' : 'w',
+    // Node: the media retention purge runs from the scheduler loop (Workers: a cron step, see cron()).
+    housekeeping: !workers && cfg.mediaPurge?.enabled ? { intervalMs: cfg.mediaPurge.intervalMs, run: () => core.purgeMedia() } : null,
     onPublished: async (id, ws) => { if (ws) { const sc = scope(ws); await sc.webhooks.emit('post.published', await postPayload(sc, id)); } },
     onFailed: async (id, ws) => { if (ws) { const sc = scope(ws); await sc.webhooks.emit('post.failed', await postPayload(sc, id)); } },
   });
@@ -127,6 +131,23 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     LEGACY_WORKSPACE,
     /** Kept for callers that prepare per request; workspace credentials sync inside scope().prepare(). */
     async prepare() {},
+
+    /**
+     * Media retention: per workspace, delete originals that are eligible now (bounded batches, idempotent).
+     * dryRun = report only (nothing is generated, marked, moved or deleted).
+     */
+    async purgeMedia({ budget = null, dryRun = false, limit, workspaces: only = null } = {}) {
+      const out = [];
+      for (const ws of only || (await allWorkspaceIds())) {
+        if (budget && !budget.has({ fetches: 2, queries: 8 })) break;
+        try {
+          out.push(await scope(ws).retention.run({ dryRun, budget, ...(limit ? { limit } : {}) }));
+        } catch (e) {
+          log('warn', `media purge ${ws}: ${e.message}`);
+        }
+      }
+      return out;
+    },
 
     /** Housekeeping: token refresh/health (per workspace), audit pruning, expired upload sessions. */
     async maintenance({ budget = null } = {}) {
@@ -148,6 +169,13 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       const out = { scheduler: await scheduler.runOnce({ budget }) };
       out.webhooks = await delivery.deliverDue({ limit: cfg.budget.webhooks, budget });
       if (budget.has({ fetches: 15, queries: 15 })) out.analytics = Object.keys(await analyticsLoop.syncDue({ budget })).length;
+      if (cfg.mediaPurge?.enabled && budget.has({ fetches: 6, queries: 14 })) {
+        const lastPurge = Number((await db.getSetting('media_purge_at', '0')) || 0);
+        if (Date.now() - lastPurge >= cfg.mediaPurge.intervalMs) {
+          await db.setSetting('media_purge_at', String(Date.now()));
+          out.media_purged = (await core.purgeMedia({ budget })).reduce((n, r) => n + r.files, 0);
+        }
+      }
       const last = Number((await db.getSetting('maintenance_at', '0')) || 0);
       if (Date.now() - last > 12 * 3600000 && budget.has({ fetches: 10, queries: 15 })) {
         await db.setSetting('maintenance_at', String(Date.now()));

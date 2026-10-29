@@ -110,6 +110,15 @@ export function getConfig(env = {}, { platform = 'node' } = {}) {
       partSizeMb: num(E('UPLOAD_PART_MB'), workers ? 50 : 50),
       sessionHours: num(E('UPLOAD_SESSION_HOURS'), 24),
     },
+    // Delete media originals after publishing (per-workspace policy in Settings → General → Storage).
+    mediaPurge: {
+      enabled: E('MEDIA_PURGE') !== '0', // instance kill switch; 0 = never run the cleanup loop
+      graceMinutes: num(E('MEDIA_PURGE_GRACE_MINUTES'), 30), // safety window after the last target finished (IG/FB fetch async)
+      failedGraceHours: num(E('MEDIA_PURGE_FAILED_GRACE_HOURS'), 24), // a failed target blocks deletion this long (manual retry window)
+      batch: num(E('MEDIA_PURGE_BATCH'), workers ? 4 : 25), // files per workspace per run
+      intervalMs: num(E('MEDIA_PURGE_INTERVAL_MINUTES'), workers ? 10 : 5) * 60000,
+      trashDir: workers ? '' : E('MEDIA_PURGE_TRASH_DIR'), // Node: move instead of delete (recovery window)
+    },
     allowPrivateMediaUrls: E('ALLOW_PRIVATE_MEDIA_URLS') === '1',
     webhooks: { backoffMs: num(E('WEBHOOK_BACKOFF_MS'), 30000), maxAttempts: num(E('WEBHOOK_MAX_ATTEMPTS'), 6) },
     youtubeChunkBytes: num(E('YOUTUBE_CHUNK_BYTES'), (workers ? 64 : 8) * 1024 * 1024),

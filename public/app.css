@@ -258,6 +258,18 @@ a.kpi-tile:hover { background: var(--surface-2); }
 .wh .wd { font: 500 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--text-2); }
 .wh .dn { font-size: 15px; font-weight: 600; }
 .wh.today .dn { background: var(--accent); color: #fff; border-radius: 4px; padding: 0 6px; }
+.week-head.day-head, .week-grid.day-grid { grid-template-columns: 64px minmax(0, 1fr); }
+.day-head .wh:not(.tz) { justify-content: flex-start; padding-left: 14px; }
+.day-head .day-count { margin-left: 8px; font-weight: 400; }
+.day-grid .chip { max-width: 560px; }
+.btn-group .btn:disabled { opacity: .55; }
+/* List view: same column grid for every day's table so rows line up down the page. */
+.list .rows-click { table-layout: fixed; }
+.list .rows-click .w-time { width: 92px; }
+.list .rows-click th:nth-child(3) { width: 30%; }
+.list .rows-click .w-status { width: 160px; }
+.list .rows-click .w-act { width: 56px; }
+.list .rows-click td { overflow: hidden; }
 .week-scroll { max-height: calc(100vh - 340px); min-height: 420px; overflow-y: auto; }
 .week-grid { display: grid; grid-template-columns: 64px repeat(7, minmax(0, 1fr)); }
 .hour-label { font-size: 10.5px; color: var(--text-3); text-align: right; padding: 4px 10px 0 0; min-height: 52px; border-top: 1px solid var(--border); }
@@ -677,6 +689,10 @@ code.url { word-break: break-all; }
   .week-head, .week-grid { grid-template-columns: 44px repeat(7, minmax(44px, 1fr)); }
   .cal.week { overflow-x: auto; }
   .chip-text { display: none; }
+  .week-head.day-head, .week-grid.day-grid { grid-template-columns: 44px minmax(0, 1fr); }
+  .day-grid .chip-text { display: block; }
+  .cal-toolbar { align-items: flex-start; }
+  .cal-toolbar .toolbar-title { font-size: 15px; }
   .mcell { min-height: 72px; padding: 3px; }
   .month .chip { padding: 0 3px; height: 20px; }
   .month .chip .avatar, .month .chip-time { display: none; }

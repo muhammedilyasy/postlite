@@ -352,7 +352,7 @@ test('isolation: notifications and preferences are per workspace and per user; e
     // Bob's test email goes to Bob.
     assert.equal((await app.api('POST', '/notifications/test', { session: B, body: {} })).json.to, 'bob@example.com');
     // Wiping Bob's workspace removes his prefs/notifications only.
-    await sb.notifications.notify({ kind: 'post_failed', key: 'bob1', title: 'Bob alert' });
+    await sb.notifications.notify({ kind: 'account_reconnect', key: 'bob1', title: 'Bob alert' }); // Bob turned post_failed off above, so use a kind he still receives
     assert.equal((await app.api('GET', '/notifications', { session: B })).json.unread, 1);
     const wiped = await sb.wipe.wipe({ confirm: 'bob@example.com' });
     assert.ok(wiped.deleted.notifications >= 1, JSON.stringify(wiped.deleted));

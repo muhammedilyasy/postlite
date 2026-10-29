@@ -291,7 +291,9 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
     return map;
   }
 
-  async function topPosts({ integrationId = null, integrationIds = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
+  async function topPosts({ integrationId = null, integrationIds = null, groupIds = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
+    // groupIds (tag filter): only posts published through postlite whose post carries one of the tags.
+    const targetIds = groupIds ? new Set((groupIds.length ? await db.all(`SELECT id FROM posts WHERE workspace_id = ? AND group_id IN (${groupIds.map(() => '?').join(',')})`, ws, ...groupIds.slice(0, 90)) : []).map((r) => r.id)) : null;
     let integs;
     if (integrationIds) {
       const want = new Set(integrationIds);
@@ -307,6 +309,7 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
       const metrics = await latestPostMetrics(id);
       const rows = await db.all('SELECT * FROM remote_posts WHERE workspace_id = ? AND integration_id = ? AND (published_at IS NULL OR (published_at >= ? AND published_at <= ?))', ws, id, from, to);
       for (const r of rows) {
+        if (targetIds && !targetIds.has(r.post_id)) continue;
         out.push({ integration_id: id, provider: integ.provider, account: integ.display_name || integ.name, external_id: r.external_id, post_id: r.post_id, kind: r.kind, caption: r.caption, permalink: r.permalink, thumbnail: r.thumbnail || (integ.provider === 'youtube' ? ytThumb(null, r.external_id) : ''), published_at: r.published_at, via_postlite: !!r.post_id, metrics: metrics[r.external_id] || {} });
       }
     }

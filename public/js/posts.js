@@ -6,6 +6,7 @@ import { pageHeader, emptyState, skeleton, dropdown, idChip, setCrumbs, tabs, se
 import { lineChart } from './charts.js';
 import { formatLocal } from '/assets/shared/time.js';
 import { mediaVisual, listThumb, viewOnLink, removedNote } from './media.js';
+import { tagDot, tagChip } from './content.js';
 import { brandDot } from './brands.js';
 
 const fmtTime = fmtDateTime;
@@ -17,7 +18,7 @@ const PROVIDER_PLATFORM = { youtube: 'youtube', facebook: 'facebook', instagram:
 const STATUS_OPTS = [['scheduled', 'Scheduled'], ['published', 'Published'], ['failed', 'Failed'], ['pending_approval', 'Pending approval'], ['draft', 'Draft'], ['publishing', 'Publishing']];
 const TYPE_OPTS = [['video', 'Video'], ['image', 'Image'], ['text', 'Text'], ['carousel', 'Carousel'], ['story', 'Story'], ['reel', 'Reel'], ['short', 'Short'], ['thread', 'Thread'], ['document', 'Document']];
 const DATE_OPTS = [['', 'Any time'], ['next7', 'Next 7 days'], ['next30', 'Next 30 days'], ['last7', 'Last 7 days'], ['last30', 'Last 30 days'], ['custom', 'Custom range']];
-const LIST_KEYS = ['brand', 'platform', 'account', 'status', 'type', 'by'];
+const LIST_KEYS = ['brand', 'tag', 'platform', 'account', 'status', 'type', 'by'];
 
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const addDays = (s, n) => { const d = new Date(`${s}T12:00:00`); d.setDate(d.getDate() + n); return ymd(d); };
@@ -55,6 +56,7 @@ function apiQuery(f) {
   const n = new URLSearchParams({ limit: '200', sort: 'desc' });
   const brands = f.brand.filter((id) => (state.brands || []).some((b) => b.id === id));
   if (brands.length) n.set('brand', brands.join(','));
+  if (f.tag.length) n.set('tag', f.tag.join(','));
   if (f.platform.length) n.set('platform', f.platform.join(','));
   if (f.account.length) n.set('account_id', f.account.join(','));
   if (f.status.length) n.set('status', f.status.join(','));
@@ -103,6 +105,7 @@ export async function renderPosts(root, params = {}) {
   const byLabel = (v) => (v === 'human' ? 'People (web UI)' : v === 'agent' ? 'Any API key' : v.startsWith('key:') ? `Key: ${keys.find((k) => k.id === v.slice(4))?.name || v.slice(4, 12)}` : v);
   const groups = [
     ...((state.brands || []).length || f.brand.length ? [{ key: 'brand', label: 'Brand', opts: () => state.brands.map((b) => [b.id, b.name, brandDot(b, 'bdot menu-dot')]), text: (v) => state.brands.find((b) => b.id === v)?.name || 'Removed brand', width: 240 }] : []),
+    ...((state.tags || []).length || f.tag.length ? [{ key: 'tag', label: 'Tag', opts: () => state.tags.map((t) => [t.id, t.name, tagDot(t, 'bdot menu-dot')]), text: (v) => state.tags.find((t) => t.id === v)?.name || v, width: 220 }] : []),
     { key: 'platform', label: 'Platform', opts: () => platforms.map((p) => [p, PLATFORM_LABEL[p] || p, mark(p)]), text: (v) => PLATFORM_LABEL[v] || v },
     { key: 'account', label: 'Account', opts: () => accountsFor().map((a) => [a.id, a.name, avatar(a, 18)]), text: (v) => state.accounts.find((a) => a.id === v)?.name || 'Removed account', width: 260 },
     { key: 'status', label: 'Status', opts: () => STATUS_OPTS, text: (v) => STATUS_OPTS.find((o) => o[0] === v)?.[1] || v },
@@ -187,7 +190,7 @@ function postRow(g, t, refresh) {
       listThumb(g.media?.[0]),
       h('div', { class: 'cp-text' },
         h('a', { class: 'cp-title ellipsis', href: `#/posts/${g.id}`, onclick: (e) => e.stopPropagation() }, t.settings?.title || t.caption || '(no caption)'),
-        h('div', { class: 'cp-sub' }, idChip(g.id), h('span', { class: 'dot-sep' }), h('span', { class: 'show-sm' }, t.account_name), h('span', { class: 'hide-sm' }, at ? relTime(at) : 'no date')),
+        h('div', { class: 'cp-sub' }, idChip(g.id), (g.tags || []).length ? h('span', { class: 'row-tags hide-sm' }, g.tags.slice(0, 3).map((x) => tagChip(x))) : null, h('span', { class: 'dot-sep' }), h('span', { class: 'show-sm' }, t.account_name), h('span', { class: 'hide-sm' }, at ? relTime(at) : 'no date')),
         t.error ? h('div', { class: 'err small ellipsis' }, t.error) : t.warning ? h('div', { class: 'warn small ellipsis' }, t.warning) : null))),
     h('td', { class: 'hide-sm' }, h('div', { class: 'row gap' }, avatar({ provider: t.provider, name: t.account_name, picture: t.account_picture }, 22), h('span', { class: 'ellipsis' }, t.account_name))),
     h('td', {}, statusBadge(t.status)),

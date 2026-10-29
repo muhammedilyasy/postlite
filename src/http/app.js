@@ -345,7 +345,7 @@ export function createApp(core, { files, version }) {
         if (q.kind === 'account') {
           if (!q.account_id) throw new HttpError(400, 'account_id is required for kind=account');
           csv = await sc.analytics.csvAccount(q.account_id, from, to);
-        } else csv = await sc.analytics.csvPosts({ integrationId: q.account_id || null, integrationIds: !q.account_id && q.brand ? await sc.brands.accountIds(q.brand) : null, from, to, sort: q.sort || 'views' });
+        } else csv = await sc.analytics.csvPosts({ integrationId: q.account_id || null, integrationIds: !q.account_id && q.brand ? await sc.brands.accountIds(q.brand) : null, groupIds: q.tag ? await sc.tags.groupIds(q.tag) : null, from, to, sort: q.sort || 'views' });
         return send(200, csv, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="postlite-${q.kind === 'account' ? 'account' : 'posts'}-${new Date().toISOString().slice(0, 10)}.csv"`, 'cache-control': 'no-store' });
       } catch (e) { return sendError(e); }
     }

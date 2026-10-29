@@ -8,6 +8,7 @@ import { lineChart } from './charts.js';
 import { mediaVisual, removedNote } from './media.js';
 import { brandsSection, brandTags, brandSelect, brandDot } from './brands.js';
 import { channelMenu } from './channels.js';
+import { tagsSection, tagSelect } from './content.js';
 
 const fmtTime = fmtDateTime;
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
@@ -160,12 +161,13 @@ export async function renderAnalytics(root, params = {}) {
   const brandObj = brand ? state.brands.find((b) => b.id === brand) : null;
   const acc = params.account && (!brandObj || brandObj.channel_ids.includes(params.account)) ? params.account : '';
   const sort = params.sort || 'views';
+  const tag = (state.tags || []).some((t) => t.id === params.tag) ? params.tag : '';
   const to = Date.now(), from = to - days * 86400000;
-  const go = (p) => { const q = { days, account: acc, brand, sort, ...p }; for (const k of Object.keys(q)) if (q[k] === '' || q[k] === undefined) delete q[k]; location.hash = `#/analytics?${new URLSearchParams(q)}`; };
+  const go = (p) => { const q = { days, account: acc, brand, sort, tag, ...p }; for (const k of Object.keys(q)) if (q[k] === '' || q[k] === undefined) delete q[k]; location.hash = `#/analytics?${new URLSearchParams(q)}`; };
   const head = pageHeader({ title: 'Analytics', sub: 'Account and post metrics synced from the platforms.', actions: [
     h('button', { class: 'btn', onclick: async (e) => { const b = e.currentTarget; b.disabled = true; b.lastChild.textContent = 'Syncing…'; try { await api('POST', '/analytics/sync', acc ? { account_id: acc } : {}); toast('Analytics updated', 'success'); } catch (err) { toast(err.message, 'error'); } renderAnalytics(root, params); } }, icon('refresh', 15), h('span', {}, 'Sync now')),
     h('button', { class: 'btn icon', 'aria-label': 'Export CSV', 'aria-haspopup': 'menu', title: 'Export CSV', onclick: (e) => dropdown(e.currentTarget, [
-      { label: 'Posts CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=posts&from=${new Date(from).toISOString()}${acc ? `&account_id=${acc}` : brand ? `&brand=${encodeURIComponent(brand)}` : ''}` },
+      { label: 'Posts CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=posts&from=${new Date(from).toISOString()}${acc ? `&account_id=${acc}` : brand ? `&brand=${encodeURIComponent(brand)}` : ''}${tag ? `&tag=${tag}` : ''}` },
       acc ? { label: 'Daily account CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=account&account_id=${acc}&from=${new Date(from).toISOString()}` } : null,
     ], { align: 'right' }) }, icon('download', 15)),
   ] });
@@ -178,7 +180,7 @@ export async function renderAnalytics(root, params = {}) {
   let ov, accData = null, top;
   try {
     const bq = brand ? `&brand=${encodeURIComponent(brand)}` : '';
-    [ov, top] = await Promise.all([api('GET', `/analytics/overview?from=${from}&to=${to}${bq}`), api('GET', `/analytics/top-posts?from=${to - Math.max(days, 90) * 86400000}&to=${to}&sort=${encodeURIComponent(sort)}&limit=25${acc ? `&account_id=${acc}` : bq}`)]);
+    [ov, top] = await Promise.all([api('GET', `/analytics/overview?from=${from}&to=${to}${bq}`), api('GET', `/analytics/top-posts?from=${to - Math.max(days, 90) * 86400000}&to=${to}&sort=${encodeURIComponent(sort)}&limit=25${acc ? `&account_id=${acc}` : bq}${tag ? `&tag=${tag}` : ''}`)]);
     if (acc) accData = await api('GET', `/analytics/accounts/${acc}?from=${from}&to=${to}`);
   } catch (e) { mount(root, head, toolbar, h('div', { class: 'notice error' }, e.message)); return; }
 
@@ -227,7 +229,7 @@ export async function renderAnalytics(root, params = {}) {
   const allCols = ['views', 'reach', 'likes', 'comments', 'shares', 'saves', 'watch_minutes'];
   const metricCols = allCols.filter((m) => m === sort || top.posts.some((p) => p.metrics[m] !== undefined));
   const secondary = new Set(allCols.filter((m) => m !== sort && m !== 'likes'));
-  const topTable = section('Top posts', { actions: h('label', { class: 'row gap small' }, h('span', { class: 'muted' }, 'Sort by'), h('select', { class: 'input slim', onchange: (e) => go({ sort: e.target.value }) }, allCols.map((m) => h('option', { value: m, selected: m === sort }, label(m))))) },
+  const topTable = section('Top posts', { sub: tag ? `Posts published through postlite tagged “${state.tags.find((t) => t.id === tag)?.name}”.` : null, actions: [(state.tags || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Tag'), tagSelect(tag, (v) => go({ tag: v }))) : null, h('label', { class: 'row gap small' }, h('span', { class: 'muted' }, 'Sort by'), h('select', { class: 'input slim', onchange: (e) => go({ sort: e.target.value }) }, allCols.map((m) => h('option', { value: m, selected: m === sort }, label(m)))))] },
     top.posts.length ? h('div', { class: 'table-wrap flush' }, h('table', { class: 'table top-posts' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Post'), metricCols.map((m) => h('th', { class: `num ${m === sort ? 'sorted' : ''} ${secondary.has(m) ? 'hide-sm' : ''}`, title: label(m) }, shortLabel(m))))),
       h('tbody', {}, top.posts.map((p) => h('tr', {},
@@ -248,6 +250,7 @@ const SETTINGS_TABS = [
   { id: '', label: 'General', href: '#/settings', icon: 'settings' },
   { id: 'api-keys', label: 'API keys', href: '#/settings/api-keys', icon: 'key' },
   { id: 'webhooks', label: 'Webhooks', href: '#/settings/webhooks', icon: 'webhook' },
+  { id: 'content', label: 'Content', href: '#/settings/content', icon: 'tag' },
   { id: 'audit', label: 'Audit log', href: '#/settings/audit', icon: 'audit' },
   { id: 'apps', label: 'Platform apps', href: '#/settings/apps', icon: 'apps' },
 ];
@@ -263,7 +266,14 @@ export async function renderSettings(root, { tab = '', focus = null } = {}) {
   if (tab === 'api-keys') return renderKeys(body);
   if (tab === 'webhooks') return renderHooks(body);
   if (tab === 'audit') return renderAudit(body);
+  if (tab === 'content') return renderContent(body);
   return renderGeneral(body);
+}
+
+/** Settings → Content: tags (and signatures + templates). */
+async function renderContent(body) {
+  const rerender = () => renderContent(body);
+  mount(body, h('div', { class: 'stack' }, await tagsSection(rerender)));
 }
 
 async function renderGeneral(body) {

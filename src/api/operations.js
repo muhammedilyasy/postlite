@@ -85,7 +85,10 @@ const TARGET = S({
 
 const BRAND_PARAM = { type: ['array', 'string'], items: { type: 'string' }, description: 'Brand id(s) or name(s) (see list_brands): limits to the brand\'s channels. Several brands = any of their channels.' };
 
+const TAG_PARAM = { type: ['array', 'string'], items: { type: 'string' }, description: 'Tag id(s) or name(s) (list_tags); matches posts with any of them.' };
+
 const POST_BODY = {
+  tags: { type: 'array', items: { type: 'string' }, description: 'Tag ids or names for this post. Unknown names are created (list_tags). On update_post the list replaces the post\'s tags.' },
   brand_id: str('Shorthand for targets: a brand id or name (list_brands). Every connected channel of the brand becomes a target; channels that need a reconnect are skipped (listed in brand.skipped). Explicit targets for the same accounts still apply their settings.'),
   content: str('Global caption/description used by every target unless overridden.'),
   media_ids: { type: 'array', items: { type: 'string' }, description: 'Ordered media ids (from upload_media_from_url / upload_media_base64 / list_media).' },
@@ -466,6 +469,37 @@ export const operations = [
     input: S({ required: ['brand_id', 'account_ids'], properties: { brand_id: str('Brand id or name.'), account_ids: { type: 'array', items: { type: 'string' } }, mode: { type: 'string', enum: ['replace', 'add', 'remove'] } } }),
     handler: async (core, i) => ({ brand: await core.brands.setChannels(i.brand_id, i.account_ids, i.mode || 'replace') }),
   },
+  // ---- tags ----
+  {
+    name: 'list_tags', method: 'GET', path: '/tags', scope: 'read', tags: ['tags'], readOnly: true,
+    summary: 'List tags', description: 'Tags (id, name, color, posts = how many posts carry it). Filter list_posts, get_calendar and get_top_posts with tag; assign with create_post/update_post {tags} or set_post_tags.',
+    input: S({ properties: {} }),
+    handler: async (core) => ({ tags: await core.tags.list() }),
+  },
+  {
+    name: 'create_tag', method: 'POST', path: '/tags', scope: 'write', tags: ['tags'],
+    summary: 'Create a tag', description: 'Example: {"name":"launch","color":"#22c55e"}. Names are unique per workspace (case-insensitive, ≤ 40 chars, a leading # is dropped).',
+    input: S({ required: ['name'], properties: { name: str('Tag name.'), color: { type: ['string', 'null'], description: 'Hex "#rrggbb"; default picks one.' } } }),
+    handler: async (core, i) => ({ tag: await core.tags.create(i) }),
+  },
+  {
+    name: 'update_tag', method: 'PATCH', path: '/tags/{tag_id}', scope: 'write', tags: ['tags'],
+    summary: 'Rename or recolor a tag', description: 'tag_id accepts the id or the current name.',
+    input: S({ required: ['tag_id'], properties: { tag_id: str('Tag id or name.'), name: str('New name.'), color: { type: ['string', 'null'] } } }),
+    handler: async (core, i) => ({ tag: await core.tags.update(i.tag_id, { name: i.name, color: i.color }) }),
+  },
+  {
+    name: 'delete_tag', method: 'DELETE', path: '/tags/{tag_id}', scope: 'write', tags: ['tags'], destructive: true,
+    summary: 'Delete a tag', description: 'Removes the tag from every post; the posts stay.',
+    input: S({ required: ['tag_id'], properties: { tag_id: str('Tag id or name.') } }),
+    handler: async (core, i) => ({ deleted: await core.tags.remove(i.tag_id) }),
+  },
+  {
+    name: 'set_post_tags', method: 'PUT', path: '/posts/{post_id}/tags', scope: 'write', tags: ['tags'],
+    summary: 'Set the tags of a post', description: 'mode "replace" (default), "add" or "remove". Works on published posts too (tags never change what was published). Unknown names are created.',
+    input: S({ required: ['post_id', 'tags'], properties: { post_id: id('Post'), tags: { type: 'array', items: { type: 'string' } }, mode: { type: 'string', enum: ['replace', 'add', 'remove'] } } }),
+    handler: async (core, i) => { await groupOrThrow(core, i.post_id); await core.tags.setForGroup(i.post_id, i.tags, i.mode || 'replace'); return { post: await core.posts.getGroup(i.post_id) }; },
+  },
   // ---- media ----
   {
     name: 'list_media', method: 'GET', path: '/media', scope: 'read', tags: ['media'], readOnly: true,
@@ -576,6 +610,7 @@ export const operations = [
       provider: { type: ['array', 'string'], items: { type: 'string', enum: Object.keys(PLATFORMS) }, description: 'Exact provider id(s).' },
       account_id: { type: ['array', 'string'], items: { type: 'string' }, description: 'Account id(s).' },
       brand: BRAND_PARAM,
+      tag: TAG_PARAM,
       media_type: { type: ['array', 'string'], items: { type: 'string', enum: MEDIA_TYPES }, description: 'What was posted: video, image, text, carousel (2+ items), story, reel, short (YouTube Short), document (LinkedIn PDF), thread (X thread).' },
       created_by: { type: ['array', 'string'], items: { type: 'string' }, description: '"human" (web UI), "agent" (any API key) or "key:<api key id>".' },
       q: str('Search captions, YouTube titles and account names.'),
@@ -586,7 +621,7 @@ export const operations = [
       const tz = (await core.settings.get()).timezone;
       const accountIds = await brandScope(core, i.brand, i.account_id);
       if (accountIds && !accountIds.length) return { posts: [] };
-      return { posts: await core.posts.listGroups({ from: parseTime(i.from, tz, 'from'), to: parseTime(i.to, tz, 'to'), status: i.status, provider: i.provider, platform: i.platform, integration_id: accountIds ?? i.account_id, media_type: i.media_type, created_by: i.created_by, q: i.q, sort: i.sort, limit: i.limit, offset: i.offset }) };
+      return { posts: await core.posts.listGroups({ from: parseTime(i.from, tz, 'from'), to: parseTime(i.to, tz, 'to'), status: i.status, provider: i.provider, platform: i.platform, integration_id: accountIds ?? i.account_id, media_type: i.media_type, created_by: i.created_by, tag: i.tag, q: i.q, sort: i.sort, limit: i.limit, offset: i.offset }) };
     },
   },
   {
@@ -641,7 +676,9 @@ export const operations = [
     handler: async (core, i, p) => {
       needTargets(i);
       const bt = await brandTargets(core, i);
+      const tagOps = i.tags?.length ? await core.tags.resolve(i.tags, { create: true }) : null;
       const gid = await core.posts.saveGroup(await toSaveInput(core, bt ? { ...i, targets: bt.targets } : i, null, p), null, { principal: p });
+      if (tagOps) await core.tags.setForGroup(gid, tagOps.map((t) => t.id));
       const g = await core.posts.getGroup(gid);
       if (g.status === 'pending_approval') await core.webhooks.emit('post.pending_approval', { post_id: gid, requested_by: p.name });
       core.scheduler.poke();
@@ -657,6 +694,7 @@ export const operations = [
       const g = await groupOrThrow(core, i.post_id);
       const bt = await brandTargets(core, i);
       await core.posts.saveGroup(await toSaveInput(core, bt ? { ...i, targets: bt.targets } : i, g, p), g.id, { principal: p });
+      if (i.tags !== undefined) await core.tags.setForGroup(g.id, i.tags, 'replace');
       const ng = await core.posts.getGroup(g.id);
       if (ng.status === 'pending_approval' && g.status !== 'pending_approval') await core.webhooks.emit('post.pending_approval', { post_id: g.id, requested_by: p.name });
       core.scheduler.poke();
@@ -750,13 +788,14 @@ export const operations = [
   {
     name: 'get_calendar', method: 'GET', path: '/calendar', scope: 'read', tags: ['posts'], readOnly: true,
     summary: 'Calendar entries in a time range', description: `Flat list of per-account entries between from and to (default: next 7 days) plus undated drafts. ${TIME_HELP}`,
-    input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.'), brand: BRAND_PARAM } }),
+    input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.'), brand: BRAND_PARAM, tag: TAG_PARAM } }),
     handler: async (core, i) => {
       const tz = (await core.settings.get()).timezone;
       const from = parseTime(i.from, tz, 'from') ?? Date.now() - DAY;
       const to = parseTime(i.to, tz, 'to') ?? from + 8 * DAY;
       const only = await brandScope(core, i.brand);
-      const keep = (e) => !only || only.includes(e.integration_id);
+      const tagged = i.tag ? new Set(await core.tags.groupIds(i.tag)) : null;
+      const keep = (e) => (!only || only.includes(e.integration_id)) && (!tagged || tagged.has(e.group_id));
       return { timezone: tz, from, to, entries: (await core.posts.listRange(from, to)).filter(keep), undated_drafts: (await core.posts.listDrafts()).filter(keep) };
     },
   },
@@ -895,12 +934,12 @@ export const operations = [
   {
     name: 'get_top_posts', method: 'GET', path: '/analytics/top-posts', scope: 'analytics', tags: ['analytics'], readOnly: true,
     summary: 'Top posts by a metric', description: 'Posts (published via postlite AND recent posts fetched from the accounts) ranked by latest metric value. sort: views, likes, comments, shares, saves, reach, watch_minutes...',
-    input: S({ properties: { account_id: str('Limit to one account.'), brand: BRAND_PARAM, from: timeInput('Published after.'), to: timeInput('Published before.'), sort: str('Metric to sort by (default views).'), limit: { type: 'integer', minimum: 1, maximum: 500 } } }),
+    input: S({ properties: { account_id: str('Limit to one account.'), brand: BRAND_PARAM, tag: { ...TAG_PARAM, description: 'Only posts published through postlite that carry one of these tags.' }, from: timeInput('Published after.'), to: timeInput('Published before.'), sort: str('Metric to sort by (default views).'), limit: { type: 'integer', minimum: 1, maximum: 500 } } }),
     handler: async (core, i) => {
       const { from, to } = range(i, (await core.settings.get()).timezone, 90);
       const only = await brandScope(core, i.brand, i.account_id || undefined);
       if (only && !only.length) return { posts: [] };
-      return { posts: await core.analytics.topPosts({ integrationId: only ? null : i.account_id || null, integrationIds: only, from, to, sort: i.sort || 'views', limit: i.limit || 20 }) };
+      return { posts: await core.analytics.topPosts({ integrationId: only ? null : i.account_id || null, integrationIds: only, groupIds: i.tag ? await core.tags.groupIds(i.tag) : null, from, to, sort: i.sort || 'views', limit: i.limit || 20 }) };
     },
   },
   {

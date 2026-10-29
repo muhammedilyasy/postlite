@@ -80,6 +80,12 @@ A brand is a named set of channels across platforms (for example "North Star" = 
   - `disabled: true` pauses publishing without disconnecting (admin scope). Due posts wait: they are not published and not failed. `publish_post_now` and `create_post {mode:"now"}` are refused for that channel, and brand posting skips it (`brand.skipped[].reason = "publishing paused"`). `disabled: false` resumes, and anything that came due meanwhile publishes right away. Targets show `account_paused`.
   - `posting_slots` sets the channel's own weekly slots (same shape as `update_settings`; `null` = workspace slots). `list_free_slots {account_id}` and `mode: "next_slot"` use the selected channels' slots, and only those channels' posts count as taken.
 
+## Tags
+
+- `list_tags`, `create_tag {name, color?}`, `update_tag {tag_id, name?, color?}`, `delete_tag` (the posts stay). `tag_id` takes the id or the name.
+- Assign: `create_post {..., tags: ["launch", "promo"]}` (unknown names are created), `update_post {tags}` replaces them, `set_post_tags {post_id, tags, mode: replace|add|remove}` works on published posts too. Posts carry `tags: [{id, name, color}]`.
+- Filter: `list_posts {tag}`, `get_calendar {tag}`, `get_top_posts {tag}` (only posts published through postlite carry tags) and the CSV export (`&tag=`).
+
 ## Media library
 
 - `list_media {q?, kind?: image|video|document, usage?: used|unused|purged, limit?, offset?, counts?}` pages through uploads newest first. Each item has `used_by_posts`, `in_use` (an unfinished post or an active repeating post needs it), `deletable` and `purged`. `total` is the number of matches; `counts` (with `counts: true`) gives totals per kind and usage.

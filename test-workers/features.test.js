@@ -75,6 +75,22 @@ test('Workers/D1: channel preferences — rename, pause holds due posts through 
   await w.api('PATCH', `/accounts/${fb}`, { key: admin, body: { posting_slots: null } });
 });
 
+test('Workers/D1: tags — create, assign on create_post, filter posts/calendar, set_post_tags, delete', { skip }, async () => {
+  const t = await w.api('POST', '/tags', { key: admin, body: { name: 'cf-launch', color: '#22c55e' } });
+  assert.equal(t.status, 200, t.text);
+  const p = await w.api('POST', '/posts', { key: admin, body: { content: 'tagged on workers', tags: ['cf-launch', 'cf-new'], targets: [{ account_id: fb }], mode: 'schedule', publish_at: Date.now() + 3600000 } });
+  assert.equal(p.status, 200, p.text);
+  assert.deepEqual(p.json.post.tags.map((x) => x.name).sort(), ['cf-launch', 'cf-new']);
+  const listed = (await w.api('GET', '/posts?tag=cf-launch', { key: admin })).json.posts;
+  assert.deepEqual(listed.map((x) => x.id), [p.json.post.id]);
+  const cal = await w.api('GET', `/calendar?from=${Date.now()}&to=${Date.now() + 7200000}&tag=cf-new`, { key: admin });
+  assert.ok(cal.json.entries.some((e) => e.group_id === p.json.post.id));
+  const r = await w.api('PUT', `/posts/${p.json.post.id}/tags`, { key: admin, body: { tags: ['cf-new'], mode: 'remove' } });
+  assert.deepEqual(r.json.post.tags.map((x) => x.name), ['cf-launch']);
+  assert.equal((await w.api('DELETE', '/tags/cf-launch', { key: admin })).status, 200);
+  assert.deepEqual((await w.api('GET', `/posts/${p.json.post.id}`, { key: admin })).json.post.tags, []);
+});
+
 // Runs last: wipes the workspace.
 test('Workers/D1: delete workspace data removes accounts, posts and keys, then the key stops working', { skip }, async () => {
   const p = await w.api('POST', '/posts', { key: admin, body: { content: 'to be wiped', targets: [{ account_id: fb }], mode: 'schedule', publish_at: Date.now() + 86400000 } });

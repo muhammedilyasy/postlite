@@ -61,7 +61,7 @@ export function assertNotPurged(rows, { retry = false } = {}) {
 export const eventStmt = (postId, level, message) => ['INSERT INTO post_events(post_id, at, level, message) VALUES(?,?,?,?) /* ws:checked */', postId, Date.now(), level, String(message).slice(0, 2000)];
 
 /** Posts of ONE workspace (ws). Every read joins/filters by workspace_id. */
-export function createPosts({ db, media, integrations, ws }) {
+export function createPosts({ db, media, integrations, ws, tagsFor = async () => new Map() }) {
   if (!ws) throw new Error('createPosts: workspace id required');
   const event = (postId, level, message) => db.run(...eventStmt(postId, level, message));
 
@@ -129,6 +129,7 @@ export function createPosts({ db, media, integrations, ws }) {
     const targets = await inChunks(list, (c) => db.all(`${SELECT} WHERE p.workspace_id = ? AND p.group_id IN (${marks(c.length)}) ORDER BY i.provider, p.created_at, p.id`, ws, ...c));
     const mediaIds = [...[...groups.values()].flatMap((g) => parse(g.media, [])), ...targets.flatMap((t) => mediaIdsOf(t, groups.get(t.group_id)))];
     const mediaMap = await loadMedia(mediaIds);
+    const tagMap = await tagsFor(list.filter((id) => groups.has(id)));
     const byGroup = new Map();
     for (const t of targets) {
       const g = groups.get(t.group_id);
@@ -139,7 +140,7 @@ export function createPosts({ db, media, integrations, ws }) {
       const tv = byGroup.get(id) || [];
       return {
         id: g.id, content: g.content, media: parse(g.media, []).map((m) => mediaMap.get(String(m))).filter(Boolean).map(media.view), publish_at: g.publish_at, status: aggregateStatus(tv),
-        created_by: g.created_by, approval_note: g.approval_note, created_at: g.created_at, updated_at: g.updated_at, targets: tv,
+        created_by: g.created_by, approval_note: g.approval_note, tags: tagMap.get(id) || [], created_at: g.created_at, updated_at: g.updated_at, targets: tv,
       };
     });
   }
@@ -305,7 +306,7 @@ export function createPosts({ db, media, integrations, ws }) {
      * platform/provider/status/account/media_type/created_by accept arrays; q searches caption,
      * title and account name; from/to apply to the published (else scheduled, else updated) time.
      */
-    async listGroups({ from = null, to = null, status = null, provider = null, platform = null, integration_id = null, media_type = null, created_by = null, q = null, sort = null, limit = 50, offset = 0 } = {}) {
+    async listGroups({ from = null, to = null, status = null, provider = null, platform = null, integration_id = null, media_type = null, created_by = null, tag = null, q = null, sort = null, limit = 50, offset = 0 } = {}) {
       const list = (v) => (v === null || v === undefined || v === '' ? [] : (Array.isArray(v) ? v : String(v).split(',')).map((x) => String(x).trim()).filter(Boolean));
       const where = ['p.workspace_id = ?'];
       const args = [ws];
@@ -327,6 +328,11 @@ export function createPosts({ db, media, integrations, ws }) {
           else throw new HttpError(400, `created_by must be "human", "agent" or "key:<api key id>" (got "${w}").`);
         }
         where.push(`(${ors.join(' OR ')})`);
+      }
+      const tags = list(tag).map((x) => x.replace(/^#/, ''));
+      if (tags.length) {
+        where.push(`EXISTS (SELECT 1 FROM group_tags gt JOIN tags t ON t.id = gt.tag_id AND t.workspace_id = gt.workspace_id WHERE gt.group_id = p.group_id AND gt.workspace_id = p.workspace_id AND (t.id IN (${marks(tags.length)}) OR LOWER(t.name) IN (${marks(tags.length)})))`);
+        args.push(...tags, ...tags.map((x) => x.toLowerCase()));
       }
       const needle = String(q || '').trim();
       if (needle) {
@@ -363,6 +369,7 @@ export function createPosts({ db, media, integrations, ws }) {
         ops.push(['INSERT INTO posts(id, workspace_id, group_id, integration_id, content_override, media_override, settings, publish_at, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
           uid(), ws, nid, p.integration_id, p.content_override, p.media_override, p.settings, p.publish_at, 'draft', now, now]);
       }
+      for (const t of g.tags || []) ops.push(['INSERT INTO group_tags(group_id, tag_id, workspace_id, created_at) VALUES(?,?,?,?) ON CONFLICT(group_id, tag_id) DO NOTHING', nid, t.id, ws, now]);
       await db.batch(ops);
       return nid;
     },

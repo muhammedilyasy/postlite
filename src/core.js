@@ -22,6 +22,7 @@ import { createRetention } from './retention.js';
 import { createBrands } from './brands.js';
 import { createWipe } from './wipe.js';
 import { createLibrary } from './library.js';
+import { createTags } from './tags.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -59,7 +60,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     const webhooks = createWebhooks({ db, cipher, ws, delivery, deliverOnEmit: !workers });
     const media = createMedia({ db, cfg: wcfg, storage, hooks: runtime.hooks || {}, ws });
     const integrations = createIntegrations({ db, cfg: wcfg, cipher, ws, log, onNeedsReconnect: (d) => webhooks.emit('account.needs_reconnect', d) });
-    const posts = createPosts({ db, media, integrations, ws });
+    const posts = createPosts({ db, media, integrations, ws, tagsFor: (ids) => sc.tags.forGroups(ids) });
     const analytics = createAnalytics({ db, cfg: wcfg, integrations, ws, log, onSynced: (r) => webhooks.emit('analytics.synced', { accounts: r }) });
     analytics.start = () => analyticsLoop.start();
     analytics.stop = () => analyticsLoop.stop();
@@ -111,6 +112,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       stop: () => core.stop(),
     };
     sc.brands = createBrands({ db, ws });
+    sc.tags = createTags({ db, ws });
     sc.wipe = createWipe({ db, storage, ws, workspaces });
     sc.library = createLibrary({ db, ws, media, extraRefs: async () => (sc.series ? sc.series.activeMediaIds() : []) });
     sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log });

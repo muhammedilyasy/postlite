@@ -4,6 +4,7 @@ import { segmented } from './ui.js';
 import { mediaVisual, ensurePoster, viewOnLink, REMOVED_NOTE } from './media.js';
 import { brandDot } from './brands.js';
 import { captionTools, hasStyled } from './emoji.js';
+import { tagPicker } from './content.js';
 
 const LAST_BRAND = 'pl_last_brand';
 import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, captionLength, xWeightedLength } from '/assets/shared/validate.js';
@@ -14,10 +15,10 @@ const info = (m) => m && ({ kind: m.kind, mime: m.mime, size: m.size, width: m.w
 
 export async function openComposer({ groupId = null, at = null, media = null, accountIds = null, onSaved = () => {} } = {}) {
   const tz = state.settings.timezone;
-  const st = { id: null, focusEl: null, content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
+  const st = { id: null, focusEl: null, tags: [], content: '', media: [], publish_at: at, targets: new Map(), locked: new Set(), active: null, status: 'draft', approval_note: null, thumbs: new Map(), serverErrors: {} };
   if (groupId) {
     const { post } = await api('GET', `/posts/${groupId}`);
-    Object.assign(st, { id: post.id, content: post.content, media: post.media, publish_at: post.publish_at, status: post.status, approval_note: post.approval_note });
+    Object.assign(st, { id: post.id, content: post.content, media: post.media, publish_at: post.publish_at, status: post.status, approval_note: post.approval_note, tags: (post.tags || []).map((t) => t.id) });
     for (const t of post.targets) {
       st.targets.set(t.integration_id, { content_override: t.content_override, settings: { ...t.settings }, status: t.status, error: t.error, warning: t.warning, published_url: t.published_url, target_id: t.id });
       if (['published', 'publishing'].includes(t.status)) st.locked.add(t.integration_id);
@@ -90,6 +91,8 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
           counters(),
           h('div', { class: 'label' }, 'Media'),
           mediaBox(),
+          h('div', { class: 'label' }, 'Tags'),
+          tagPicker(st.tags, (list) => { st.tags = list; }),
           h('label', { class: 'label', for: 'pl-when' }, 'Schedule', h('span', { class: 'label-hint mono' }, tz)),
           h('div', { class: 'row gap wrap' },
             h('input', { id: 'pl-when', type: 'datetime-local', class: 'input when', value: st.publish_at ? formatLocal(st.publish_at, tz) : '', onchange: (e) => { st.publish_at = e.target.value ? parseLocal(e.target.value, tz) : null; render(); } }),
@@ -456,6 +459,7 @@ export async function openComposer({ groupId = null, at = null, media = null, ac
     content: st.content,
     media_ids: st.media.map((x) => x.id),
     targets: [...st.targets.entries()].map(([aid, t]) => ({ account_id: aid, content: t.content_override ?? null, settings: t.settings })),
+    tags: st.tags,
     mode,
     ...(st.publish_at && mode !== 'now' ? { publish_at: st.publish_at } : {}),
   });

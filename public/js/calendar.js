@@ -6,9 +6,12 @@ import { zonedParts, zonedToUtc, formatLocal } from '/assets/shared/time.js';
 import { listThumb, platformName } from './media.js';
 import { brandSelect } from './brands.js';
 import { channelMenu } from './channels.js';
+import { tagSelect, tagDot } from './content.js';
 
 /** Brand filter lives in the URL hash (#/dashboard?brand=<id>). */
 const hashBrand = () => { const id = new URLSearchParams(location.hash.split('?')[1] || '').get('brand') || ''; return (state.brands || []).find((b) => b.id === id) || null; };
+const hashTag = () => { const id = new URLSearchParams(location.hash.split('?')[1] || '').get('tag') || ''; return (state.tags || []).find((t) => t.id === id) || null; };
+function setHashTag(id) { const [path, q] = location.hash.split('?'); const n = new URLSearchParams(q || ''); if (id) n.set('tag', id); else n.delete('tag'); history.replaceState(null, '', `${path || '#/dashboard'}${n.size ? `?${n}` : ''}`); }
 function setHashBrand(id) { const [path, q] = location.hash.split('?'); const n = new URLSearchParams(q || ''); if (id) n.set('brand', id); else n.delete('brand'); history.replaceState(null, '', `${path || '#/dashboard'}${n.size ? `?${n}` : ''}`); }
 
 const DAY = 86400000;
@@ -59,6 +62,7 @@ export async function renderDashboard(root) {
 export async function renderCalendar(root) {
   const tz = state.settings.timezone;
   const brand = hashBrand();
+  const tag = hashTag();
   let from, to, title;
   if (view.mode === 'week') {
     from = weekStart(view.anchor, tz); to = addDays(from, 7, tz);
@@ -95,6 +99,7 @@ export async function renderCalendar(root) {
         h('button', { class: 'btn icon', 'aria-label': `Next ${view.mode === 'list' ? '30 days' : view.mode}`, title: 'Next', onclick: () => shift(1) }, icon('chevron-right', 16))),
       h('h2', { class: 'toolbar-title' }, title)),
     h('div', { class: 'row gap wrap' },
+      (state.tags || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Tag'), tagSelect(tag?.id || '', (v) => { setHashTag(v); renderCalendar(root); })) : null,
       (state.brands || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Brand'), brandSelect(brand?.id || '', (v) => { setHashBrand(v); if (v && view.filter && !state.brands.find((b) => b.id === v)?.channel_ids.includes(view.filter)) view.filter = ''; renderCalendar(root); })) : null,
       h('label', { class: 'select-wrap cal-acc-filter' }, h('span', { class: 'sr-only' }, 'Account'),
         h('select', { class: 'input slim', onchange: (e) => { view.filter = e.target.value; renderCalendar(root); } },
@@ -102,7 +107,7 @@ export async function renderCalendar(root) {
       segmented([['day', 'Day'], ['week', 'Week'], ['month', 'Month'], ['list', 'List']], view.mode, (m) => { view.mode = m; localStorage.setItem('pl_view', m); renderCalendar(root); }, { label: 'Calendar view' })));
   mount(root, toolbar, skeleton(view.mode === 'list' ? 'table' : 'calendar', 6));
   let data;
-  try { data = await api('GET', `/calendar?from=${from}&to=${to}`); } catch (e) { mount(root, toolbar, h('div', { class: 'notice error' }, e.message)); return; }
+  try { data = await api('GET', `/calendar?from=${from}&to=${to}${tag ? `&tag=${tag.id}` : ''}`); } catch (e) { mount(root, toolbar, h('div', { class: 'notice error' }, e.message)); return; }
   const inBrand = (e) => !brand || brand.channel_ids.includes(e.integration_id);
   const entries = data.entries.filter((e) => inBrand(e) && (!view.filter || e.integration_id === view.filter));
   const refresh = () => renderCalendar(root);

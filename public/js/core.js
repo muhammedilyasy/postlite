@@ -3,7 +3,7 @@ import { icon } from './icons.js';
 import { formatLocal } from '/assets/shared/time.js';
 
 export let CSRF = null;
-export const state = { settings: null, accounts: [], providers: [], me: null, brands: [], brandSuggestions: [] };
+export const state = { settings: null, accounts: [], providers: [], me: null, brands: [], brandSuggestions: [], tags: [] };
 
 export function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
@@ -62,7 +62,8 @@ export async function bootstrap() {
 }
 
 export async function refreshCommon() {
-  const [st, acc, prov, br] = await Promise.all([api('GET', '/settings'), api('GET', '/accounts'), api('GET', '/oauth/providers'), api('GET', '/brands').catch(() => ({ brands: [], suggestions: [] }))]);
+  const [st, acc, prov, br, tg] = await Promise.all([api('GET', '/settings'), api('GET', '/accounts'), api('GET', '/oauth/providers'), api('GET', '/brands').catch(() => ({ brands: [], suggestions: [] })), api('GET', '/tags').catch(() => ({ tags: [] }))]);
+  state.tags = tg.tags;
   state.settings = st.settings;
   state.accounts = acc.accounts;
   state.providers = prov.providers;

@@ -83,7 +83,10 @@ const TARGET = S({
   },
 });
 
+const BRAND_PARAM = { type: ['array', 'string'], items: { type: 'string' }, description: 'Brand id(s) or name(s) (see list_brands): limits to the brand\'s channels. Several brands = any of their channels.' };
+
 const POST_BODY = {
+  brand_id: str('Shorthand for targets: a brand id or name (list_brands). Every connected channel of the brand becomes a target; channels that need a reconnect are skipped (listed in brand.skipped). Explicit targets for the same accounts still apply their settings.'),
   content: str('Global caption/description used by every target unless overridden.'),
   media_ids: { type: 'array', items: { type: 'string' }, description: 'Ordered media ids (from upload_media_from_url / upload_media_base64 / list_media).' },
   targets: { type: 'array', items: TARGET, minItems: 1, description: 'One entry per account to publish to.' },
@@ -143,6 +146,44 @@ async function groupOrThrow(core, postId) {
   const g = await core.posts.getGroup(postId);
   if (!g) throw new HttpError(404, `Post ${postId} not found. Use list_posts to find ids.`);
   return g;
+}
+
+/** brand_id → targets (explicit targets win for the same account). Returns { targets, brand } or null. */
+async function brandTargets(core, input) {
+  if (!input.brand_id) return null;
+  const b = await core.brands.mustFind(input.brand_id);
+  const explicit = new Map((input.targets || []).map((t) => [t.account_id, t]));
+  const active = b.channels.filter((c) => c.status === 'active');
+  const skipped = b.channels.filter((c) => c.status !== 'active').map((c) => ({ account_id: c.id, name: c.name, provider: c.provider, reason: 'needs reconnect' }));
+  const targets = [...active.map((c) => explicit.get(c.id) || { account_id: c.id }), ...(input.targets || []).filter((t) => !active.some((c) => c.id === t.account_id))];
+  if (!targets.length) throw new HttpError(409, `Brand "${b.name}" has no connected channels${skipped.length ? ' (all need a reconnect)' : ''}. Add channels with set_brand_channels.`);
+  return { targets, brand: { id: b.id, name: b.name, channels: active.length, ...(skipped.length ? { skipped } : {}) } };
+}
+/** brand filter ∩ account_id filter → account ids (null = no account filter; [] = nothing matches). */
+async function brandScope(core, brand, accountId) {
+  const has = (v) => v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length);
+  if (!has(brand)) return null;
+  const ids = await core.brands.accountIds(brand);
+  if (!has(accountId)) return ids;
+  const only = new Set((Array.isArray(accountId) ? accountId : String(accountId).split(',')).map((x) => String(x).trim()));
+  return ids.filter((x) => only.has(x));
+}
+const needTargets = (i) => { if (!i.brand_id && !(i.targets || []).length) throw new HttpError(400, 'Give targets (one per account) or brand_id.'); };
+
+/** Aggregate per-account summaries into brand totals: snapshots and sums add up, averages are averaged. */
+export function aggregateSummaries(summaries) {
+  const out = {};
+  for (const s of summaries) for (const [m, v] of Object.entries(s || {})) {
+    const o = out[m] || (out[m] = { value: 0, change: 0, kind: v.kind, channels: 0 });
+    o.channels++;
+    o.value += v.value || 0;
+    if (v.kind === 'snapshot') o.change += v.change || 0;
+  }
+  for (const o of Object.values(out)) {
+    if (o.kind === 'average') o.value = Math.round(o.value / o.channels);
+    if (o.kind !== 'snapshot') delete o.change;
+  }
+  return out;
 }
 
 /** Turn API input into posts.saveGroup input (merging with an existing post for updates). */
@@ -297,9 +338,12 @@ export const operations = [
   {
     name: 'list_accounts', method: 'GET', path: '/accounts', scope: 'read', tags: ['accounts'], readOnly: true,
     summary: 'List connected accounts',
-    description: 'Connected YouTube channels, Facebook Pages and Instagram accounts with status ("active" or "needs_reconnect"). Use the "id" as account_id in targets.',
+    description: 'Connected YouTube channels, Facebook Pages and Instagram accounts with status ("active" or "needs_reconnect") and the brands each account belongs to. Use the "id" as account_id in targets.',
     input: S({ properties: { provider: { type: 'string', enum: Object.keys(PLATFORMS), description: 'Filter by provider.' } } }),
-    handler: async (core, i) => ({ accounts: (await core.integrations.list()).filter((a) => !i.provider || a.provider === i.provider) }),
+    handler: async (core, i) => {
+      const by = await core.brands.byAccount();
+      return { accounts: (await core.integrations.list()).filter((a) => !i.provider || a.provider === i.provider).map((a) => ({ ...a, brands: by.get(a.id) || [] })) };
+    },
   },
   {
     name: 'get_account', method: 'GET', path: '/accounts/{account_id}', scope: 'read', tags: ['accounts'], readOnly: true,
@@ -340,6 +384,41 @@ export const operations = [
       await core.integrations.remove(i.account_id);
       return { deleted: true };
     },
+  },
+  // ---- brands (named sets of channels; not post groups) ----
+  {
+    name: 'list_brands', method: 'GET', path: '/brands', scope: 'read', tags: ['brands'], readOnly: true,
+    summary: 'List brands (named sets of channels)',
+    description: 'Brands group connected accounts across platforms, e.g. "North Star" = its YouTube, Instagram, Facebook and X accounts. Each brand has id, name, color and channels (accounts). Use a brand id or name as brand_id in create_post ("post this to the North Star brand") or as the brand filter of list_posts, get_calendar and analytics. suggestions: brands you could create from account names that share a prefix (never created automatically).',
+    input: S({ properties: {} }),
+    handler: async (core) => {
+      const brands = await core.brands.list();
+      return { brands, suggestions: await core.brands.suggestions(await core.integrations.list()) };
+    },
+  },
+  {
+    name: 'create_brand', method: 'POST', path: '/brands', scope: 'write', tags: ['brands'],
+    summary: 'Create a brand', description: 'Example: {"name":"North Star","color":"#3b82f6","account_ids":["<yt id>","<ig id>"]}. Names are unique per workspace (case-insensitive). An account can be in several brands.',
+    input: S({ required: ['name'], properties: { name: str('Brand name (≤ 60 chars).'), color: { type: ['string', 'null'], description: 'Optional dot color, hex "#rrggbb".' }, account_ids: { type: 'array', items: { type: 'string' }, description: 'Accounts (channels) in the brand.' } } }),
+    handler: async (core, i) => ({ brand: await core.brands.create(i) }),
+  },
+  {
+    name: 'update_brand', method: 'PATCH', path: '/brands/{brand_id}', scope: 'write', tags: ['brands'],
+    summary: 'Rename a brand or change its color', description: 'brand_id accepts the id or the current name.',
+    input: S({ required: ['brand_id'], properties: { brand_id: str('Brand id or name.'), name: str('New name.'), color: { type: ['string', 'null'], description: 'Hex "#rrggbb", or null to remove.' } } }),
+    handler: async (core, i) => ({ brand: await core.brands.update(i.brand_id, { name: i.name, color: i.color }) }),
+  },
+  {
+    name: 'delete_brand', method: 'DELETE', path: '/brands/{brand_id}', scope: 'write', tags: ['brands'], destructive: true,
+    summary: 'Delete a brand', description: 'Deletes the brand only; its accounts, posts and analytics stay.',
+    input: S({ required: ['brand_id'], properties: { brand_id: str('Brand id or name.') } }),
+    handler: async (core, i) => ({ deleted: await core.brands.remove(i.brand_id) }),
+  },
+  {
+    name: 'set_brand_channels', method: 'PUT', path: '/brands/{brand_id}/channels', scope: 'write', tags: ['brands'],
+    summary: 'Set which accounts belong to a brand', description: 'mode "replace" (default) sets the exact list; "add" and "remove" change it. Example: {"brand_id":"North Star","account_ids":["<x id>"],"mode":"add"}.',
+    input: S({ required: ['brand_id', 'account_ids'], properties: { brand_id: str('Brand id or name.'), account_ids: { type: 'array', items: { type: 'string' } }, mode: { type: 'string', enum: ['replace', 'add', 'remove'] } } }),
+    handler: async (core, i) => ({ brand: await core.brands.setChannels(i.brand_id, i.account_ids, i.mode || 'replace') }),
   },
   // ---- media ----
   {
@@ -438,6 +517,7 @@ export const operations = [
       platform: { type: ['array', 'string'], items: { type: 'string', enum: Object.keys(PLATFORM_PROVIDERS) }, description: 'Platform(s); instagram covers both Instagram logins, linkedin covers profiles and Pages.' },
       provider: { type: ['array', 'string'], items: { type: 'string', enum: Object.keys(PLATFORMS) }, description: 'Exact provider id(s).' },
       account_id: { type: ['array', 'string'], items: { type: 'string' }, description: 'Account id(s).' },
+      brand: BRAND_PARAM,
       media_type: { type: ['array', 'string'], items: { type: 'string', enum: MEDIA_TYPES }, description: 'What was posted: video, image, text, carousel (2+ items), story, reel, short (YouTube Short), document (LinkedIn PDF), thread (X thread).' },
       created_by: { type: ['array', 'string'], items: { type: 'string' }, description: '"human" (web UI), "agent" (any API key) or "key:<api key id>".' },
       q: str('Search captions, YouTube titles and account names.'),
@@ -446,7 +526,9 @@ export const operations = [
     } }),
     handler: async (core, i) => {
       const tz = (await core.settings.get()).timezone;
-      return { posts: await core.posts.listGroups({ from: parseTime(i.from, tz, 'from'), to: parseTime(i.to, tz, 'to'), status: i.status, provider: i.provider, platform: i.platform, integration_id: i.account_id, media_type: i.media_type, created_by: i.created_by, q: i.q, sort: i.sort, limit: i.limit, offset: i.offset }) };
+      const accountIds = await brandScope(core, i.brand, i.account_id);
+      if (accountIds && !accountIds.length) return { posts: [] };
+      return { posts: await core.posts.listGroups({ from: parseTime(i.from, tz, 'from'), to: parseTime(i.to, tz, 'to'), status: i.status, provider: i.provider, platform: i.platform, integration_id: accountIds ?? i.account_id, media_type: i.media_type, created_by: i.created_by, q: i.q, sort: i.sort, limit: i.limit, offset: i.offset }) };
     },
   },
   {
@@ -463,8 +545,11 @@ export const operations = [
     name: 'validate_post', method: 'POST', path: '/posts/validate', scope: 'read', tags: ['posts'], readOnly: true,
     summary: 'Dry-run validation of a post',
     description: 'Checks content + media + settings against every target platform\'s rules WITHOUT saving. Returns errors/warnings per account and what will be published (e.g. "Reel", "Carousel (3)"). Same input as create_post.',
-    input: S({ required: ['targets'], properties: { ...POST_BODY } }),
+    input: S({ properties: { ...POST_BODY } }),
     handler: async (core, i) => {
+      needTargets(i);
+      const bt = await brandTargets(core, i);
+      if (bt) i = { ...i, targets: bt.targets };
       const results = [];
       const accounts = new Map((await core.integrations.list()).map((a) => [a.id, a]));
       for (const t of i.targets) {
@@ -486,21 +571,23 @@ export const operations = [
         const errors = [...serr, ...missing.map((m) => `Unknown media id ${m}`), ...v.errors, ...(a.status !== 'active' ? ['Account needs to be reconnected (get_connect_url with reconnect_account_id).'] : [])];
         results.push({ account_id: a.id, account: a.name, provider: a.provider, ok: !errors.length, will_publish: describeKind(a.provider, media, settings), caption_length: len.n, caption_limit: len.max, errors, warnings: v.warnings });
       }
-      return { ok: results.every((r) => r.ok), results };
+      return { ok: results.every((r) => r.ok), results, ...(bt ? { brand: bt.brand } : {}) };
     },
   },
   {
     name: 'create_post', method: 'POST', path: '/posts', scope: 'write', tags: ['posts'],
     summary: 'Create a post (draft, scheduled, next free slot or immediate)',
     description: 'Creates one post for one or more accounts. mode: "draft" (default), "schedule" (+publish_at), "next_slot" or "now". Scheduling needs the "publish" scope; keys in approval mode create posts as "pending_approval" until a human approves. ' +
-      'Example: {"content":"New video is live! #howto","media_ids":["<video id>"],"targets":[{"account_id":"<yt id>","settings":{"title":"How to X","isShort":true}},{"account_id":"<ig id>"}],"mode":"schedule","publish_at":"2026-11-02T18:00"}. Validation errors are returned per account with the exact rule that failed.',
-    input: S({ required: ['targets'], properties: { ...POST_BODY } }),
+      'Example: {"content":"New video is live! #howto","media_ids":["<video id>"],"targets":[{"account_id":"<yt id>","settings":{"title":"How to X","isShort":true}},{"account_id":"<ig id>"}],"mode":"schedule","publish_at":"2026-11-02T18:00"}. Validation errors are returned per account with the exact rule that failed. Post to a whole brand with {"brand_id":"North Star", ...} instead of listing targets.',
+    input: S({ properties: { ...POST_BODY } }),
     handler: async (core, i, p) => {
-      const gid = await core.posts.saveGroup(await toSaveInput(core, i, null, p), null, { principal: p });
+      needTargets(i);
+      const bt = await brandTargets(core, i);
+      const gid = await core.posts.saveGroup(await toSaveInput(core, bt ? { ...i, targets: bt.targets } : i, null, p), null, { principal: p });
       const g = await core.posts.getGroup(gid);
       if (g.status === 'pending_approval') await core.webhooks.emit('post.pending_approval', { post_id: gid, requested_by: p.name });
       core.scheduler.poke();
-      return withNote(core, g, p);
+      return { ...withNote(core, g, p), ...(bt ? { brand: bt.brand } : {}) };
     },
     wrapError: true,
   },
@@ -510,7 +597,8 @@ export const operations = [
     input: S({ required: ['post_id'], properties: { post_id: id('Post'), ...POST_BODY, targets: { ...POST_BODY.targets, minItems: 1 } } }),
     handler: async (core, i, p) => {
       const g = await groupOrThrow(core, i.post_id);
-      await core.posts.saveGroup(await toSaveInput(core, i, g, p), g.id, { principal: p });
+      const bt = await brandTargets(core, i);
+      await core.posts.saveGroup(await toSaveInput(core, bt ? { ...i, targets: bt.targets } : i, g, p), g.id, { principal: p });
       const ng = await core.posts.getGroup(g.id);
       if (ng.status === 'pending_approval' && g.status !== 'pending_approval') await core.webhooks.emit('post.pending_approval', { post_id: g.id, requested_by: p.name });
       core.scheduler.poke();
@@ -604,12 +692,14 @@ export const operations = [
   {
     name: 'get_calendar', method: 'GET', path: '/calendar', scope: 'read', tags: ['posts'], readOnly: true,
     summary: 'Calendar entries in a time range', description: `Flat list of per-account entries between from and to (default: next 7 days) plus undated drafts. ${TIME_HELP}`,
-    input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.') } }),
+    input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.'), brand: BRAND_PARAM } }),
     handler: async (core, i) => {
       const tz = (await core.settings.get()).timezone;
       const from = parseTime(i.from, tz, 'from') ?? Date.now() - DAY;
       const to = parseTime(i.to, tz, 'to') ?? from + 8 * DAY;
-      return { timezone: tz, from, to, entries: await core.posts.listRange(from, to), undated_drafts: await core.posts.listDrafts() };
+      const only = await brandScope(core, i.brand);
+      const keep = (e) => !only || only.includes(e.integration_id);
+      return { timezone: tz, from, to, entries: (await core.posts.listRange(from, to)).filter(keep), undated_drafts: (await core.posts.listDrafts()).filter(keep) };
     },
   },
   // ---- approvals ----
@@ -697,15 +787,21 @@ export const operations = [
   // ---- analytics ----
   {
     name: 'get_analytics_overview', method: 'GET', path: '/analytics/overview', scope: 'analytics', tags: ['analytics'], readOnly: true,
-    summary: 'Analytics summary for all accounts', description: 'Per-account totals for the range (followers + change, views, reach, engagement, watch time...) and which metrics are not available (permissions/deprecations). sync.unavailable.notices holds at most a few actionable fixes per account ({code: api_disabled|missing_permission, text, url?, action: open|reconnect, metrics}); sync.unavailable.sources marks metrics that come from a fallback API (data_api = YouTube Data API v3). Default range: last 30 days.',
-    input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.') } }),
+    summary: 'Analytics summary for all accounts (or one brand)', description: 'With brand: only that brand\'s channels, plus brand.totals (followers and other snapshots summed with their change, views/engagement summed, averages averaged) — accounts[] is the per-channel breakdown. Per-account totals for the range (followers + change, views, reach, engagement, watch time...) and which metrics are not available (permissions/deprecations). sync.unavailable.notices holds at most a few actionable fixes per account ({code: api_disabled|missing_permission, text, url?, action: open|reconnect, metrics}); sync.unavailable.sources marks metrics that come from a fallback API (data_api = YouTube Data API v3). Default range: last 30 days.',
+    input: S({ properties: { from: timeInput('Start.'), to: timeInput('End.'), brand: BRAND_PARAM } }),
     handler: async (core, i) => {
       const { from, to } = range(i, (await core.settings.get()).timezone);
-      const accounts = await core.integrations.list();
+      const only = await brandScope(core, i.brand);
+      const accounts = (await core.integrations.list()).filter((a) => !only || only.includes(a.id));
       const status = await core.analytics.statusMany(accounts.map((a) => a.id));
       const out = [];
       for (const a of accounts) out.push({ account_id: a.id, name: a.name, provider: a.provider, summary: await core.analytics.summary(a.id, from, to), sync: status.get(a.id) || null });
-      return { from: new Date(from).toISOString(), to: new Date(to).toISOString(), accounts: out };
+      const res = { from: new Date(from).toISOString(), to: new Date(to).toISOString(), accounts: out };
+      if (only) {
+        const brands = await Promise.all((Array.isArray(i.brand) ? i.brand : String(i.brand).split(',')).filter(Boolean).map((r) => core.brands.mustFind(String(r).trim())));
+        res.brand = { ids: brands.map((b) => b.id), name: brands.map((b) => b.name).join(' + '), channels: out.length, totals: aggregateSummaries(out.map((a) => a.summary)) };
+      }
+      return res;
     },
   },
   {
@@ -721,10 +817,12 @@ export const operations = [
   {
     name: 'get_top_posts', method: 'GET', path: '/analytics/top-posts', scope: 'analytics', tags: ['analytics'], readOnly: true,
     summary: 'Top posts by a metric', description: 'Posts (published via postlite AND recent posts fetched from the accounts) ranked by latest metric value. sort: views, likes, comments, shares, saves, reach, watch_minutes...',
-    input: S({ properties: { account_id: str('Limit to one account.'), from: timeInput('Published after.'), to: timeInput('Published before.'), sort: str('Metric to sort by (default views).'), limit: { type: 'integer', minimum: 1, maximum: 500 } } }),
+    input: S({ properties: { account_id: str('Limit to one account.'), brand: BRAND_PARAM, from: timeInput('Published after.'), to: timeInput('Published before.'), sort: str('Metric to sort by (default views).'), limit: { type: 'integer', minimum: 1, maximum: 500 } } }),
     handler: async (core, i) => {
       const { from, to } = range(i, (await core.settings.get()).timezone, 90);
-      return { posts: await core.analytics.topPosts({ integrationId: i.account_id || null, from, to, sort: i.sort || 'views', limit: i.limit || 20 }) };
+      const only = await brandScope(core, i.brand, i.account_id || undefined);
+      if (only && !only.length) return { posts: [] };
+      return { posts: await core.analytics.topPosts({ integrationId: only ? null : i.account_id || null, integrationIds: only, from, to, sort: i.sort || 'views', limit: i.limit || 20 }) };
     },
   },
   {
@@ -941,7 +1039,7 @@ export async function execute(rootCore, op, input, principal, via) {
   }
 }
 
-const targetOf = (input, result) => input?.app || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
+const targetOf = (input, result) => input?.app || input?.brand_id || result?.brand?.id || input?.post_id || input?.account_id || input?.media_id || input?.webhook_id || input?.key_id || result?.post?.id || result?.media?.id || null;
 function summarize(input) {
   if (!input) return null;
   const out = {};

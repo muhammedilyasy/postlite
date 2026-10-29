@@ -5,6 +5,7 @@ import { renderDashboard } from './calendar.js';
 import { openComposer } from './composer.js';
 import { renderPosts, renderPostDetail } from './posts.js';
 import { renderAccounts, renderApprovals, renderAnalytics, renderSettings } from './views.js';
+import { renderBrand } from './brands.js';
 
 const NAV = [
   ['dashboard', 'Dashboard', 'dashboard'],
@@ -108,7 +109,7 @@ export async function route() {
   try {
     switch (parts[0]) {
       case 'posts': return parts[1] ? await renderPostDetail(view, parts[1], params) : await renderPosts(view, params);
-      case 'accounts': return await renderAccounts(view, parts[1] === 'select' ? { select: parts[2] } : params);
+      case 'accounts': return parts[1] === 'brands' && parts[2] ? await renderBrand(view, parts[2]) : await renderAccounts(view, parts[1] === 'select' ? { select: parts[2] } : params);
       case 'approvals': return await renderApprovals(view);
       case 'analytics': return await renderAnalytics(view, params);
       case 'settings': return await renderSettings(view, { tab: parts[1] || '', focus: parts[2] || null });

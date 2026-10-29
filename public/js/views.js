@@ -6,6 +6,7 @@ import { renderPlatformApps } from './apps.js';
 import { pageHeader, tabs, segmented, emptyState, skeleton, dropdown, idChip, copyButton, section, setCrumbs } from './ui.js';
 import { lineChart } from './charts.js';
 import { mediaVisual, removedNote } from './media.js';
+import { brandsSection, brandTags, brandSelect, brandDot } from './brands.js';
 
 const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
@@ -30,7 +31,7 @@ export async function renderAccounts(root, params = {}) {
   const table = state.accounts.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Account'), h('th', { class: 'hide-sm' }, 'Platform'), h('th', {}, 'Status'), h('th', { class: 'hide-sm' }, 'Last checked'), h('th', { class: 'w-act' }, h('span', { class: 'sr-only' }, 'Actions')))),
     h('tbody', {}, state.accounts.map((a) => h('tr', {},
-      h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name), h('div', { class: 'muted small ellipsis' }, a.username ? (a.provider.startsWith('linkedin') ? String(a.username) : `@${String(a.username).replace(/^@/, '')}`) : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
+      h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name, brandTags(a.id)), h('div', { class: 'muted small ellipsis' }, a.username ? (a.provider.startsWith('linkedin') ? String(a.username) : `@${String(a.username).replace(/^@/, '')}`) : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
       h('td', { class: 'hide-sm' }, PROVIDER_META[a.provider].label, a.provider === 'instagram-standalone' ? h('span', { class: 'muted small' }, ' · Instagram Login') : a.provider === 'instagram' ? h('span', { class: 'muted small' }, ' · via Facebook') : a.provider === 'x' && a.meta?.premium ? h('span', { class: 'muted small' }, ' · Premium') : null),
       h('td', {}, a.status === 'active' ? pill('s-published', 'Connected') : pill('s-failed', 'Needs reconnect'), a.status !== 'active' && a.status_message ? h('div', { class: 'err small' }, a.status_message) : null,
         a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small' }, `Token renews before ${fmtTime(a.token_expires_at).slice(0, 10)}`) : null,
@@ -45,6 +46,7 @@ export async function renderAccounts(root, params = {}) {
     pageHeader({ title: 'Accounts', sub: 'Channels, Pages and profiles postlite can publish to.', actions: h('a', { class: 'btn', href: '#/settings/apps' }, icon('apps', 15), 'Platform apps') }),
     h('h2', { class: 'h-section' }, 'Connected', h('span', { class: 'count' }, state.accounts.length)),
     table,
+    state.accounts.length ? brandsSection() : null,
     h('h2', { class: 'h-section' }, 'Add an account'),
     connect);
 }
@@ -131,24 +133,29 @@ const label = (m) => METRIC_LABELS[m] || m;
 
 export async function renderAnalytics(root, params = {}) {
   const days = Number(params.days || 30);
-  const acc = params.account || '';
+  const brand = (state.brands || []).some((b) => b.id === params.brand) ? params.brand : '';
+  const brandObj = brand ? state.brands.find((b) => b.id === brand) : null;
+  const acc = params.account && (!brandObj || brandObj.channel_ids.includes(params.account)) ? params.account : '';
   const sort = params.sort || 'views';
   const to = Date.now(), from = to - days * 86400000;
-  const go = (p) => { location.hash = `#/analytics?${new URLSearchParams({ days, account: acc, sort, ...p })}`; };
+  const go = (p) => { const q = { days, account: acc, brand, sort, ...p }; for (const k of Object.keys(q)) if (q[k] === '' || q[k] === undefined) delete q[k]; location.hash = `#/analytics?${new URLSearchParams(q)}`; };
   const head = pageHeader({ title: 'Analytics', sub: 'Account and post metrics synced from the platforms.', actions: [
     h('button', { class: 'btn', onclick: async (e) => { const b = e.currentTarget; b.disabled = true; b.lastChild.textContent = 'Syncing…'; try { await api('POST', '/analytics/sync', acc ? { account_id: acc } : {}); toast('Analytics updated', 'success'); } catch (err) { toast(err.message, 'error'); } renderAnalytics(root, params); } }, icon('refresh', 15), h('span', {}, 'Sync now')),
     h('button', { class: 'btn icon', 'aria-label': 'Export CSV', 'aria-haspopup': 'menu', title: 'Export CSV', onclick: (e) => dropdown(e.currentTarget, [
-      { label: 'Posts CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=posts&from=${new Date(from).toISOString()}${acc ? `&account_id=${acc}` : ''}` },
+      { label: 'Posts CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=posts&from=${new Date(from).toISOString()}${acc ? `&account_id=${acc}` : brand ? `&brand=${encodeURIComponent(brand)}` : ''}` },
       acc ? { label: 'Daily account CSV', icon: 'download', href: `/api/v1/analytics/export.csv?kind=account&account_id=${acc}&from=${new Date(from).toISOString()}` } : null,
     ], { align: 'right' }) }, icon('download', 15)),
   ] });
   const toolbar = h('div', { class: 'toolbar' },
-    h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Account'), h('select', { class: 'input slim', onchange: (e) => go({ account: e.target.value }) }, h('option', { value: '' }, 'All accounts'), state.accounts.map((a) => h('option', { value: a.id, selected: a.id === acc }, `${a.name} · ${PROVIDER_META[a.provider].label}`)))),
+    h('div', { class: 'row gap wrap' },
+    (state.brands || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Brand'), brandSelect(brand, (v) => go({ brand: v, account: '' }))) : null,
+    h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Account'), h('select', { class: 'input slim', onchange: (e) => go({ account: e.target.value }) }, h('option', { value: '' }, brandObj ? `All ${brandObj.name} channels` : 'All accounts'), state.accounts.filter((a) => !brandObj || brandObj.channel_ids.includes(a.id)).map((a) => h('option', { value: a.id, selected: a.id === acc }, `${a.name} · ${PROVIDER_META[a.provider].label}`))))),
     segmented([[7, '7d'], [30, '30d'], [90, '90d']], days, (d) => go({ days: d }), { label: 'Range' }));
   mount(root, head, toolbar, skeleton('cards', 3));
   let ov, accData = null, top;
   try {
-    [ov, top] = await Promise.all([api('GET', `/analytics/overview?from=${from}&to=${to}`), api('GET', `/analytics/top-posts?from=${to - Math.max(days, 90) * 86400000}&to=${to}&sort=${encodeURIComponent(sort)}&limit=25${acc ? `&account_id=${acc}` : ''}`)]);
+    const bq = brand ? `&brand=${encodeURIComponent(brand)}` : '';
+    [ov, top] = await Promise.all([api('GET', `/analytics/overview?from=${from}&to=${to}${bq}`), api('GET', `/analytics/top-posts?from=${to - Math.max(days, 90) * 86400000}&to=${to}&sort=${encodeURIComponent(sort)}&limit=25${acc ? `&account_id=${acc}` : bq}`)]);
     if (acc) accData = await api('GET', `/analytics/accounts/${acc}?from=${from}&to=${to}`);
   } catch (e) { mount(root, head, toolbar, h('div', { class: 'notice error' }, e.message)); return; }
 
@@ -157,11 +164,22 @@ export async function renderAnalytics(root, params = {}) {
     const s = a.summary;
     const keys = ['followers', 'views', 'video_views', 'total_views', 'reach', 'watch_minutes', 'impressions', 'engagements', 'interactions', 'profile_views', 'new_followers', 'media_count'].filter((k) => s[k]);
     return h('div', { class: 'card acc-kpi', style: { '--pc': PROVIDER_META[a.provider].color } },
-      h('div', { class: 'ak-head' }, avatar({ provider: a.provider, name: a.name, picture: state.accounts.find((x) => x.id === a.account_id)?.picture }, 26), h('strong', { class: 'ellipsis' }, a.name), acc ? null : h('a', { class: 'small', href: `#/analytics?days=${days}&account=${a.account_id}` }, 'Details')),
+      h('div', { class: 'ak-head' }, avatar({ provider: a.provider, name: a.name, picture: state.accounts.find((x) => x.id === a.account_id)?.picture }, 26), h('strong', { class: 'ellipsis' }, a.name), acc ? null : h('a', { class: 'small', href: `#/analytics?days=${days}&account=${a.account_id}${brand ? `&brand=${brand}` : ''}` }, 'Details')),
       keys.length ? h('div', { class: 'kpis' }, keys.slice(0, 6).map((k) => h('div', { class: 'kpi' }, h('div', { class: 'kl' }, label(k)), h('div', { class: 'kv' }, fmtNum(s[k].value)), s[k].change ? h('div', { class: `kc mono ${s[k].change > 0 ? 'up' : 'down'}` }, `${s[k].change > 0 ? '↑ ' : '↓ '}${fmtNum(Math.abs(s[k].change))}`) : null))) : h('p', { class: 'muted small' }, a.sync?.last_sync_at ? 'No metrics in this range.' : 'Not synced yet — click “Sync now”.'),
       a.sync?.last_error ? h('div', { class: 'notice error small' }, a.sync.last_error) : analyticsNotice(a, a.account_id),
       a.sync?.last_sync_at ? h('div', { class: 'muted small ak-foot mono' }, `synced ${relTime(a.sync.last_sync_at)}`) : null);
   });
+
+  // Brand: one totals strip across its channels, then the per-channel cards as the breakdown.
+  let brandTotals = null;
+  if (ov.brand && !acc) {
+    const t = ov.brand.totals;
+    const keys = ['followers', 'views', 'video_views', 'total_views', 'reach', 'engagements', 'interactions', 'likes', 'comments', 'watch_minutes', 'impressions', 'profile_views'].filter((k) => t[k]);
+    brandTotals = h('div', { class: 'card acc-kpi brand-totals' },
+      h('div', { class: 'ak-head' }, brandDot(brandObj), h('strong', {}, ov.brand.name), h('span', { class: 'muted small' }, `Total across ${ov.brand.channels} channel${ov.brand.channels === 1 ? '' : 's'}`)),
+      keys.length ? h('div', { class: 'kpis' }, keys.slice(0, 6).map((k) => h('div', { class: 'kpi' }, h('div', { class: 'kl' }, label(k)), h('div', { class: 'kv' }, fmtNum(t[k].value)),
+        t[k].change ? h('div', { class: `kc mono ${t[k].change > 0 ? 'up' : 'down'}` }, `${t[k].change > 0 ? '↑ ' : '↓ '}${fmtNum(Math.abs(t[k].change))}`) : null))) : h('p', { class: 'muted small' }, 'No metrics in this range yet.'));
+  }
 
   let charts = null;
   if (accData) {
@@ -184,6 +202,8 @@ export async function renderAnalytics(root, params = {}) {
         metricCols.map((m) => h('td', { class: `num mono ${['shares', 'saves', 'watch_minutes', 'reach'].includes(m) ? 'hide-sm' : ''}` }, p.metrics[m] === undefined ? h('span', { class: 'muted', title: 'Not available' }, '—') : fmtNum(p.metrics[m])))))))) : emptyState({ icon: 'analytics', compact: true, title: 'No post metrics yet', body: 'Sync to fetch them.' }));
 
   mount(root, head, toolbar,
+    brandTotals,
+    brandTotals ? h('h2', { class: 'h-section' }, 'By channel') : null,
     cards.length ? h('div', { class: `kpi-grid ${acc ? 'single' : ''}` }, cards) : h('div', { class: 'card' }, emptyState({ icon: 'analytics', title: 'No accounts to analyse', body: 'Connect an account first.', action: h('a', { class: 'btn', href: '#/accounts' }, 'Accounts') })),
     charts, topTable);
 }

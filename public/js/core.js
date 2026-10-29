@@ -2,7 +2,7 @@
 import { icon } from './icons.js';
 
 export let CSRF = null;
-export const state = { settings: null, accounts: [], providers: [], me: null };
+export const state = { settings: null, accounts: [], providers: [], me: null, brands: [], brandSuggestions: [] };
 
 export function h(tag, props = {}, ...children) {
   const el = document.createElement(tag);
@@ -49,10 +49,12 @@ export async function bootstrap() {
 }
 
 export async function refreshCommon() {
-  const [st, acc, prov] = await Promise.all([api('GET', '/settings'), api('GET', '/accounts'), api('GET', '/oauth/providers')]);
+  const [st, acc, prov, br] = await Promise.all([api('GET', '/settings'), api('GET', '/accounts'), api('GET', '/oauth/providers'), api('GET', '/brands').catch(() => ({ brands: [], suggestions: [] }))]);
   state.settings = st.settings;
   state.accounts = acc.accounts;
   state.providers = prov.providers;
+  state.brands = br.brands;
+  state.brandSuggestions = br.suggestions;
 }
 
 /** XHR PUT of one part; resolves with its ETag (header for direct-to-R2, JSON for the proxy route). */

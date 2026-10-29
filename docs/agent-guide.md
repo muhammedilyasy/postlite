@@ -64,6 +64,15 @@ Each key has a rate limit (default 120 req/min → HTTP 429 + `Retry-After`). Ev
 - **LinkedIn first comment / analytics** need the Community Management API; without it the post publishes with a `warning` and analytics return one `needs_approval` notice. Don't retry those.
 - **Reconnects**: LinkedIn accounts expire after 60 days unless LinkedIn granted refresh tokens; X tokens refresh automatically. On `account.needs_reconnect`, call `get_connect_url` and ask the human.
 
+## Brands
+
+A brand is a named set of channels across platforms (for example "North Star" = its YouTube, Instagram, Facebook and X accounts). An account can be in several brands; brands belong to one workspace.
+
+- "Post this to the North Star brand": `create_post {"brand_id": "North Star", "content": "...", "media_ids": [...], "mode": "next_slot"}`. `brand_id` takes the id or the name. Every connected channel becomes a target; channels that need a reconnect are skipped and listed in `brand.skipped`. Add `targets` for the same accounts to give them settings (a YouTube title, for example). `validate_post` takes `brand_id` too.
+- Filters: `list_posts {brand}`, `get_calendar {brand}`, `get_analytics_overview {brand}` (adds `brand.totals`: followers and other snapshots summed with their change, views/engagement summed, averages averaged; `accounts[]` is the per-channel breakdown) and `get_top_posts {brand}`.
+- Manage: `list_brands` (also returns `suggestions` from account names that share a prefix; nothing is created automatically), `create_brand {name, color?, account_ids}`, `update_brand {brand_id, name?, color?}`, `set_brand_channels {brand_id, account_ids, mode: replace|add|remove}`, `delete_brand` (the accounts, posts and analytics stay).
+- CLI: `postlite brands list`, `postlite brands create --name "North Star" --accounts id1,id2`, `postlite posts create --brand "North Star" --content "..." --next-slot`.
+
 ## Media is deleted after publishing
 
 Each workspace deletes the original file of an upload once every post that uses it is finished (setting `delete_media_after`: `immediate` = 30 minutes after the last target published, `7d`, `30d` or `never`; `get_storage` / `update_storage_settings` with an admin key). Drafts, posts awaiting approval, scheduled, publishing (YouTube resumable sessions, X/LinkedIn chunked uploads, Instagram/Facebook containers that fetch `/m/` URLs) and failed posts with a retry queued (or failed in the last 24 h) keep the file. Media that never went live is never deleted.

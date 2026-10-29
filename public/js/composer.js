@@ -2,6 +2,9 @@
 import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime } from './core.js';
 import { segmented } from './ui.js';
 import { mediaVisual, ensurePoster, viewOnLink, REMOVED_NOTE } from './media.js';
+import { brandDot } from './brands.js';
+
+const LAST_BRAND = 'pl_last_brand';
 import { validatePost, defaultSettings, PLATFORMS, YOUTUBE_CATEGORIES, describeKind, captionLength, xWeightedLength } from '/assets/shared/validate.js';
 import { formatLocal, parseLocal } from '/assets/shared/time.js';
 
@@ -23,6 +26,10 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       }
     }
     st.active = post.targets[0]?.integration_id || null;
+  } else {
+    // New post: start with the last brand used (its connected channels); untick any of them freely.
+    const lastBrand = (state.brands || []).find((b) => b.id === localStorage.getItem(LAST_BRAND));
+    if (lastBrand) selectBrand(lastBrand);
   }
 
   const root = h('div', { class: 'composer' });
@@ -57,6 +64,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       h('div', { class: 'composer-body' },
         h('div', { class: 'col-main' },
           h('div', { class: 'label' }, 'Publish to'),
+          brandPicker(),
           h('div', { class: 'acc-picker' }, state.accounts.length ? state.accounts.map((a) => {
             const on = st.targets.has(a.id);
             return h('button', {
@@ -146,6 +154,34 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
       foot.firstChild.replaceWith(footStatus(errs));
       for (const b of foot.querySelectorAll('[data-act]')) b.disabled = !!errs.length || !st.targets.size || (b.dataset.act === 'schedule' && !st.publish_at);
     }
+  }
+
+  /** Brand chips above the accounts: one click selects every connected channel of the brand. */
+  function brandPicker() {
+    const brands = (state.brands || []).filter((b) => b.channel_ids.length);
+    if (!brands.length) return null;
+    const last = localStorage.getItem(LAST_BRAND);
+    const ordered = [...brands].sort((a, b) => (b.id === last) - (a.id === last));
+    return h('div', { class: 'brand-picker', role: 'group', 'aria-label': 'Brands' },
+      h('span', { class: 'muted small' }, 'Brand'),
+      ordered.map((b) => {
+        const usable = b.channel_ids.filter((id) => state.accounts.some((a) => a.id === id && a.status === 'active') && !st.locked.has(id));
+        const on = usable.length > 0 && usable.every((id) => st.targets.has(id));
+        return h('button', {
+          type: 'button', class: `brand-chip ${on ? 'on' : ''}`, 'aria-pressed': on ? 'true' : 'false', disabled: !usable.length,
+          title: usable.length ? `${on ? 'Selected' : 'Select'}: ${b.channels.filter((c) => usable.includes(c.id)).map((c) => c.name).join(', ')}` : 'No connected channels',
+          onclick: () => { selectBrand(b, !on); render(); },
+        }, brandDot(b), b.name, h('span', { class: 'bc-n mono' }, usable.length));
+      }));
+  }
+  function selectBrand(b, select = true) {
+    const accs = state.accounts.filter((a) => b.channel_ids.includes(a.id) && a.status === 'active' && !st.locked.has(a.id));
+    for (const a of accs) {
+      if (select && !st.targets.has(a.id)) st.targets.set(a.id, { content_override: null, settings: defaultSettings(a.provider) });
+      if (!select) st.targets.delete(a.id);
+    }
+    if (select) { localStorage.setItem(LAST_BRAND, b.id); if (!st.active || !st.targets.has(st.active)) st.active = accs[0]?.id || null; }
+    else if (st.active && !st.targets.has(st.active)) st.active = [...st.targets.keys()][0] || null;
   }
 
   function mediaBox() {

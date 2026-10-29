@@ -65,7 +65,11 @@ API client — local or remote instance, Node or Cloudflare Workers
   postlite posts schedule <post_id> --at TIME | --next-slot
   postlite posts now <post_id>       postlite posts retry <post_id>      postlite posts delete <post_id>
   postlite posts approve <post_id>   postlite posts reject <post_id> --reason "..."
-  postlite analytics overview|top|sync [--account ID]
+  postlite analytics overview|top|sync [--account ID] [--brand NAME|ID]
+  postlite brands list | brands create --name "North Star" [--color "#3b82f6"] [--accounts id1,id2]
+  postlite brands rename <brand> --name NEW | brands delete <brand>
+  postlite brands channels <brand> --accounts id1,id2 [--mode replace|add|remove]
+                                         (posts create also takes --brand <brand> instead of --accounts)
 `;
 
 async function core() {
@@ -335,6 +339,7 @@ async function main() {
         const accounts = String(a.accounts || a.account || '').split(',').filter(Boolean);
         const settings = a.settings ? JSON.parse(a.settings) : undefined;
         return print(await callTool('create_post', {
+          ...(a.brand ? { brand_id: String(a.brand) } : {}),
           content: a.content ? String(a.content) : '',
           media_ids: a.media ? String(a.media).split(',') : [],
           targets: accounts.map((id) => ({ account_id: id, ...(settings ? { settings } : {}) })),
@@ -352,10 +357,21 @@ async function main() {
       if (sub === 'validate') return print(await callTool('validate_post', JSON.parse(a.json || '{}')));
       throw new Error('Unknown posts subcommand. See postlite help.');
     }
+    case 'brands': {
+      const [sub, ref] = a._;
+      const ids = a.accounts ? String(a.accounts).split(',').filter(Boolean) : undefined;
+      if (!sub || sub === 'list') return print(await callTool('list_brands', {}));
+      if (sub === 'create') return print(await callTool('create_brand', { name: String(a.name || ''), ...(a.color ? { color: String(a.color) } : {}), ...(ids ? { account_ids: ids } : {}) }));
+      if (sub === 'rename') return print(await callTool('update_brand', { brand_id: ref, name: String(a.name || '') }));
+      if (sub === 'color') return print(await callTool('update_brand', { brand_id: ref, color: a.color === 'none' ? null : String(a.color) }));
+      if (sub === 'delete') return print(await callTool('delete_brand', { brand_id: ref }));
+      if (sub === 'channels') return print(await callTool('set_brand_channels', { brand_id: ref, account_ids: ids || [], mode: a.mode ? String(a.mode) : 'replace' }));
+      throw new Error('Usage: postlite brands list|create|rename|color|delete|channels (see postlite help)');
+    }
     case 'analytics': {
       const sub = a._[0] || 'overview';
-      const extra = a.account ? { account_id: String(a.account) } : {};
-      if (sub === 'overview') return print(await callTool('get_analytics_overview', { ...(a.from ? { from: String(a.from) } : {}), ...(a.to ? { to: String(a.to) } : {}) }));
+      const extra = { ...(a.account ? { account_id: String(a.account) } : {}), ...(a.brand ? { brand: String(a.brand) } : {}) };
+      if (sub === 'overview') return print(await callTool('get_analytics_overview', { ...(a.brand ? { brand: String(a.brand) } : {}), ...(a.from ? { from: String(a.from) } : {}), ...(a.to ? { to: String(a.to) } : {}) }));
       if (sub === 'top') return print(await callTool('get_top_posts', { ...extra, ...(a.sort ? { sort: String(a.sort) } : {}) }));
       if (sub === 'sync') return print(await callTool('sync_analytics', extra));
       if (sub === 'account') return print(await callTool('get_account_analytics', extra));

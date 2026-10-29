@@ -19,6 +19,7 @@ import { createOAuth } from './oauth.js';
 import { createApps } from './apps.js';
 import { guardDb, createWorkspaces, wsSettings, LEGACY_WORKSPACE } from './tenant.js';
 import { createRetention } from './retention.js';
+import { createBrands } from './brands.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -102,6 +103,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       async prepare() { await apps.sync(); },
       stop: () => core.stop(),
     };
+    sc.brands = createBrands({ db, ws });
     sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log });
     sc.oauth = createOAuth(sc);
     scopes.set(ws, sc);

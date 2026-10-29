@@ -291,9 +291,12 @@ export function createAnalytics({ db, cfg, integrations, ws, log = () => {}, onS
     return map;
   }
 
-  async function topPosts({ integrationId = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
+  async function topPosts({ integrationId = null, integrationIds = null, from = 0, to = Date.now(), sort = 'views', limit = 50 } = {}) {
     let integs;
-    if (integrationId) {
+    if (integrationIds) {
+      const want = new Set(integrationIds);
+      integs = (await db.all('SELECT * FROM integrations WHERE workspace_id = ?', ws)).filter((r) => want.has(r.id));
+    } else if (integrationId) {
       const one = await integrations.rawGet(integrationId);
       if (!one) throw new HttpError(404, 'Account not found.');
       integs = [one];

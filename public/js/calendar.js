@@ -4,6 +4,11 @@ import { openComposer, duplicatePost, retryTargets } from './composer.js';
 import { pageHeader, segmented, emptyState, skeleton, dropdown } from './ui.js';
 import { zonedParts, zonedToUtc, formatLocal } from '/assets/shared/time.js';
 import { listThumb, platformName } from './media.js';
+import { brandSelect } from './brands.js';
+
+/** Brand filter lives in the URL hash (#/dashboard?brand=<id>). */
+const hashBrand = () => { const id = new URLSearchParams(location.hash.split('?')[1] || '').get('brand') || ''; return (state.brands || []).find((b) => b.id === id) || null; };
+function setHashBrand(id) { const [path, q] = location.hash.split('?'); const n = new URLSearchParams(q || ''); if (id) n.set('brand', id); else n.delete('brand'); history.replaceState(null, '', `${path || '#/dashboard'}${n.size ? `?${n}` : ''}`); }
 
 const DAY = 86400000;
 const view = { mode: localStorage.getItem('pl_view') || (matchMedia('(max-width: 760px)').matches ? 'list' : 'week'), anchor: Date.now(), filter: '' };
@@ -51,6 +56,7 @@ export async function renderDashboard(root) {
 
 export async function renderCalendar(root) {
   const tz = state.settings.timezone;
+  const brand = hashBrand();
   let from, to, title;
   if (view.mode === 'week') {
     from = weekStart(view.anchor, tz); to = addDays(from, 7, tz);
@@ -78,16 +84,18 @@ export async function renderCalendar(root) {
         h('button', { class: 'btn icon', 'aria-label': 'Next', onclick: () => shift(1) }, icon('chevron-right', 16))) : null,
       h('h2', { class: 'toolbar-title' }, title)),
     h('div', { class: 'row gap wrap' },
+      (state.brands || []).length ? h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Brand'), brandSelect(brand?.id || '', (v) => { setHashBrand(v); if (v && view.filter && !state.brands.find((b) => b.id === v)?.channel_ids.includes(view.filter)) view.filter = ''; renderCalendar(root); })) : null,
       h('label', { class: 'select-wrap' }, h('span', { class: 'sr-only' }, 'Account'),
         h('select', { class: 'input slim', onchange: (e) => { view.filter = e.target.value; renderCalendar(root); } },
-          h('option', { value: '' }, 'All accounts'), state.accounts.map((a) => h('option', { value: a.id, selected: view.filter === a.id }, `${a.name} · ${PROVIDER_META[a.provider].label}`)))),
+          h('option', { value: '' }, brand ? `All ${brand.name} channels` : 'All accounts'), state.accounts.filter((a) => !brand || brand.channel_ids.includes(a.id)).map((a) => h('option', { value: a.id, selected: view.filter === a.id }, `${a.name} · ${PROVIDER_META[a.provider].label}`)))),
       segmented([['week', 'Week'], ['month', 'Month'], ['list', 'List']], view.mode, (m) => { view.mode = m; localStorage.setItem('pl_view', m); renderCalendar(root); }, { label: 'Calendar view' })));
   mount(root, toolbar, skeleton(view.mode === 'list' ? 'table' : 'calendar', 6));
   let data;
   try { data = await api('GET', `/calendar?from=${from}&to=${to}`); } catch (e) { mount(root, toolbar, h('div', { class: 'notice error' }, e.message)); return; }
-  const entries = data.entries.filter((e) => !view.filter || e.integration_id === view.filter);
+  const inBrand = (e) => !brand || brand.channel_ids.includes(e.integration_id);
+  const entries = data.entries.filter((e) => inBrand(e) && (!view.filter || e.integration_id === view.filter));
   const refresh = () => renderCalendar(root);
-  const body = view.mode === 'week' ? weekView(from, entries, tz, refresh) : view.mode === 'month' ? monthView(from, entries, tz, refresh) : listView(entries, data.undated_drafts.filter((e) => !view.filter || e.integration_id === view.filter), tz, refresh);
+  const body = view.mode === 'week' ? weekView(from, entries, tz, refresh) : view.mode === 'month' ? monthView(from, entries, tz, refresh) : listView(entries, data.undated_drafts.filter((e) => inBrand(e) && (!view.filter || e.integration_id === view.filter)), tz, refresh);
   mount(root, toolbar, body);
   if (view.mode === 'week') { const sc = root.querySelector('.week-scroll'); if (sc) sc.scrollTop = 7 * 52; }
 }

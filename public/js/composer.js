@@ -1,5 +1,5 @@
 // Composer: global caption + per-account overrides/settings, media upload, live validation, previews.
-import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime } from './core.js';
+import { h, mount, api, state, toast, modal, confirmDialog, uploadFile, avatar, statusBadge, PROVIDER_META, fmtBytes, debounce, icon, relTime, fmtDateTime } from './core.js';
 import { segmented } from './ui.js';
 import { mediaVisual, ensurePoster, viewOnLink, REMOVED_NOTE } from './media.js';
 import { brandDot } from './brands.js';
@@ -436,7 +436,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
         mediaEl ? h('div', { class: 'pv-media' }, mediaEl) : t.settings.url ? h('div', { class: 'pv-link' }, t.settings.url_title || t.settings.url) : null);
     }
     if (p === 'facebook') {
-      return h('div', { class: 'preview fb' }, h('div', { class: 'pv-head' }, avatar(a, 32), h('div', {}, h('strong', {}, a.name), h('div', { class: 'muted small' }, st.publish_at ? formatLocal(st.publish_at, tz).replace('T', ' ') : 'Now'))),
+      return h('div', { class: 'preview fb' }, h('div', { class: 'pv-head' }, avatar(a, 32), h('div', {}, h('strong', {}, a.name), h('div', { class: 'muted small' }, st.publish_at ? fmtDateTime(st.publish_at) : 'Now'))),
         h('div', { class: 'pv-cap' }, cap.length > 400 ? `${cap.slice(0, 400)}… See more` : cap),
         st.media.length > 1 && first?.kind === 'image' ? h('div', { class: 'pv-grid' }, st.media.slice(0, 4).map((md) => h('img', { src: md.url, alt: '' }))) : mediaEl ? h('div', { class: 'pv-media' }, mediaEl) : t.settings.url ? h('div', { class: 'pv-link' }, t.settings.url) : null);
     }
@@ -458,7 +458,7 @@ export async function openComposer({ groupId = null, at = null, onSaved = () => 
     st.serverErrors = {};
     try {
       const r = st.id ? await api('PATCH', `/posts/${st.id}`, body(mode)) : await api('POST', '/posts', body(mode));
-      toast(mode === 'draft' ? 'Draft saved' : mode === 'now' ? 'Publishing now…' : `Scheduled for ${formatLocal(r.post.publish_at, tz).replace('T', ' ')}`, 'success');
+      toast(mode === 'draft' ? 'Draft saved' : mode === 'now' ? 'Publishing now…' : `Scheduled for ${fmtDateTime(r.post.publish_at)}`, 'success');
       m.close();
       onSaved(r.post);
     } catch (e) {

@@ -82,6 +82,12 @@ Each workspace deletes the original file of an upload once every post that uses 
 - `duplicate_post` on a post with purged media returns `needs_reupload: [{media_id, name, kind}]`. Upload the file again and `update_post {media_ids}` before scheduling. Scheduling or `retry_post` with purged media fails with a 409 that says exactly that.
 - `cleanup_media {dry_run: true}` lists what is eligible now and why everything else is kept; without `dry_run` it deletes the eligible originals (write scope). The scheduler also runs it every few minutes.
 
+## Settings and deleting workspace data
+
+- `get_settings` / `update_settings {timezone?, time_format?: "24h"|"12h", posting_slots?}` (admin to change). `time_format` only changes how times are shown (UI, alert emails); API times stay ISO-8601 / epoch ms and slot times are always 24h `HH:MM`.
+- `get_workspace_data_summary` (admin) lists row counts and `confirm_with`, the text `delete_workspace_data` expects (the workspace owner's email, or the workspace name when no email is bound).
+- `delete_workspace_data {confirm}` (admin, never with an approval-mode key) deletes everything this workspace owns: accounts and tokens, posts and history, media files, API keys (including yours), webhooks, brands, tags, signatures, templates, repeating series, notifications, analytics, the audit log and settings. It never touches another workspace and never removes anyone's sign-in. Posts already live on the platforms stay live. Only call it when the human asked for exactly this, and repeat what will be deleted before you do.
+
 ## Workflows
 
 **Plan a week of posts** — `get_settings` → `list_free_slots {count: 7}` → `list_accounts` → `list_platforms` → per slot: write caption, `validate_post`, `create_post {mode: "schedule", publish_at: slot.at}` → summarize as a table. (MCP prompt: `plan_week`.)

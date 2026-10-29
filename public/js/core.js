@@ -1,5 +1,6 @@
 // Tiny DOM + API helpers for the postlite UI (no framework, no build step).
 import { icon } from './icons.js';
+import { formatLocal } from '/assets/shared/time.js';
 
 export let CSRF = null;
 export const state = { settings: null, accounts: [], providers: [], me: null, brands: [], brandSuggestions: [] };
@@ -22,6 +23,18 @@ export function h(tag, props = {}, ...children) {
   }
   return el;
 }
+
+/** Workspace time format (Settings → General): '24h' (default) or '12h'. Every UI time goes through these. */
+export const is12h = () => state.settings?.time_format === '12h';
+/** "HH:MM" or "h:MM am" from "HH:MM". */
+export function clockLabel(hm) {
+  if (!is12h()) return hm;
+  const [H, M] = String(hm).split(':').map(Number);
+  return `${H % 12 || 12}:${String(M).padStart(2, '0')} ${H < 12 ? 'am' : 'pm'}`;
+}
+export const fmtClock = (ms) => (ms ? clockLabel(formatLocal(ms, state.settings.timezone).slice(11, 16)) : '—');
+export const fmtDate = (ms) => (ms ? formatLocal(ms, state.settings.timezone).slice(0, 10) : '—');
+export const fmtDateTime = (ms) => (ms ? `${fmtDate(ms)} ${fmtClock(ms)}` : '—');
 
 export class ApiError extends Error {
   constructor(status, message, details) { super(message); this.status = status; this.details = details; }

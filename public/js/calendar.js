@@ -1,5 +1,5 @@
 // Dashboard: KPI strip + calendar (week / month / list) with drag & drop rescheduling.
-import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum, fmtClock } from './core.js';
 import { openComposer, duplicatePost, retryTargets } from './composer.js';
 import { pageHeader, segmented, emptyState, skeleton, dropdown } from './ui.js';
 import { zonedParts, zonedToUtc, formatLocal } from '/assets/shared/time.js';
@@ -123,7 +123,7 @@ function chip(e, tz, refresh, { compact = false } = {}) {
   const meta = PROVIDER_META[e.provider];
   const el = h('div', {
     class: `chip cs-${e.status}`, draggable: movable ? 'true' : null, tabindex: '0', role: 'button', style: { '--pc': meta.color },
-    'aria-label': `${e.account_name}, ${e.status.replace('_', ' ')}, ${formatLocal(when(e), tz).slice(11)}: ${e.caption.slice(0, 80)}`,
+    'aria-label': `${e.account_name}, ${e.status.replace('_', ' ')}, ${fmtClock(when(e))}: ${e.caption.slice(0, 80)}`,
     title: `${e.account_name} · ${e.status}\n${e.caption.slice(0, 200)}`,
     ondragstart: (ev) => { ev.dataTransfer.setData('text/plain', JSON.stringify({ group: e.group_id, at: e.publish_at })); ev.dataTransfer.effectAllowed = 'move'; el.classList.add('dragging'); },
     ondragend: () => el.classList.remove('dragging'),
@@ -131,7 +131,7 @@ function chip(e, tz, refresh, { compact = false } = {}) {
     onkeydown: (ev) => { if (ev.key === 'Enter') openComposer({ groupId: e.group_id, onSaved: refresh }); },
   },
   h('i', { class: `sd s-${e.status}`, 'aria-hidden': 'true' }),
-  h('span', { class: 'chip-time mono' }, formatLocal(when(e), tz).slice(11)),
+  h('span', { class: 'chip-time mono' }, fmtClock(when(e))),
   avatar({ provider: e.provider, name: e.account_name, picture: e.account_picture }, compact ? 16 : 18),
   e.media?.[0] ? listThumb(e.media[0], { cls: 'chip-thumb', size: 10 }) : null,
   h('span', { class: 'chip-text' }, e.caption.slice(0, 60) || (e.settings?.title ?? '') || '(no caption)'),
@@ -254,9 +254,9 @@ function listView(entries, drafts, tz, refresh) {
 
 function listRow(e, tz, refresh) {
   return h('tr', { tabindex: '0', onclick: () => openPost(e.group_id), onkeydown: (ev) => { if (ev.key === 'Enter') openPost(e.group_id); } },
-    h('td', { class: 'mono nowrap hide-sm' }, when(e) ? formatLocal(when(e), tz).slice(11) : '—'),
+    h('td', { class: 'mono nowrap hide-sm' }, when(e) ? fmtClock(when(e)) : '—'),
     h('td', {}, h('div', { class: 'cell-post' }, listThumb(e.media?.[0]),
-      h('div', { class: 'cp-text' }, h('div', { class: 'cp-title ellipsis' }, e.settings?.title || e.caption || '(no caption)'), h('div', { class: 'muted small ellipsis show-sm' }, when(e) ? `${formatLocal(when(e), tz).slice(11)} · ${e.account_name}` : e.account_name)))),
+      h('div', { class: 'cp-text' }, h('div', { class: 'cp-title ellipsis' }, e.settings?.title || e.caption || '(no caption)'), h('div', { class: 'muted small ellipsis show-sm' }, when(e) ? `${fmtClock(when(e))} · ${e.account_name}` : e.account_name)))),
     h('td', { class: 'hide-sm' }, h('div', { class: 'row gap' }, avatar({ provider: e.provider, name: e.account_name, picture: e.account_picture }, 22), h('span', { class: 'ellipsis' }, e.account_name))),
     h('td', {}, statusBadge(e.status)),
     h('td', { class: 'w-act' }, h('button', { class: 'icon-btn', 'aria-label': 'Post actions', 'aria-haspopup': 'menu', onclick: (ev) => { ev.stopPropagation(); chipMenu(ev.currentTarget, e, refresh); } }, icon('more', 16))));

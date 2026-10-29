@@ -870,3 +870,9 @@ code.uri, .uri-row code.uri { border: 0; font: 12.5px var(--mono); word-break: b
 .emoji-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; max-height: 196px; overflow-y: auto; overflow-x: hidden; }
 .emoji-grid .emoji { height: 32px; border: 0; background: transparent; border-radius: var(--r-sm); font-size: 19px; cursor: pointer; line-height: 1; }
 .emoji-grid .emoji:hover, .emoji-grid .emoji:focus-visible { background: var(--surface-2); outline: none; }
+
+/* Settings → Danger zone (bordered like any section; the red is only on the button). */
+.danger-zone .section-title { color: var(--err-text); }
+.confirm.wipe { max-width: 460px; }
+.plist.compact .plist-row { padding: 8px 12px; min-height: 0; }
+.plist.compact { margin: 4px 0 12px; }

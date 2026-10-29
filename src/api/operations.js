@@ -736,14 +736,14 @@ export const operations = [
   // ---- settings & slots ----
   {
     name: 'get_settings', method: 'GET', path: '/settings', scope: 'read', tags: ['settings'], readOnly: true,
-    summary: 'Get settings (timezone, posting slots)', description: 'Timezone used for local times and the weekly posting slots used by mode "next_slot".',
+    summary: 'Get settings (timezone, time format, posting slots)', description: 'Timezone used for local times, time_format ("24h" or "12h", how the UI and emails show times) and the weekly posting slots used by mode "next_slot".',
     input: S({ properties: {} }),
     handler: async (core) => ({ settings: await core.settings.get() }),
   },
   {
     name: 'update_settings', method: 'PATCH', path: '/settings', scope: 'admin', tags: ['settings'],
-    summary: 'Update timezone and/or posting slots', description: 'Example: {"timezone":"Asia/Kolkata","posting_slots":{"mon":["09:00","18:30"],"sat":[]}}. Weekdays: mon..sun; times are 24h HH:MM in the timezone.',
-    input: S({ properties: { timezone: str('IANA timezone, e.g. "Asia/Kolkata".'), posting_slots: { type: 'object', description: 'Map weekday → ["HH:MM", ...].', additionalProperties: { type: 'array', items: { type: 'string' } } } } }),
+    summary: 'Update timezone, time format and/or posting slots', description: 'Example: {"timezone":"Asia/Kolkata","time_format":"12h","posting_slots":{"mon":["09:00","18:30"],"sat":[]}}. Weekdays: mon..sun; slot times are always written as 24h HH:MM in the timezone (time_format only changes how times are shown).',
+    input: S({ properties: { timezone: str('IANA timezone, e.g. "Asia/Kolkata".'), time_format: { type: 'string', enum: ['24h', '12h'], description: 'How times are shown in the UI and alert emails.' }, posting_slots: { type: 'object', description: 'Map weekday → ["HH:MM", ...].', additionalProperties: { type: 'array', items: { type: 'string' } } } } }),
     handler: async (core, i) => {
       try { return { settings: await core.settings.update(i) }; } catch (e) { throw new HttpError(400, e.message); }
     },
@@ -770,6 +770,25 @@ export const operations = [
     handler: async (core, i, p) => {
       const r = await core.retention.run({ dryRun: !!i.dry_run, limit: i.limit || 100, principal: p, via: 'api' });
       return { report: reportOut(r), storage: await storageInfo(core) };
+    },
+  },
+  {
+    name: 'get_workspace_data_summary', method: 'GET', path: '/workspace/data', scope: 'admin', tags: ['settings'], readOnly: true,
+    summary: 'What "delete my workspace data" would remove',
+    description: 'Row counts per table of this workspace and the confirmation text delete_workspace_data expects (the workspace owner\'s email, or the workspace name when no email is bound).',
+    input: S({ properties: {} }),
+    handler: async (core) => ({ counts: await core.wipe.preview(), confirm_with: (await core.wipe.confirmation()).expected }),
+  },
+  {
+    name: 'delete_workspace_data', method: 'POST', path: '/workspace/delete-data', scope: 'admin', tags: ['settings'], destructive: true,
+    summary: 'Delete ALL data of this workspace (irreversible)',
+    description: 'Deletes this workspace\'s connected accounts and tokens, posts and their history, media files, API keys (including the one calling), webhooks, brands, tags, signatures, templates, repeating series, notifications, analytics, audit log and settings. Never touches another workspace and never removes the sign-in (Cloudflare Access stays as it is; the person can sign in again to an empty workspace). Already-published posts stay live on the platforms. confirm must be the signed-in email (or the workspace owner\'s email / workspace name for API keys; see get_workspace_data_summary). Approval-mode keys cannot use this.',
+    input: S({ required: ['confirm'], properties: { confirm: str('The workspace owner\'s email (or the workspace name when no email is bound), typed exactly.') } }),
+    handler: async (core, i, p) => {
+      if (p.approval) throw new HttpError(403, 'Approval-mode keys cannot delete workspace data.');
+      const r = await core.wipe.wipe({ confirm: i.confirm, principal: p });
+      core.scheduler.poke?.();
+      return r;
     },
   },
   {

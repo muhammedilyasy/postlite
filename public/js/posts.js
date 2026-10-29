@@ -1,6 +1,6 @@
 // Posts: Render-style list table (all targets, filters, search) and a post detail page with tabs
 // (Overview · Events timeline of publish attempts · Metrics).
-import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum, relTime, STATUS_LABEL, refreshCommon, debounce, MARKS } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, statusBadge, PROVIDER_META, icon, fmtNum, relTime, STATUS_LABEL, refreshCommon, debounce, MARKS, fmtDateTime } from './core.js';
 import { openComposer, duplicatePost, retryTargets } from './composer.js';
 import { pageHeader, emptyState, skeleton, dropdown, idChip, setCrumbs, tabs, section, closeMenus } from './ui.js';
 import { lineChart } from './charts.js';
@@ -8,7 +8,7 @@ import { formatLocal } from '/assets/shared/time.js';
 import { mediaVisual, listThumb, viewOnLink, removedNote } from './media.js';
 import { brandDot } from './brands.js';
 
-const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
+const fmtTime = fmtDateTime;
 // Filter bar (Render-style): compact dropdown buttons in a row, applied filters as removable chips.
 // State lives in the URL hash (#/posts?platform=youtube,x&status=failed&type=video&date=last7&q=…),
 // so a filtered view survives reload and can be shared.

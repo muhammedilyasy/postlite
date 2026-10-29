@@ -20,6 +20,7 @@ import { createApps } from './apps.js';
 import { guardDb, createWorkspaces, wsSettings, LEGACY_WORKSPACE } from './tenant.js';
 import { createRetention } from './retention.js';
 import { createBrands } from './brands.js';
+import { createWipe } from './wipe.js';
 
 export function consoleLogger(level = 'info') {
   const order = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 };
@@ -64,9 +65,10 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
     const store = wsSettings(db, ws);
     const settings = {
       async get() {
-        const by = await store.all(['timezone', 'posting_slots']);
+        const by = await store.all(['timezone', 'posting_slots', 'time_format']);
         return {
           timezone: by.timezone || cfg.defaultTimezone,
+          time_format: by.time_format === '12h' ? '12h' : '24h',
           posting_slots: JSON.parse(by.posting_slots || 'null') || DEFAULT_SLOTS,
           public_url: cfg.publicUrl,
           analytics_interval_hours: cfg.analytics.intervalHours,
@@ -74,7 +76,11 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
           runtime: cfg.platform,
         };
       },
-      async update({ timezone, posting_slots } = {}) {
+      async update({ timezone, posting_slots, time_format } = {}) {
+        if (time_format !== undefined) {
+          if (!['12h', '24h'].includes(time_format)) throw new Error('time_format must be "12h" or "24h".');
+          await store.set('time_format', time_format);
+        }
         if (timezone !== undefined) {
           if (!isValidTimezone(timezone)) throw new Error(`Unknown timezone "${timezone}". Use an IANA name like "Asia/Kolkata" or "Europe/Berlin".`);
           await store.set('timezone', timezone);
@@ -104,6 +110,7 @@ export function createCore({ cfg, db: rawDb, storage, runtime = {}, log = consol
       stop: () => core.stop(),
     };
     sc.brands = createBrands({ db, ws });
+    sc.wipe = createWipe({ db, storage, ws, workspaces });
     sc.retention = createRetention({ db, cfg: wcfg, storage, ws, hooks: runtime.hooks || {}, audit: sc.audit, log });
     sc.oauth = createOAuth(sc);
     scopes.set(ws, sc);

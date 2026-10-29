@@ -1,5 +1,5 @@
 // Secondary views: accounts, approvals, analytics, settings (general, API keys, webhooks, audit log, platform apps).
-import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, markOf, fmtNum, fmtBytes, refreshCommon, modal, icon, relTime } from './core.js';
+import { h, mount, api, state, toast, confirmDialog, avatar, PROVIDER_META, MARKS, markOf, fmtNum, fmtDateTime, fmtDate, fmtBytes, refreshCommon, modal, icon, relTime } from './core.js';
 import { openComposer } from './composer.js';
 import { formatLocal } from '/assets/shared/time.js';
 import { renderPlatformApps } from './apps.js';
@@ -8,7 +8,7 @@ import { lineChart } from './charts.js';
 import { mediaVisual, removedNote } from './media.js';
 import { brandsSection, brandTags, brandSelect, brandDot } from './brands.js';
 
-const fmtTime = (ms) => (ms ? formatLocal(ms, state.settings.timezone).replace('T', ' ') : '—');
+const fmtTime = fmtDateTime;
 const pill = (cls, text) => h('span', { class: `status ${cls}` }, h('i', { class: 'sd' }), text);
 const badge = () => window.dispatchEvent(new Event('pl:badge'));
 
@@ -34,8 +34,8 @@ export async function renderAccounts(root, params = {}) {
       h('td', {}, h('div', { class: 'row gap' }, avatar(a, 30), h('div', { class: 'min0' }, h('div', { class: 'strong ellipsis' }, a.name, brandTags(a.id)), h('div', { class: 'muted small ellipsis' }, a.username ? (a.provider.startsWith('linkedin') ? String(a.username) : `@${String(a.username).replace(/^@/, '')}`) : a.meta?.page_name ? `Page: ${a.meta.page_name}` : idChip(a.id))))),
       h('td', { class: 'hide-sm' }, PROVIDER_META[a.provider].label, a.provider === 'instagram-standalone' ? h('span', { class: 'muted small' }, ' · Instagram Login') : a.provider === 'instagram' ? h('span', { class: 'muted small' }, ' · via Facebook') : a.provider === 'x' && a.meta?.premium ? h('span', { class: 'muted small' }, ' · Premium') : null),
       h('td', {}, a.status === 'active' ? pill('s-published', 'Connected') : pill('s-failed', 'Needs reconnect'), a.status !== 'active' && a.status_message ? h('div', { class: 'err small' }, a.status_message) : null,
-        a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small' }, `Token renews before ${fmtTime(a.token_expires_at).slice(0, 10)}`) : null,
-        a.status === 'active' && a.token_expires_at && a.provider.startsWith('linkedin') && !a.meta?.has_refresh ? h('div', { class: 'muted small' }, `Reconnect before ${fmtTime(a.token_expires_at).slice(0, 10)}`) : null),
+        a.status === 'active' && a.token_expires_at && a.provider === 'instagram-standalone' ? h('div', { class: 'muted small' }, `Token renews before ${fmtDate(a.token_expires_at)}`) : null,
+        a.status === 'active' && a.token_expires_at && a.provider.startsWith('linkedin') && !a.meta?.has_refresh ? h('div', { class: 'muted small' }, `Reconnect before ${fmtDate(a.token_expires_at)}`) : null),
       h('td', { class: 'small muted hide-sm' }, a.last_checked_at ? relTime(a.last_checked_at) : 'never'),
       h('td', { class: 'w-act' }, h('div', { class: 'row gap end' },
         a.status !== 'active' ? h('a', { class: 'btn small primary', href: `/oauth/${a.provider}/start?reconnect=${a.id}` }, 'Reconnect') : null,
@@ -237,7 +237,7 @@ export async function renderAnalytics(root, params = {}) {
       h('tbody', {}, top.posts.map((p) => h('tr', {},
         h('td', {}, h('div', { class: 'cell-post' }, p.thumbnail ? h('img', { class: 'lthumb', src: p.thumbnail, alt: '', onerror: (e) => e.target.remove() }) : avatar({ provider: p.provider, name: p.account }, 24),
           h('div', { class: 'cp-text' }, h('div', { class: 'cp-title ellipsis', title: p.caption || '' }, p.caption || p.kind || p.external_id),
-            h('div', { class: 'muted small cp-sub' }, markEl(p.provider), h('span', { class: 'ellipsis hide-sm' }, p.account), h('span', { class: 'mono' }, fmtTime(p.published_at).slice(0, 10)), p.via_postlite ? h('span', { class: 'hide-sm' }, 'via postlite') : null, p.permalink ? h('a', { href: p.permalink, target: '_blank', rel: 'noopener' }, 'open') : null)))),
+            h('div', { class: 'muted small cp-sub' }, markEl(p.provider), h('span', { class: 'ellipsis hide-sm' }, p.account), h('span', { class: 'mono' }, fmtDate(p.published_at)), p.via_postlite ? h('span', { class: 'hide-sm' }, 'via postlite') : null, p.permalink ? h('a', { href: p.permalink, target: '_blank', rel: 'noopener' }, 'open') : null)))),
         metricCols.map((m) => h('td', { class: `num mono ${secondary.has(m) ? 'hide-sm' : ''}` }, p.metrics[m] === undefined ? h('span', { class: 'muted', title: 'Not available' }, '—') : fmtNum(p.metrics[m])))))))) : emptyState({ icon: 'analytics', compact: true, title: 'No post metrics yet', body: 'Sync to fetch them.' }));
 
   mount(root, head, toolbar,
@@ -279,16 +279,18 @@ async function renderGeneral(body) {
   const slotInputs = Object.fromEntries(days.map((d) => { const i = h('input', { class: 'input', placeholder: 'e.g. 09:00, 18:30', 'aria-label': `Posting slots ${d}` }); i.value = (s.posting_slots[d] || []).join(', '); return [d, i]; }));
   const tzSel = h('select', { class: 'input', id: 'tz' }, tzs.map((t) => h('option', { value: t, selected: t === s.timezone }, t)));
   tzSel.value = s.timezone;
+  const tfSel = h('select', { class: 'input', id: 'tf' }, [['24h', '24-hour (18:30)'], ['12h', '12-hour (6:30 pm)']].map(([v, l]) => h('option', { value: v, selected: v === s.time_format }, l)));
+  tfSel.value = s.time_format || '24h';
   const save = h('button', { class: 'btn primary', onclick: async () => {
     try {
-      await api('PATCH', '/settings', { timezone: tzSel.value, posting_slots: Object.fromEntries(days.map((d) => [d, slotInputs[d].value.split(',').map((x) => x.trim()).filter(Boolean)])) });
+      await api('PATCH', '/settings', { timezone: tzSel.value, time_format: tfSel.value, posting_slots: Object.fromEntries(days.map((d) => [d, slotInputs[d].value.split(',').map((x) => x.trim()).filter(Boolean)])) });
       toast('Settings saved', 'success'); renderGeneral(body);
     } catch (e) { toast(e.message, 'error', 6000); }
   } }, 'Save changes');
   const me = state.me;
   const storage = await storageSection(() => renderGeneral(body));
   mount(body, h('div', { class: 'stack' },
-    section('Timezone', { sub: 'Used for the calendar, the composer and posting slots.' }, h('div', { class: 'form-row' }, h('label', { class: 'field grow' }, h('span', {}, 'Timezone'), tzSel))),
+    section('Time', { sub: 'Timezone for the calendar, the composer and posting slots; time format for every time shown in postlite and in alert emails.' }, h('div', { class: 'form-row' }, h('label', { class: 'field grow' }, h('span', {}, 'Timezone'), tzSel), h('label', { class: 'field' }, h('span', {}, 'Time format'), tfSel))),
     section('Posting slots', { sub: 'Used by “Next free slot” and agents’ next_slot mode. 24h times, comma separated.' },
       h('div', { class: 'slots' }, days.map((d) => h('label', { class: 'slot-row' }, h('span', { class: 'mono' }, d.toUpperCase()), slotInputs[d])))),
     h('div', { class: 'row end' }, save),
@@ -299,7 +301,42 @@ async function renderGeneral(body) {
       h('dt', {}, 'Graph API'), h('dd', { class: 'mono' }, s.graph_api_version),
       h('dt', {}, 'Analytics sync'), h('dd', {}, `every ${s.analytics_interval_hours} h`),
       h('dt', {}, 'Sign-in'), h('dd', {}, me.auth_mode === 'cloudflare-access' ? ['Cloudflare Zero Trust Access · ', h('span', { class: 'mono' }, me.principal.email || '')] : ['Password · ', h('a', { href: '/docs/setup/cloudflare-access', target: '_blank', rel: 'noopener' }, 'switch to Cloudflare Access')]),
-      h('dt', {}, 'Version'), h('dd', { class: 'mono' }, me.version)))));
+      h('dt', {}, 'Version'), h('dd', { class: 'mono' }, me.version))),
+    dangerZone()));
+}
+
+/** Danger zone: delete everything this workspace owns (never the sign-in, never another workspace). */
+function dangerZone() {
+  return section('Danger zone', { cls: 'danger-zone', sub: 'Delete this workspace’s accounts, posts, media, keys and settings. Your sign-in stays, and nobody else’s workspace is touched.', actions: h('button', { class: 'btn danger-outline', onclick: openWipe }, icon('trash', 14), 'Delete workspace data…') });
+}
+
+async function openWipe() {
+  let info;
+  try { info = await api('GET', '/workspace/data'); } catch (e) { toast(e.message, 'error'); return; }
+  const c = info.counts;
+  const n = (k) => c[k] || 0;
+  const rows = [['Connected accounts', n('integrations')], ['Posts (all accounts)', n('groups')], ['Media files', n('media')], ['API keys', n('api_keys')], ['Webhooks', n('webhooks')], ['Brands, tags, signatures and templates', n('brands') + n('tags') + n('signatures') + n('post_templates')]];
+  const expected = state.me?.principal?.email || info.confirm_with;
+  const input = h('input', { class: 'input mono', autocomplete: 'off', spellcheck: 'false', 'aria-label': `Type ${expected} to confirm`, placeholder: expected });
+  const go = h('button', { class: 'btn danger', disabled: true }, 'Delete everything');
+  input.addEventListener('input', () => { go.disabled = input.value.trim().toLowerCase() !== String(expected).toLowerCase(); });
+  const m = modal(h('div', { class: 'confirm wipe' },
+    h('h3', { class: 'confirm-title' }, 'Delete workspace data'),
+    h('p', { class: 'muted' }, 'This permanently deletes, for this workspace only:'),
+    h('div', { class: 'plist compact' }, rows.map(([l, v]) => h('div', { class: 'plist-row' }, h('div', { class: 'plist-text' }, l), h('span', { class: 'mono muted' }, v)))),
+    h('p', { class: 'muted small' }, 'Also analytics, the audit log and settings. Posts already live on the platforms stay live. You can still sign in afterwards and start fresh.'),
+    h('label', { class: 'field' }, h('span', {}, ['Type ', h('strong', { class: 'mono' }, expected), ' to confirm']), input),
+    h('div', { class: 'row end gap' }, h('button', { class: 'btn', onclick: () => m.close() }, 'Cancel'), go)), { label: 'Delete workspace data' });
+  go.onclick = async () => {
+    go.disabled = true;
+    try {
+      const r = await api('POST', '/workspace/delete-data', { confirm: input.value.trim() });
+      m.close();
+      toast(`Deleted ${Object.values(r.deleted).reduce((a, b) => a + b, 0)} records and ${r.files_deleted} files`, 'success', 6000);
+      setTimeout(() => location.assign('/#/accounts'), 600);
+    } catch (e) { toast(e.message, 'error', 6000); go.disabled = false; }
+  };
+  setTimeout(() => input.focus(), 50);
 }
 
 /** General → Storage: delete-after-publishing policy, storage used / freed, clean up now. */

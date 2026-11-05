@@ -345,7 +345,8 @@ test('isolation: notifications and preferences are per workspace and per user; e
     assert.equal((await app.api('GET', '/notifications/prefs', { session: B })).json.email.to, 'bob@example.com');
     // Email goes only to Alice's Access identity.
     await app.root.deliverNotifications();
-    const to = (app.fake.state.emails || []).map((e) => e.to[0]);
+    // The background delivery loop may have claimed the batch first; wait for it to land.
+    const to = (await waitFor(() => (app.fake.state.emails || []).length && app.fake.state.emails)).map((e) => e.to[0]);
     assert.ok(to.length >= 1);
     assert.ok(to.every((t) => t === 'alice@example.com'), JSON.stringify(to));
     assert.ok((app.fake.state.emails || []).every((e) => !/Bob/i.test(e.text)));
@@ -353,7 +354,8 @@ test('isolation: notifications and preferences are per workspace and per user; e
     assert.equal((await app.api('POST', '/notifications/test', { session: B, body: {} })).json.to, 'bob@example.com');
     // Wiping Bob's workspace removes his prefs/notifications only.
     await sb.notifications.notify({ kind: 'account_reconnect', key: 'bob1', title: 'Bob alert' }); // Bob turned post_failed off above, so use a kind he still receives
-    assert.equal((await app.api('GET', '/notifications', { session: B })).json.unread, 1);
+    // Bob turned the digest on above, so after 09:00 workspace time a digest may also be waiting; count only this alert.
+    assert.equal((await app.api('GET', '/notifications', { session: B })).json.notifications.filter((n) => n.kind === 'account_reconnect').length, 1);
     const wiped = await sb.wipe.wipe({ confirm: 'bob@example.com' });
     assert.ok(wiped.deleted.notifications >= 1, JSON.stringify(wiped.deleted));
     assert.equal((await app.api('GET', '/notifications', { session: B })).json.unread, 0);

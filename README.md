@@ -1,234 +1,134 @@
 # postlite
 
-**A lightweight, self-hosted social media scheduler for YouTube, Instagram, Facebook Pages, X and LinkedIn.**
-Runs as **one Node.js process** (one SQLite file, zero runtime dependencies, no Docker) **or entirely on Cloudflare's free plan** (Workers + D1 + R2 + Cron). Agent-first: everything the web UI does is available through a REST API, an MCP server and a CLI, so you can run your socials from Claude, ChatGPT, Cursor, Hermes or a shell script.
+A small, self-hosted social media scheduler for YouTube, Facebook Pages, Instagram, LinkedIn and X that you can drive from the web UI, a REST API, MCP or the command line.
 
-| Dashboard (week) | Posts | Post events |
-|---|---|---|
-| ![Dashboard with week calendar](docs/screenshots/desktop-dashboard-week.png) | ![Posts list](docs/screenshots/desktop-posts.png) | ![Publish event timeline](docs/screenshots/desktop-post-events.png) |
-| **Composer** | **Analytics** | **Mobile** |
-| ![Composer with previews](docs/screenshots/desktop-composer.png) | ![Account analytics](docs/screenshots/desktop-analytics-account.png) | ![Mobile dashboard](docs/screenshots/mobile-dashboard.png) |
-
-More in [`docs/screenshots/`](docs/screenshots/) (dark and light theme, desktop and 390 px mobile).
+postlite runs as one Node.js process with a SQLite file (about 70 MB of RAM, no runtime dependencies, no Docker), or entirely on Cloudflare's free plan (Workers, D1, R2 and Cron Triggers). Both builds share the same core.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/muhammedilyasy/postlite)
 
-<!-- The Deploy button only works once the repository is public. -->
+| Calendar | Posts | Composer |
+| --- | --- | --- |
+| ![Week calendar with scheduled posts](docs/screenshots/dashboard-week.png) | ![Posts list with filters and status](docs/screenshots/posts.png) | ![Composer with per-channel settings and preview](docs/screenshots/composer.png) |
+| **Accounts and brands** | **Analytics** | **Mobile** |
+| ![Connected accounts and a brand](docs/screenshots/accounts.png) | ![Analytics per account](docs/screenshots/analytics.png) | ![Posts list on a phone](docs/screenshots/mobile-posts.png) |
+
+The screenshots come from a local demo instance with made-up accounts.
 
 ## Features
 
-- **Platforms**
-  - **YouTube** — Google OAuth (offline access + automatic token refresh), resumable chunked uploads that survive restarts, title/description/tags/category/privacy/made-for-kids/notify-subscribers, custom thumbnails, Shorts validation (vertical/square, ≤ 3 min). Without the YouTube Analytics API, subscribers and channel/video views come from the Data API.
-  - **Facebook Pages** — Facebook Login with long-lived token exchange and page tokens; text, link, single/multi-photo, video, Reels and Stories; optional first comment.
-  - **Instagram** — both *Instagram via Facebook Page* (Facebook Login) and *Instagram API with Instagram Login* (standalone). Image posts, Reels, carousels (2–10 mixed items), Stories, collaborators, Trial Reels, first comment. Container → status polling → `media_publish`, with Meta's limits validated up front (JPEG only, 4:5–1.91:1, caption/hashtag/mention limits…).
-  - **X** — OAuth 2.0 with PKCE and rotating refresh tokens; text (280 weighted characters, 25,000 for Premium), up to 4 photos, GIF or video via chunked media upload v2, **threads** (reply chains, each item with its own media), who-can-reply. Pay-per-use API: [costs and setup](docs/setup/x.md).
-  - **LinkedIn** — personal profiles (Share on LinkedIn + OpenID Connect) and Company Pages (Community Management API, needs LinkedIn's review): text with clickable hashtags, 1–20 images, video (multipart upload), PDF document posts, article links, first comment. 60-day tokens with a *reconnect by* date. [Setup and approval limits](docs/setup/linkedin.md).
+- **Publishing** to YouTube (videos and Shorts), Facebook Pages (posts, photos, video, Reels, Stories), Instagram (posts, carousels, Reels, Stories), LinkedIn profiles and Company Pages (text, images, video, PDF documents) and X (posts, threads, media).
+- **Calendar** with day, week, month and list views and drag-and-drop rescheduling.
+- **Composer** with one caption plus per-channel overrides and settings, validation against each platform's limits, previews, threads, a first comment, an emoji picker, signatures and templates.
+- **Brands**: named sets of channels, for example one brand's YouTube, Instagram, Facebook and X. Pick a brand to select all of its channels, and filter posts, the calendar and analytics by brand.
+- **Tags**, **repeating posts** (daily, every few days, weekly, every two weeks, monthly) and posting slots for "next free slot" scheduling.
+- **Media library** with resumable uploads. Originals can be deleted automatically after publishing (after a short safety window, after 7 or 30 days, or never); thumbnails and published links stay.
+- **Approvals**: posts created by API keys in approval mode wait for a person to approve them.
+- **Analytics**: followers, views, reach and engagement per account and per post, top posts and CSV export. YouTube falls back to the Data API when the Analytics API is off. Missing permissions show as "not available" with the fix, not as errors.
+- **Alerts**: a notification bell plus optional email (SMTP or Resend) for failed posts, accounts that need reconnecting, published posts and a daily digest. Each person picks what they receive.
+- **Workspaces**: with Cloudflare Access sign-in, every allowed email gets its own isolated workspace (accounts, posts, media, analytics, keys, webhooks, audit log and platform app credentials). Password mode has one owner workspace.
+- **For agents and scripts**: a versioned REST API with an OpenAPI 3.1 spec, an MCP server (stdio and Streamable HTTP), a CLI, signed webhooks, an agent guide and `llms.txt`. API keys are scoped and rate limited, and every change lands in an audit log.
+- **Scheduler**: atomic job claiming, persisted publish steps, crash recovery that checks with the platform before retrying, retries with backoff, and a grace window for posts missed while the server was down.
 
-  | | YouTube | Facebook Page | Instagram | X | LinkedIn profile | LinkedIn Page |
-  | --- | --- | --- | --- | --- | --- | --- |
-  | Text only | — | ✓ | — | ✓ | ✓ | ✓ |
-  | Images | thumbnail | 1–10 | 1–10 (JPEG) | 1–4 | 1–20 | 1–20 |
-  | Video | ✓ (resumable) | ✓ / Reels | Reels | ✓ (chunked) | ✓ (multipart) | ✓ (multipart) |
-  | Stories / Shorts | Shorts | Stories | Stories | — | — | — |
-  | Threads / carousels / documents | — | — | carousels | threads | PDF | PDF |
-  | First comment | — | ✓ | ✓ | (use a thread) | needs approval | needs approval |
-  | Analytics | ✓ (Data API fallback) | ✓ | ✓ | ✓ (billed reads) | needs approval | needs approval |
-  | Token refresh | automatic | 60-day, renewed | 60-day, renewed | automatic (2 h, rotating) | reconnect every 60 days* | reconnect every 60 days* |
+## Supported platforms
 
-  \* automatic when LinkedIn grants your app refresh tokens (partners only).
-- **Scheduler** — in-process, restart-safe, never double-posts (atomic job claiming, persisted publish phases, crash recovery that asks the platform whether a post went live), retries with exponential backoff, clear transient/permanent/auth error classification, missed-post grace window.
-- **Web UI** — a developer-console style dashboard: dark by default with an optional light theme, left sidebar, breadcrumbs, a **New** menu, and an account menu. It has a calendar (week / month / list) with drag-and-drop rescheduling, a posts table with status dots and filters, and post detail pages with tabs (overview, publish-attempt event timeline, metrics). The composer has one global caption plus per-account overrides, per-platform settings, drag-and-drop media upload with progress, live validation and previews. There's also an approvals inbox, analytics charts, and settings for API keys, webhooks, the audit log and platform apps. Other details: toasts, skeleton loaders, visible keyboard focus, a mobile drawer, and Inter + JetBrains Mono bundled locally (OFL). No build step, no CDN.
-- **Analytics** — periodic sync (default every 6 h) + manual refresh: followers/subscribers over time, views/reach/engagement/profile views, YouTube watch time and average view duration, per-post views/likes/comments/shares/saves/reach, for posts published through postlite *and* recent posts fetched from the accounts. When an API is turned off or a permission is missing, each account shows one notice with the fix ("Turn on YouTube Analytics API", Reconnect, "How to get access") instead of failing. Inline SVG charts, top-posts table, CSV export.
-- **Agent-first API** — versioned REST API (`/api/v1`, OpenAPI 3.1 at `/api/v1/openapi.json`), built-in MCP server (stdio + Streamable HTTP at `/mcp`), CLI. Scoped API keys (read / write / publish / analytics / admin), hashed at rest, per-key rate limits, audit log, and **approval mode** (default on) so agent-created posts wait for a human.
-- **Brands** — named sets of channels across platforms ("North Star" = its YouTube, Instagram, Facebook and X). Pick a brand in the composer to select all its channels, filter posts, the calendar and analytics by brand (totals plus a per-channel breakdown), and let agents post with `brand_id`. Suggested from shared account-name prefixes, never created automatically.
-- **Storage** — originals are deleted after publishing (per workspace: immediately after a 30-minute safety window, after 7 or 30 days, or never; Settings → General → Storage). The poster/thumbnail JPEG and the published links stay; nothing that a draft, scheduled, publishing or retrying post still needs is touched. `postlite media cleanup` prints a dry-run report per workspace.
-- **Webhooks** — `post.published`, `post.failed`, `post.pending_approval`, `account.needs_reconnect`, `analytics.synced`, HMAC-SHA256 signed, retried with backoff.
-- **Security** — single admin password (scrypt), or **Cloudflare Zero Trust Access** (email one-time PIN; postlite verifies the RS256 JWT itself and enforces its own `ALLOWED_EMAILS`, see [the guide](docs/setup/cloudflare-access.md)), HttpOnly/SameSite session cookies, CSRF tokens + Origin checks, OAuth `state` + PKCE (Google), OAuth tokens encrypted at rest (AES-256-GCM), unguessable 256-bit media URLs, strict CSP, SSRF guard for media-from-URL.
+postlite publishes through developer apps that you create on each platform. Some features need a paid tier or an app review.
 
-## Resource usage
+| Platform | Developer app | Paid tier | App review | Notes |
+| --- | --- | --- | --- | --- |
+| YouTube | Google Cloud project with an OAuth client | No | Not for your own channels (Google shows an "unverified app" screen) | Uploads come out of a daily quota. [Guide](docs/setup/youtube.md) |
+| Facebook Pages | Meta app with Facebook Login | No | Only when people without a role on the app connect | [Guide](docs/setup/facebook-and-instagram.md) |
+| Instagram, through a Facebook Page | The same Meta app | No | Same as Facebook | Business or Creator account linked to a Page. [Guide](docs/setup/facebook-and-instagram.md) |
+| Instagram, with Instagram Login | Meta app with the Instagram product | No | Same as Facebook | Business or Creator account, no Page needed. [Guide](docs/setup/instagram-standalone.md) |
+| LinkedIn profile | LinkedIn app with Share on LinkedIn and Sign In with OpenID Connect | No | No | Tokens last 60 days, then you reconnect. [Guide](docs/setup/linkedin.md) |
+| LinkedIn Company Page | The same LinkedIn app | No | Yes, for the Community Management API | Also needed for first comments and analytics. [Guide](docs/setup/linkedin.md) |
+| X | X developer app (OAuth 2.0) | Yes, pay-per-use API credits | No | Every request is billed, so postlite keeps reads to a minimum. [Guide](docs/setup/x.md) |
 
-Measured on a Linux server with Node 26 (RSS from `ps`), publishing to the bundled fake providers:
+Enter credentials in **Settings → Platform apps** (stored encrypted) or set them in `.env` as a fallback. That page shows the exact redirect URIs for your instance. The guides are also served by your instance at `/docs/setup/`.
 
-| State | RSS |
-|---|---|
-| Idle after boot | ~68 MB |
-| Peak while publishing a 22 MB YouTube Short + FB/IG posts | ~105 MB |
-| After uploads, publishing and an analytics sync | ~104 MB |
+## Quick start (Node)
 
-No Redis, no Postgres, no Temporal, no Elasticsearch, no Docker.
-
-## Two ways to run it
-
-| | **Node** (VPS, home server) | **Cloudflare Workers** (Free plan) |
-| --- | --- | --- |
-| Setup | `node bin/postlite.js start` behind HTTPS | `npm run cf:deploy` or the Deploy button. [Guide](docs/setup/cloudflare-workers.md) |
-| Database | `node:sqlite` file | D1 (same SQL migrations) |
-| Media | `data/uploads/`, served at `/m/<token>` | R2, streamed by the Worker at `/m/<token>` |
-| Big uploads | Raw streaming POST, or resumable multipart | Resumable multipart (≤ 100 MB per part through the Worker, or presigned direct-to-R2) |
-| Scheduler | In-process, 15 s tick | Cron Trigger every minute, resumable steps within the free CPU and subrequest limits |
-| Publish latency | 0–15 s | 0–60 s |
-| UI, REST, OpenAPI, MCP over HTTP, webhooks, analytics, approval mode, audit log | ✓ | ✓ (identical) |
-| Sign-in | Password (scrypt) or Cloudflare Access | Cloudflare Access (recommended) or password (PBKDF2) |
-| MCP stdio, local CLI | ✓ | Through a local `postlite` pointed at the Worker (`--url/--key`) |
-| Video posters (ffmpeg) | Optional | — (`<video>` preview fallback) |
-| Cost | Your server | $0 on Workers Free + D1 Free + R2 free tier (10 GB) |
-
-Both are built from the same runtime-agnostic core (`src/`) with thin adapters (`src/node/`, `src/workers/`).
-
-## Quick start (no Docker)
-
-Requirements: **Node.js ≥ 22.13** (uses the built-in `node:sqlite`). Nothing else.
+You need Node.js 22.13 or newer. There is nothing to install.
 
 ```sh
-git clone <your fork url> postlite && cd postlite
+git clone https://github.com/muhammedilyasy/postlite.git && cd postlite
 cp .env.example .env
-node bin/postlite.js gen-secrets          # paste SESSION_SECRET and TOKEN_ENC_KEY into .env
-$EDITOR .env                              # PUBLIC_URL (+ optional app credentials; or paste them in Settings → Platform apps)
-node bin/postlite.js set-password         # admin password for the web UI (or use Cloudflare Access, below)
-node bin/postlite.js start                # http://127.0.0.1:4100
+node bin/postlite.js gen-secrets      # copy SESSION_SECRET and TOKEN_ENC_KEY into .env
+$EDITOR .env                          # set PUBLIC_URL
+node bin/postlite.js set-password     # admin password for the web UI
+node bin/postlite.js start            # http://127.0.0.1:4100
 ```
 
-There is no `npm install` step (no dependencies). Put it behind HTTPS (below) — Meta only fetches media from public HTTPS URLs and Instagram requires HTTPS redirect URIs.
+postlite listens on 127.0.0.1. Put it behind HTTPS (`deploy/Caddyfile` or `deploy/nginx.conf`): Meta only fetches media from public HTTPS URLs, and Instagram needs HTTPS redirect URIs. `deploy/postlite.service` is a systemd user unit, and `deploy/backup.sh` takes a consistent snapshot of `data/` while the server runs. Keep `TOKEN_ENC_KEY` with your backups, because stored tokens are encrypted with it.
 
-### Run as a service
+To sign in with Cloudflare Zero Trust Access (email one-time PIN) instead of a password, set `AUTH_MODE=cloudflare-access` and follow [docs/setup/cloudflare-access.md](docs/setup/cloudflare-access.md). postlite verifies the Access token itself and only admits the addresses in `ALLOWED_EMAILS`.
 
-```sh
-mkdir -p ~/.config/systemd/user && cp deploy/postlite.service ~/.config/systemd/user/
-# adjust WorkingDirectory/EnvironmentFile if the checkout is not at ~/apps/postlite
-systemctl --user daemon-reload && systemctl --user enable --now postlite
-loginctl enable-linger "$USER"
-```
+## Deploy to Cloudflare
 
-### Reverse proxy
-
-`deploy/Caddyfile` (automatic HTTPS) or `deploy/nginx.conf`. Both raise the upload size limit and disable buffering for uploads and MCP. postlite itself listens on `127.0.0.1` only.
-
-### Sign-in with Cloudflare Zero Trust Access (optional)
-
-Instead of the admin password, you can put the UI behind Cloudflare Access (free plan, email one-time PIN) and allow only specific
-addresses. postlite validates the Access JWT on every request (signature, `aud`, `iss`, `exp`/`nbf`) and checks `ALLOWED_EMAILS`. It
-refuses to start if access mode is half-configured. `/m/*`, `/api/v1/*`, `/mcp` and `/healthz` stay reachable for platforms
-and agents through Access *Bypass* rules, and postlite still protects them with media tokens and API keys.
-
-```sh
-AUTH_MODE=cloudflare-access
-CF_ACCESS_TEAM_DOMAIN=myteam.cloudflareaccess.com
-CF_ACCESS_AUD=<Application Audience (AUD) tag>
-ALLOWED_EMAILS=you@example.com,partner@example.com
-```
-
-The click-by-click dashboard guide is in [docs/setup/cloudflare-access.md](docs/setup/cloudflare-access.md).
-
-**Every allowed email gets its own isolated workspace** (created on first sign-in): accounts, posts, media, analytics,
-approvals, API keys, webhooks, audit log, settings and platform-app credentials are all per workspace, and nobody can see
-anyone else's data. An API key belongs to the workspace it was created in and only ever sees that workspace (REST, MCP and
-CLI). Each workspace saves its own Meta/Google app keys; `.env` app credentials are the instance-wide fallback. Password
-mode keeps a single owner workspace. Upgrading an instance that ran as one shared workspace: see
-[Workspaces](docs/setup/cloudflare-access.md#workspaces-one-per-email).
-
-### Run on Cloudflare instead
+The button at the top copies the repository to your account and deploys it. To do it by hand:
 
 ```sh
 npm install && npx wrangler login
 npx wrangler r2 bucket create postlite-media
-npm run cf:deploy                                           # deploy + D1 migrations
+npm run cf:deploy                                       # deploys and applies the D1 migrations
 openssl rand -base64 32 | npx wrangler secret put TOKEN_ENC_KEY
 openssl rand -base64 32 | npx wrangler secret put SESSION_SECRET
 ```
 
-Then add a custom domain, the Access app and its Bypass paths, and your platform apps. The step-by-step guide covers all of it, with the free-plan limits cited: [docs/setup/cloudflare-workers.md](docs/setup/cloudflare-workers.md).
+Then add a custom domain, the Access application with its bypass paths, and your platform apps. [docs/setup/cloudflare-workers.md](docs/setup/cloudflare-workers.md) covers each step and the free-plan limits that matter.
 
-### Backups
+Differences from the Node build: posts go out up to a minute after their time (the cron runs every minute), video posters are made in the browser instead of with ffmpeg, and the stdio MCP server and CLI run on your machine and talk to the Worker over HTTPS.
 
-Everything lives in `data/`: `data/postlite.sqlite` + `data/uploads/`. Run `deploy/backup.sh /path/to/backups` (consistent snapshot via `VACUUM INTO`, safe while running) or stop the service and copy `data/`. Keep `TOKEN_ENC_KEY` with your backups — stored OAuth tokens are encrypted with it.
+## Agents and MCP
 
-## Platform setup
+Agents can do everything the web UI does.
 
-postlite publishes through **your own developer apps**. Create each app once, then paste its ID and secret into
-**Settings → Platform apps** in the web UI. Secrets are encrypted with `TOKEN_ENC_KEY`, never shown again (only
-`saved • …last4`), and take effect immediately with no restart. Each card shows the exact redirect URI(s) for
-your `PUBLIC_URL` with copy buttons, the scopes, products and APIs to enable, a checklist and a **Test** button.
-If a platform isn't configured, its **Connect** button on the Accounts page links to that card.
+- **REST**: `https://postlite.example.com/api/v1/…`, with the OpenAPI spec at `/api/v1/openapi.json`.
+- **MCP over HTTP**: `https://postlite.example.com/mcp` with an `Authorization: Bearer <api key>` header.
+- **MCP over stdio**: `node bin/postlite.js mcp`. With `POSTLITE_URL` and `POSTLITE_API_KEY` set, it connects to a remote instance and can upload local files.
+- **CLI**: `node bin/postlite.js posts create --content "Hello" --brand Northwind --next-slot --url https://postlite.example.com --key <api key>`. It talks to the API, so it works the same against Node and Workers instances.
+- **Docs for agents**: [docs/agent-guide.md](docs/agent-guide.md) (served at `/AGENTS.md`) and `/llms.txt`. Configs for Claude Desktop, Claude Code, Cursor and Hermes are in [examples/agents/](examples/agents/).
 
-**Step-by-step guides** (checked against the official Meta and Google docs on 2026-10-28; also served by your instance at `/docs/setup/`):
+Create keys in **Settings → API keys** or with `node bin/postlite.js keys create --name "Claude"`. New keys start in approval mode, so their posts wait for you. Approval-mode keys can't approve posts, raise their own permissions or change app credentials.
 
-- [Setup index + 10-minute quickstart](docs/setup/README.md)
-- [Facebook Pages + Instagram via Facebook Login (Meta app)](docs/setup/facebook-and-instagram.md)
-- [Instagram without a Facebook Page (Instagram Login)](docs/setup/instagram-standalone.md)
-- [YouTube (Google Cloud project + OAuth client)](docs/setup/youtube.md)
-- [X (developer app, OAuth 2.0, pay-per-use credits)](docs/setup/x.md)
-- [LinkedIn (profiles; Company Pages via the Community Management API)](docs/setup/linkedin.md)
-- [Sign-in with Cloudflare Zero Trust Access (email one-time PIN)](docs/setup/cloudflare-access.md)
-- [Run on Cloudflare Workers (Free plan): D1, R2, Cron, Access](docs/setup/cloudflare-workers.md)
+## Configuration
 
-Redirect URIs are always `PUBLIC_URL/oauth/<provider>/callback`:
+Everything is configured with environment variables. [.env.example](.env.example) lists them with a short explanation each. For the Workers build, see [.dev.vars.example](.dev.vars.example) and the `cloudflare.bindings` block in `package.json`. Platform app credentials can be kept in the database instead (Settings → Platform apps).
 
-| App | Redirect URI(s) | Credentials |
-| --- | --- | --- |
-| Meta | `…/oauth/facebook/callback`, `…/oauth/instagram/callback` | App ID / App Secret |
-| Instagram Login | `…/oauth/instagram-standalone/callback` | Instagram app ID / secret (not the Meta App ID) |
-| Google | `…/oauth/youtube/callback` | OAuth Client ID / secret (Web application) |
-| X | `…/oauth/x/callback` | OAuth 2.0 Client ID / Client Secret (Web App, confidential) |
-| LinkedIn | `…/oauth/linkedin/callback`, `…/oauth/linkedin-page/callback` | Client ID / Primary Client Secret |
+More documentation: [docs/](docs/README.md).
 
-**`.env` fallback.** You can still set `META_APP_ID`/`META_APP_SECRET`, `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET` and
-`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `.env`. Values saved in the UI override them; **Clear** returns to `.env`.
-Admin API keys can manage credentials with `list_platform_apps`, `set_platform_app`, `clear_platform_app` and `test_platform_app`
-(REST `/api/v1/platform-apps`, MCP, CLI `call`). On the server, use `node bin/postlite.js apps set google --id …`; it reads the secret from
-a prompt or stdin. Approval-mode keys can't change credentials, and the audit log records changes with the secret redacted.
+## FAQ
 
-Key gotchas (details in the guides):
+**What does it need to run?**
+On Node, about 70 MB of RAM at idle and around 105 MB at peak while uploading a video. On Cloudflare it fits the free plan for personal use (Workers, D1, and R2's 10 GB free storage).
 
-- **Meta:** in *Use cases → Customize*, add every optional permission postlite requests, or the login dialog shows "Invalid Scopes".
-  Development mode is enough for accounts whose owners have a role on the app. App Review + Business Verification is needed only
-  when people without a role connect.
-- **Instagram:** the account must be Business/Creator; for the Facebook Login variant it must be linked to a Page you manage.
-- **Google:** in *Testing* status refresh tokens expire after 7 days. For personal use, publish the app (*In production*) and click through the
-  unverified-app screen. Uploads use their own `videos.insert` bucket (default 100/day); other calls share 10,000 units/day.
-  Google's current `videos.insert` reference says uploads from unverified projects are no longer locked to private. If yours are, request the
-  [API audit](https://support.google.com/youtube/contact/yt_api_form).
-- **X:** every API call costs credits (posting $0.015, a post with a URL $0.20, owned reads $0.001 each at the time of writing). postlite reads metrics for only the last `X_ANALYTICS_RECENT_POSTS` (10) posts per sync.
-- **LinkedIn:** Company Pages, first comments, analytics and refresh tokens all need LinkedIn's approval (Community Management API / partner program). Without it, profiles still publish, and you reconnect every 60 days.
+**What limits should I expect?**
+The platforms set them. YouTube uploads come out of a daily API quota, Instagram allows 100 API-published posts per account in 24 hours, X bills every request, and LinkedIn tokens expire after 60 days unless your app is an approved partner. postlite checks each platform's media and caption rules before scheduling, so a post fails when you write it rather than when it is due.
 
-## Using it from AI agents
+**Can several people share one workspace?**
+No. Each person gets their own workspace, and a page or channel can be connected in only one workspace at a time. There are no roles or shared workspaces yet.
 
-- REST: `https://social.example.com/api/v1/...` — `GET /api/v1/openapi.json` (no auth) for the full spec.
-- MCP: `https://social.example.com/mcp` with `Authorization: Bearer <key>` (Streamable HTTP), or `node bin/postlite.js mcp` (stdio; with `POSTLITE_URL` set it bridges to a remote server and lets the agent upload local files).
-- CLI: `POSTLITE_URL=… POSTLITE_API_KEY=… node bin/postlite.js posts create --content "Hi" --accounts <id> --next-slot` (or `--url … --key …`). This works against Node and Workers instances. `media upload` uses resumable multipart sessions.
-- Docs for agents: [`docs/agent-guide.md`](docs/agent-guide.md) (served at `/AGENTS.md` and `/api/v1/agent-guide.md`) and `/llms.txt` (also `/api/v1/llms.txt`, which stays public behind Cloudflare Access). Client configs: [`examples/agents/`](examples/agents/).
+**Is it tested against the real platform APIs?**
+The test suite runs against local fake servers for every platform and never calls Meta, Google, X or LinkedIn. Try each platform with your own app before you rely on it.
 
-Create keys in **Settings → API keys** or `node bin/postlite.js keys create --name "Claude"`. New keys default to **approval mode**.
-
-## How publishing works
-
-Each post target becomes a job. The scheduler (Node: in-process tick every 15 s; Workers: a Cron Trigger every minute) claims due jobs with an atomic conditional `UPDATE … RETURNING`, then walks a provider state machine — `start → check (poll) → finalize` — persisting each phase result before the next platform call. Irreversible calls (Facebook feed/reel/story publish, Instagram `media_publish`) are marked *in flight* first; if the process dies mid-call, recovery asks the platform (Instagram container status, YouTube upload-session probe) and only fails with "check before retrying" when the platform cannot tell (Facebook). Transient errors (429/5xx/rate limits) retry with exponential backoff (3 attempts by default); permanent errors fail immediately with a readable message; expired/revoked tokens trigger a refresh (YouTube, Instagram Login) or mark the account *needs reconnect*. On boot, overdue posts within `MISSED_GRACE_MINUTES` (default 6 h) publish; older ones are marked *missed* so nothing surprises you days later.
+**Why does Instagram reject my PNG?**
+The Instagram API accepts JPEG images only. postlite tells you before scheduling instead of converting the file.
 
 ## Development
 
 ```sh
-npm test                 # Node: node:test unit + integration against local fake Meta/Google servers
-npm install              # dev dependency for the Workers path only (wrangler)
-npm run test:workers     # Workers: the real Worker in workerd (wrangler dev) with local D1 + R2, cron-driven, same fakes
-CPU_BENCH=1 npm run test:workers   # same scenario, prints the Worker's CPU time per invocation
-node test/fake/server.js --port 4199    # run the fake providers for manual testing (prints env overrides)
+npm test                               # Node tests against the fake providers
+npm install                            # dev dependency (wrangler) for the Workers build only
+npm run test:workers                   # the real Worker in workerd with local D1 and R2
+node test/fake/server.js --port 4199   # fake providers for manual testing
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+## Contributing
 
-## Known limitations
+Bug reports and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first: the project keeps zero runtime dependencies, no build step, and one core for both Node and Workers.
 
-- Real Meta/Google/X/LinkedIn APIs are **not** exercised by the test suite (fake servers only). Verify with your own app credentials before relying on it.
-- Facebook *Login for Business* configurations (`config_id`) are not used; postlite uses the classic `scope` dialog like Postiz.
-- Instagram accepts only JPEG images via the API; postlite validates instead of converting.
-- Image thumbnails (kept after the original is deleted): ffmpeg at cleanup time on Node; otherwise the browser makes a ≤ 480 px JPEG when the image is uploaded or first shown, and the original waits until one exists.
-- Video posters: made with ffmpeg on upload when `FFMPEG_PATH` is set; otherwise (always on Workers) the browser grabs a frame and stores it as the poster (`set_media_poster`).
-- On Workers, posts publish up to ~60 s after their time (1-minute cron), and API-key rate limits are best-effort (per isolate). See the [Workers caveats](docs/setup/cloudflare-workers.md#caveats).
-- One person per workspace: no shared workspaces, roles or workspace switching. A page/channel can be connected in only one workspace at a time.
-- MCP over HTTP returns JSON responses (no server-initiated SSE stream).
+## Notice
 
-## NOTICE
-
-postlite is an independent, clean-room implementation. Its platform behaviour (endpoints, parameters, OAuth scopes, Graph API version, error handling, token refresh and publish flows) was modelled on the public integrations of [Postiz](https://github.com/gitroomhq/postiz-app) (AGPL-3.0) and on the official Meta Graph API / Instagram Platform and Google YouTube Data & Analytics API documentation. No Postiz source code is included. The MCP tool surface took high-level inspiration from TryPost's tool list; no code was copied. postlite is not affiliated with Meta, Google, Postiz or TryPost.
+postlite is an independent implementation. [Postiz](https://github.com/gitroomhq/postiz-app) and the official platform documentation served as behavioural references only; no Postiz code is included. postlite is not affiliated with Meta, Google, X, LinkedIn or Postiz.
 
 ## License
 

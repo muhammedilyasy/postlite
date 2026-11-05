@@ -14,3 +14,10 @@ coverage/
 .cf-assets/
 .wrangler/
 .dev.vars
+# local deps and lockfile: postlite has no runtime dependencies; wrangler is a dev-only tool
+package-lock.json
+*.sqlite-journal
+.env*.local
+uploads-trash*/
+.dev.vars.*
+!.dev.vars.example

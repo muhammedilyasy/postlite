@@ -1,7 +1,32 @@
 {
   "name": "postlite",
   "version": "0.1.0",
-  "description": "Lightweight, Docker-free, self-hosted social media scheduler for YouTube, Instagram and Facebook Pages.",
+  "description": "Self-hosted social media scheduler for YouTube, Facebook Pages, Instagram, LinkedIn and X, with a REST API, MCP server and CLI. Runs as one Node process with SQLite or on Cloudflare's free plan.",
+  "keywords": [
+    "social-media-scheduler",
+    "self-hosted",
+    "scheduler",
+    "youtube",
+    "instagram",
+    "facebook",
+    "linkedin",
+    "twitter",
+    "x",
+    "mcp",
+    "ai-agents",
+    "cloudflare-workers",
+    "sqlite",
+    "d1",
+    "r2"
+  ],
+  "homepage": "https://github.com/muhammedilyasy/postlite#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muhammedilyasy/postlite.git"
+  },
+  "bugs": {
+    "url": "https://github.com/muhammedilyasy/postlite/issues"
+  },
   "license": "MIT",
   "type": "module",
   "bin": {
